@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"clusterctl/internal/logging"
+	"clusterctl/internal/swarm"
 )
 
 // Serve starts the controller TCP server and blocks until the context is
@@ -96,6 +97,7 @@ func handleConn(ctx context.Context, conn net.Conn, store *fileStore, opts Serve
 
 	resp := NodeResponse{
 		SwarmManagerAddr: opts.AdvertiseAddr,
+		SwarmRole:        reg.Role,
 	}
 
 	if !opts.WaitForMinimum {
@@ -104,6 +106,14 @@ func handleConn(ctx context.Context, conn net.Conn, store *fileStore, opts Serve
 		resp.Status = StatusReady
 	} else {
 		resp.Status = StatusWaiting
+	}
+
+	if resp.Status == StatusReady && (reg.Role == "manager" || reg.Role == "worker") {
+		if token, err := swarm.JoinToken(ctx, reg.Role); err != nil {
+			logging.L().Warnw("failed to fetch swarm join token", "role", reg.Role, "err", err)
+		} else {
+			resp.SwarmJoinToken = token
+		}
 	}
 
 	log := logging.L().With(

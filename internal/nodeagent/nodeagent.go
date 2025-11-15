@@ -15,6 +15,8 @@ import (
 	"clusterctl/internal/controller"
 	"clusterctl/internal/ipdetect"
 	"clusterctl/internal/logging"
+	"clusterctl/internal/overlay"
+	"clusterctl/internal/swarm"
 )
 
 type JoinOptions struct {
@@ -62,6 +64,8 @@ func Join(ctx context.Context, opts JoinOptions) error {
 	log.Infow("starting node join")
 
 	backoff := time.Second
+	var lastResp *controller.NodeResponse
+
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -70,13 +74,16 @@ func Join(ctx context.Context, opts JoinOptions) error {
 		resp, err := registerOnce(ctx, opts.MasterAddr, reg)
 		if err != nil {
 			log.Warnw("registration attempt failed", "err", err)
-		} else if resp.Status == controller.StatusReady {
-			log.Infow("controller signalled ready")
-			break
-		} else if resp.Status == controller.StatusWaiting {
-			log.Infow("controller signalled waiting, backing off")
 		} else {
-			return errors.New("nodeagent: unknown status from controller")
+			lastResp = resp
+			if resp.Status == controller.StatusReady {
+				log.Infow("controller signalled ready")
+				break
+			} else if resp.Status == controller.StatusWaiting {
+				log.Infow("controller signalled waiting, backing off")
+			} else {
+				return errors.New("nodeagent: unknown status from controller")
+			}
 		}
 
 		select {
@@ -90,10 +97,24 @@ func Join(ctx context.Context, opts JoinOptions) error {
 		}
 	}
 
-	// TODO: apply overlay, Swarm, and GlusterFS instructions once the
-	// corresponding packages are implemented. These operations must be
-	// idempotent so repeated joins converge cleanly.
-	log.Infow("node join completed (converge steps pending)")
+	if lastResp == nil {
+		return errors.New("nodeagent: no response from controller")
+	}
+
+	if err := overlay.EnsureConnected(ctx, opts.OverlayProvider, opts.OverlayConfig); err != nil {
+		log.Warnw("overlay convergence failed", "err", err)
+		return err
+	}
+
+	if err := convergeSwarm(ctx, opts, lastResp); err != nil {
+		log.Warnw("swarm convergence failed", "err", err)
+		return err
+	}
+
+	// TODO: GlusterFS convergence will be added once the gluster package is
+	// implemented. It must also be idempotent so repeated joins converge
+	// cleanly.
+	log.Infow("node join completed")
 	return nil
 }
 
@@ -155,6 +176,39 @@ func registerOnce(ctx context.Context, master string, reg controller.NodeRegistr
 	}
 	return &resp, nil
 }
+
+func convergeSwarm(ctx context.Context, opts JoinOptions, resp *controller.NodeResponse) error {
+	active, err := swarm.IsActive(ctx)
+	if err != nil {
+		return err
+	}
+	if active {
+		// Already part of a Swarm; assume converged.
+		return nil
+	}
+
+	role := resp.SwarmRole
+	if role == "" {
+		role = opts.Role
+	}
+
+	managerAddr := resp.SwarmManagerAddr
+	if managerAddr == "" {
+		managerAddr = opts.MasterAddr
+	}
+
+	if role == "manager" && resp.SwarmJoinToken == "" {
+		// First manager: initialise a new Swarm on this node.
+		return swarm.Init(ctx, managerAddr)
+	}
+
+	if resp.SwarmJoinToken == "" || managerAddr == "" {
+		return errors.New("nodeagent: missing swarm join token or manager address")
+	}
+
+	return swarm.Join(ctx, resp.SwarmJoinToken, managerAddr)
+}
+
 
 func dockerVersion(ctx context.Context) string {
 	cmd := exec.CommandContext(ctx, "docker", "version", "--format", "{{.Server.Version}}")
