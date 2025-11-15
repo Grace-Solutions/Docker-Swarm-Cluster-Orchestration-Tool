@@ -7,12 +7,17 @@ import (
 	"os/exec"
 	"strings"
 
+	"clusterctl/internal/deps"
 	"clusterctl/internal/logging"
 )
 
 // IsActive reports whether this node is already part of a Swarm cluster.
 // It is implemented in terms of `docker info` and is safe to call repeatedly.
 func IsActive(ctx context.Context) (bool, error) {
+	if err := deps.EnsureDockerWithCompose(ctx); err != nil {
+		return false, err
+	}
+
 	cmd := exec.CommandContext(ctx, "docker", "info", "--format", "{{.Swarm.LocalNodeState}}")
 	out, err := cmd.Output()
 	if err != nil {
@@ -74,6 +79,10 @@ func Join(ctx context.Context, token, managerAddr string) error {
 func JoinToken(ctx context.Context, role string) (string, error) {
 	if role != "manager" && role != "worker" {
 		return "", fmt.Errorf("swarm: invalid role %q", role)
+	}
+
+	if err := deps.EnsureDockerWithCompose(ctx); err != nil {
+		return "", err
 	}
 
 	cmd := exec.CommandContext(ctx, "docker", "swarm", "join-token", "-q", role)

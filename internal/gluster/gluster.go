@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"clusterctl/internal/deps"
 	"clusterctl/internal/logging"
 )
 
@@ -18,6 +19,14 @@ func Ensure(ctx context.Context, volume, mountPoint, brickPath string) error {
 	if volume == "" && mountPoint == "" && brickPath == "" {
 		// Gluster not requested for this node.
 		return nil
+	}
+
+	// Only install Gluster when we actually need to manage a volume or mount.
+	// Brick preparation alone only touches the local filesystem.
+	if volume != "" || mountPoint != "" {
+		if err := deps.EnsureGluster(ctx); err != nil {
+			return err
+		}
 	}
 
 	if brickPath != "" {

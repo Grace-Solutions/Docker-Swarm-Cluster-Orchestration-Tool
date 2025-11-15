@@ -180,7 +180,7 @@ func nodeJoin(ctx context.Context, args []string) {
 	ipOverride := fs.String("ip", "", "override detected IP")
 	hostnameOverride := fs.String("hostname", "", "override detected hostname")
 	overlayProvider := fs.String("overlay-provider", "none", "overlay provider (netbird|tailscale|wireguard|none)")
-	overlayConfig := fs.String("overlay-config", "", "overlay provider configuration file")
+	overlayConfig := fs.String("overlay-config", "", "overlay provider config string (e.g. setup/auth key for netbird/tailscale)")
 	enableGluster := fs.Bool("enable-glusterfs", false, "enable GlusterFS on this node")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
@@ -208,7 +208,7 @@ func nodeReset(ctx context.Context, args []string) {
 	role := fs.String("role", "worker", "node role (manager|worker) for deregistration")
 	hostnameOverride := fs.String("hostname", "", "override detected hostname for deregistration")
 	overlayProvider := fs.String("overlay-provider", "none", "overlay provider (netbird|tailscale|wireguard|none)")
-	overlayConfig := fs.String("overlay-config", "", "overlay provider configuration file")
+	overlayConfig := fs.String("overlay-config", "", "overlay provider config string (e.g. setup/auth key for netbird/tailscale)")
 	glusterMount := fs.String("gluster-mount", defaultStateDir, "GlusterFS mount point to unmount")
 	deregister := fs.Bool("deregister", false, "deregister this node from the controller")
 	if err := fs.Parse(args); err != nil {
