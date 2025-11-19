@@ -97,6 +97,47 @@ func JoinToken(ctx context.Context, role string) (string, error) {
 	return token, nil
 }
 
+
+// Info returns a summary of the local node's Swarm state based on `docker info`.
+// It is safe to call repeatedly and is best-effort only; callers should tolerate
+// errors.
+type Info struct {
+	LocalState string
+	NodeID     string
+	NodeAddr   string
+	Manager    bool
+	ClusterID  string
+}
+
+// Status queries Docker for the local Swarm state.
+func Status(ctx context.Context) (*Info, error) {
+	if err := deps.EnsureDockerWithCompose(ctx); err != nil {
+		return nil, err
+	}
+
+	// Use a pipe-separated format for easy parsing.
+	format := "{{.Swarm.LocalNodeState}}|{{.Swarm.NodeID}}|{{.Swarm.NodeAddr}}|{{.Swarm.ControlAvailable}}|{{.Swarm.Cluster.ID}}"
+	cmd := exec.CommandContext(ctx, "docker", "info", "--format", format)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+
+	parts := strings.Split(strings.TrimSpace(string(out)), "|")
+	if len(parts) != 5 {
+		return nil, fmt.Errorf("swarm: unexpected docker info format: %q", strings.TrimSpace(string(out)))
+	}
+
+	info := &Info{
+		LocalState: parts[0],
+		NodeID:     parts[1],
+		NodeAddr:   parts[2],
+		Manager:    strings.EqualFold(parts[3], "true"),
+		ClusterID:  parts[4],
+	}
+	return info, nil
+}
+
 // Leave leaves the current Swarm cluster. If the node is not part of a Swarm
 // the operation is treated as a no-op.
 func Leave(ctx context.Context, force bool) error {

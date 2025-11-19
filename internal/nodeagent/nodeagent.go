@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -113,6 +114,18 @@ func Join(ctx context.Context, opts JoinOptions) error {
 		return errors.New("nodeagent: no response from controller")
 	}
 
+	log.Infow(fmt.Sprintf(
+		"controller response: status=%s swarmRole=%s managerAddr=%s hasJoinToken=%t glusterEnabled=%t glusterVolume=%s glusterMount=%s glusterBrick=%s",
+		lastResp.Status,
+		lastResp.SwarmRole,
+		lastResp.SwarmManagerAddr,
+		lastResp.SwarmJoinToken != "",
+		lastResp.GlusterEnabled,
+		lastResp.GlusterVolume,
+		lastResp.GlusterMount,
+		lastResp.GlusterBrick,
+	))
+
 	if err := overlay.EnsureConnected(ctx, opts.OverlayProvider, opts.OverlayConfig); err != nil {
 		log.Warnw("overlay convergence failed", "err", err)
 		return err
@@ -128,6 +141,9 @@ func Join(ctx context.Context, opts JoinOptions) error {
 			log.Warnw("gluster convergence failed", "err", err)
 			return err
 		}
+		log.Infow(fmt.Sprintf("gluster converged: volume=%s mount=%s brick=%s", lastResp.GlusterVolume, lastResp.GlusterMount, lastResp.GlusterBrick))
+	} else {
+		log.Infow("gluster not enabled for this node by controller")
 	}
 
 	log.Infow("node join completed")
@@ -263,7 +279,7 @@ func convergeSwarm(ctx context.Context, opts JoinOptions, resp *controller.NodeR
 		return err
 	}
 	if active {
-		// Already part of a Swarm; assume converged.
+		logging.L().Infow("swarm already active on this node; skipping swarm convergence")
 		return nil
 	}
 
@@ -277,16 +293,21 @@ func convergeSwarm(ctx context.Context, opts JoinOptions, resp *controller.NodeR
 		managerAddr = opts.MasterAddr
 	}
 
-	if role == "manager" && resp.SwarmJoinToken == "" {
-		// First manager: initialise a new Swarm on this node.
-		return swarm.Init(ctx, managerAddr)
-	}
-
 	if resp.SwarmJoinToken == "" || managerAddr == "" {
-		return errors.New("nodeagent: missing swarm join token or manager address")
+		return fmt.Errorf("nodeagent: missing swarm join token or manager address for role=%s (managerAddr=%q)", role, managerAddr)
 	}
 
-	return swarm.Join(ctx, resp.SwarmJoinToken, managerAddr)
+	logging.L().Infow(fmt.Sprintf("joining swarm as %s using manager %s and token %s", role, managerAddr, resp.SwarmJoinToken))
+
+	if err := swarm.Join(ctx, resp.SwarmJoinToken, managerAddr); err != nil {
+		return err
+	}
+
+	if info, err := swarm.Status(ctx); err == nil {
+		logging.L().Infow(fmt.Sprintf("swarm info after join: localState=%s nodeID=%s addr=%s manager=%t clusterID=%s", info.LocalState, info.NodeID, info.NodeAddr, info.Manager, info.ClusterID))
+	}
+
+	return nil
 }
 
 
