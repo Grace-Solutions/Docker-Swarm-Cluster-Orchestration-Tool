@@ -11,10 +11,13 @@ import (
 )
 
 // clusterState is the on-disk representation of controller state.
-// It is intentionally minimal for now: we only persist node registrations
-// and derive counts from them on demand.
+// It includes node registrations and cluster-wide GlusterFS configuration.
 type clusterState struct {
-	Nodes []NodeRegistration `json:"nodes"`
+	Nodes          []NodeRegistration `json:"nodes"`
+	GlusterEnabled bool               `json:"glusterEnabled"`
+	GlusterVolume  string             `json:"glusterVolume"`
+	GlusterMount   string             `json:"glusterMount"`
+	GlusterBrick   string             `json:"glusterBrick"`
 }
 
 // fileStore is a simple JSON-backed state store stored under the configured
@@ -119,6 +122,21 @@ func (s *fileStore) reset() (clusterState, error) {
 	defer s.mu.Unlock()
 
 	s.state = clusterState{}
+	if err := s.saveLocked(); err != nil {
+		return clusterState{}, err
+	}
+	return s.state, nil
+}
+
+func (s *fileStore) setGlusterConfig(enabled bool, volume, mount, brick string) (clusterState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.state.GlusterEnabled = enabled
+	s.state.GlusterVolume = volume
+	s.state.GlusterMount = mount
+	s.state.GlusterBrick = brick
+
 	if err := s.saveLocked(); err != nil {
 		return clusterState{}, err
 	}

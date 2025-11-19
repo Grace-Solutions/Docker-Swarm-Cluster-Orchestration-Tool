@@ -3,7 +3,8 @@ package controller
 import (
 	"context"
 	"errors"
-	"os"
+	"fmt"
+	"path/filepath"
 	"time"
 
 	"clusterctl/internal/logging"
@@ -65,25 +66,35 @@ type NodeResponse struct {
 
 // MasterInit prepares a host as the initial Swarm manager and optional GlusterFS brick.
 //
-// For now this ensures that the controller state directory exists and records a
-// structured log entry. Swarm and GlusterFS orchestration are added in
-// subsequent commits.
+// It ensures the controller state directory exists and, when requested, records
+// cluster-wide GlusterFS configuration that will be sent to Gluster-capable
+// nodes as they join.
 func MasterInit(ctx context.Context, opts MasterInitOptions) error {
-	_ = ctx // reserved for future use (shelling out, etc.)
+	_ = ctx // reserved for potential future orchestration work
 
 	if opts.StateDir == "" {
 		return errors.New("controller: state dir must be set")
 	}
 
-	if err := os.MkdirAll(opts.StateDir, 0o700); err != nil {
+	store, err := newFileStore(opts.StateDir)
+	if err != nil {
 		return err
 	}
 
-	logging.L().Infow("master init complete",
-		"stateDir", opts.StateDir,
-		"enableGluster", opts.EnableGluster,
-	)
+	if opts.EnableGluster {
+		volume, mount, brick := deriveGlusterDefaults(opts.StateDir)
+		if _, err := store.setGlusterConfig(true, volume, mount, brick); err != nil {
+			return err
+		}
 
+		logging.L().Infow(fmt.Sprintf(
+			"master init complete with GlusterFS enabled: stateDir=%s volume=%s mount=%s brick=%s",
+			opts.StateDir, volume, mount, brick,
+		))
+		return nil
+	}
+
+	logging.L().Infow(fmt.Sprintf("master init complete: stateDir=%s glusterEnabled=%t", opts.StateDir, false))
 	return nil
 }
 
@@ -108,4 +119,18 @@ func MasterReset(ctx context.Context, opts MasterResetOptions) error {
 
 	logging.L().Infow("master reset complete", "stateDir", opts.StateDir)
 	return nil
+}
+
+func deriveGlusterDefaults(stateDir string) (volume, mount, brick string) {
+	mount = stateDir
+
+	parent := filepath.Dir(stateDir)
+	brick = filepath.Join(parent, "brick")
+
+	volume = filepath.Base(parent)
+	if volume == "" || volume == "." || volume == string(filepath.Separator) {
+		volume = "gv0"
+	}
+
+	return volume, mount, brick
 }

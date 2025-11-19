@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -128,23 +129,37 @@ func handleConn(ctx context.Context, conn net.Conn, store *fileStore, opts Serve
 
 	if action == "register" && resp.Status == StatusReady && (reg.Role == "manager" || reg.Role == "worker") {
 		if token, err := swarm.JoinToken(ctx, reg.Role); err != nil {
-			logging.L().Warnw("failed to fetch swarm join token", "role", reg.Role, "err", err)
+			logging.L().Infow(fmt.Sprintf("failed to fetch swarm join token for role=%s: %v", reg.Role, err))
 		} else {
 			resp.SwarmJoinToken = token
+			logging.L().Infow(fmt.Sprintf("issued swarm join token for role=%s", reg.Role))
 		}
 	}
 
-	log := logging.L().With(
-		"component", "controller",
-		"hostname", reg.Hostname,
-		"role", reg.Role,
-		"ip", reg.IP,
-		"action", action,
-		"managers", managers,
-		"workers", workers,
-		"status", resp.Status,
-	)
-	log.Infow("handled node registration")
+	glusterForNode := false
+	if reg.GlusterCapable && state.GlusterEnabled {
+		resp.GlusterEnabled = true
+		resp.GlusterVolume = state.GlusterVolume
+		resp.GlusterMount = state.GlusterMount
+		resp.GlusterBrick = state.GlusterBrick
+		glusterForNode = true
+	}
+
+	logging.L().Infow(fmt.Sprintf(
+		"handled node registration: hostname=%s role=%s ip=%s action=%s status=%s managers=%d workers=%d glusterClusterEnabled=%t glusterForNode=%t glusterVolume=%s glusterMount=%s glusterBrick=%s",
+		reg.Hostname,
+		reg.Role,
+		reg.IP,
+		action,
+		resp.Status,
+		managers,
+		workers,
+		state.GlusterEnabled,
+		glusterForNode,
+		resp.GlusterVolume,
+		resp.GlusterMount,
+		resp.GlusterBrick,
+	))
 
 	enc := json.NewEncoder(conn)
 	return enc.Encode(&resp)

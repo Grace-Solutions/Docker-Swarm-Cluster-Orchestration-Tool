@@ -27,6 +27,7 @@ const (
 type simpleLogger struct {
 	mu       sync.Mutex
 	minLevel level
+	file     *os.File
 }
 
 // logger is the global logger instance.
@@ -40,7 +41,28 @@ func Init() error {
 	}
 
 	lvl := parseLevel(os.Getenv("CLUSTERCTL_LOG_LEVEL"))
-	logger = &simpleLogger{minLevel: lvl}
+
+	// Default to a local log file so operators can review history even when
+	// stderr is ephemeral. The path can be overridden via CLUSTERCTL_LOG_FILE.
+	logPath := strings.TrimSpace(os.Getenv("CLUSTERCTL_LOG_FILE"))
+	if logPath == "" {
+		logPath = "clusterctl.log"
+	}
+
+	var f *os.File
+	if logPath != "" {
+		file, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			// We can't rely on the logger yet, so emit a best-effort warning
+			// directly to stderr and continue with stderr-only logging.
+			ts := time.Now().UTC().Format(time.RFC3339)
+			fmt.Fprintf(os.Stderr, "[%s] - [WARN] - failed to open log file %s: %v\n", ts, logPath, err)
+		} else {
+			f = file
+		}
+	}
+
+	logger = &simpleLogger{minLevel: lvl, file: f}
 	return nil
 }
 
@@ -68,7 +90,11 @@ func (l *simpleLogger) log(lvl level, name, msg string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	fmt.Fprintf(os.Stderr, "[%s] - [%s] - %s\n", ts, name, msg)
+	line := fmt.Sprintf("[%s] - [%s] - %s\n", ts, name, msg)
+	_, _ = os.Stderr.WriteString(line)
+	if l.file != nil {
+		_, _ = l.file.WriteString(line)
+	}
 }
 
 // Debugw logs a debug message. Extra key/value pairs are ignored.
@@ -105,8 +131,17 @@ func L() *simpleLogger {
 	return logger
 }
 
-// Sync is kept for API compatibility; there is nothing buffered to flush.
+// Sync flushes and closes the log file if one is open.
 func Sync() {
-	// no-op
+	if logger == nil || logger.file == nil {
+		return
+	}
+
+	logger.mu.Lock()
+	defer logger.mu.Unlock()
+
+	_ = logger.file.Sync()
+	_ = logger.file.Close()
+	logger.file = nil
 }
 

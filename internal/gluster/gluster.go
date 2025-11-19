@@ -47,6 +47,7 @@ func Ensure(ctx context.Context, volume, mountPoint, brickPath string) error {
 		}
 	}
 
+	logStatus(ctx, volume, mountPoint)
 	return nil
 }
 
@@ -130,6 +131,38 @@ func ensureMount(ctx context.Context, volume, mountPoint string) error {
 
 	logging.L().Infow("gluster mount ensured", "volume", volume, "mount", mountPoint)
 	return nil
+}
+
+func logStatus(ctx context.Context, volume, mountPoint string) {
+	if volume == "" {
+		return
+	}
+
+	cmd := exec.CommandContext(ctx, "gluster", "volume", "info", volume)
+	out, err := cmd.CombinedOutput()
+	trimmed := strings.TrimSpace(string(out))
+	if err != nil {
+		logging.L().Infow(fmt.Sprintf("gluster volume info failed for %s: %v (output: %s)", volume, err, truncate(trimmed, 400)))
+	} else {
+		logging.L().Infow(fmt.Sprintf("gluster volume info for %s: %s", volume, truncate(trimmed, 400)))
+	}
+
+	if mountPoint == "" {
+		return
+	}
+
+	mounted := isMounted(mountPoint)
+	logging.L().Infow(fmt.Sprintf("gluster mount status: mount=%s mounted=%t", mountPoint, mounted))
+}
+
+func truncate(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	if max <= 3 {
+		return s[:max]
+	}
+	return s[:max-3] + "..."
 }
 
 func isMounted(mountPoint string) bool {
