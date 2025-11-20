@@ -35,7 +35,7 @@ Key internal packages:
 - `internal/deps` – helper functions to ensure Docker, docker-compose,
   Netbird, Tailscale, WireGuard, and GlusterFS are installed.
 - `internal/ipdetect` – IP auto-detection with CGNAT and RFC1918 preference.
-- `internal/logging` – structured logging using zap.
+- `internal/logging` – simple text logger that writes `[utc-timestamp] - [LEVEL] - message` lines to stderr and an optional log file, with level controlled by `CLUSTERCTL_LOG_LEVEL` and file path by `CLUSTERCTL_LOG_FILE`.
 
 ## Quickstart (primary master on Linux)
 
@@ -122,6 +122,24 @@ Commonly used flags:
 
 For full behaviour and field-level semantics, see
 `../GO-IMPLEMENTATION-SPEC.md`.
+
+## Logging and troubleshooting
+
+`clusterctl` logs are plain text lines in the format:
+
+```text
+[2025-01-01T12:00:00Z] - [INFO] - message
+```
+
+- By default, logs go to **stderr** and to a log file named `clusterctl.log` in the
+  current working directory.
+- You can override the log file path via `CLUSTERCTL_LOG_FILE`.
+- You can control the minimum log level via `CLUSTERCTL_LOG_LEVEL`
+  (e.g. `debug`, `info`, `warn`, `error`; default is `info`).
+
+Controller and node logs include detailed Swarm and GlusterFS events so you can
+trace exactly how each node joined, which token was used, and what the current
+GlusterFS volume/mount status is.
 
 ## Linux wrapper scripts
 

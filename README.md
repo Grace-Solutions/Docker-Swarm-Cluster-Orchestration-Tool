@@ -151,6 +151,24 @@ Pre-built binaries for these targets are tracked under `./binaries`.
 - `binaries/README.md` – documentation for the Linux wrapper scripts and
   binaries.
 
+## Logging
+
+`clusterctl` writes plain-text log lines in the format:
+
+```text
+[2025-01-01T12:00:00Z] - [INFO] - message
+```
+
+- Logs are emitted to **stderr** and to a log file named `clusterctl.log` in the
+  current working directory by default.
+- Override the log file path via `CLUSTERCTL_LOG_FILE`.
+- Control the minimum log level via `CLUSTERCTL_LOG_LEVEL`
+  (e.g. `debug`, `info`, `warn`, `error`; default is `info`).
+
+Controller and node logs include detailed Swarm and GlusterFS events after each
+join so you can see which token was used, which Swarm cluster the node joined,
+and the current GlusterFS volume/mount status on that node.
+
 ## Notes
 
 - The Go implementation is idempotent: commands like `node join` and

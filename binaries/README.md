@@ -96,6 +96,28 @@ Example:
    ./clusterctl-linux-amd64 node reset --master 10.0.0.10:7000 --deregister --overlay-provider tailscale
    ```
 
+## Logging
+
+The `clusterctl` binary used by these scripts logs plain text lines in the format:
+
+```text
+[2025-01-01T12:00:00Z] - [INFO] - message
+```
+
+- By default, logs go to **stderr** and to a log file named `clusterctl.log` in the
+  current directory (typically this `binaries/` folder).
+- You can override the log file path via `CLUSTERCTL_LOG_FILE`.
+- You can control the minimum log level via `CLUSTERCTL_LOG_LEVEL`
+  (e.g. `debug`, `info`, `warn`, `error`; default is `info`).
+
+When debugging node joins, run the wrapper script and in another shell:
+
+```bash
+tail -f clusterctl.log
+```
+
+on that host to see detailed Swarm/GlusterFS status as it converges.
+
 For a more detailed system overview, see `../docs/README.md` and the root
 `README.md`.
 
