@@ -32,13 +32,15 @@ type JoinOptions struct {
 }
 
 type ResetOptions struct {
-	MasterAddr       string
-	Role             string
-	HostnameOverride string
-	OverlayProvider  string
-	OverlayConfig    string
-	GlusterMount     string
-	Deregister       bool
+	MasterAddr        string
+	Role              string
+	HostnameOverride  string
+	OverlayProvider   string
+	OverlayConfig     string
+	GlusterMount      string
+	Deregister        bool
+	CleanupOverlay    bool
+	CleanupGlusterfs  bool
 }
 
 
@@ -152,8 +154,10 @@ func Join(ctx context.Context, opts JoinOptions) error {
 
 // Reset implements the node-side behaviour for `clusterctl node reset`.
 //
-// It attempts to tear down overlay connectivity, Gluster mounts, and Swarm
-// membership, and optionally deregisters the node from the controller.
+// By default it leaves overlay connectivity and GlusterFS mounts in place so
+// they can be reused. When the corresponding cleanup flags are set it will
+// also tear down overlay connectivity and GlusterFS mounts, and it always
+// attempts to leave the Swarm and optionally deregister from the controller.
 func Reset(ctx context.Context, opts ResetOptions) error {
 	log := logging.L().With(
 		"component", "nodeagent",
@@ -162,14 +166,22 @@ func Reset(ctx context.Context, opts ResetOptions) error {
 	)
 	log.Infow("starting node reset")
 
-	if err := overlay.Teardown(ctx, opts.OverlayProvider, opts.OverlayConfig); err != nil {
-		log.Warnw("overlay teardown failed", "err", err)
-		return err
+	if opts.CleanupOverlay {
+		if err := overlay.Teardown(ctx, opts.OverlayProvider, opts.OverlayConfig); err != nil {
+			log.Warnw("overlay teardown failed", "err", err)
+			return err
+		}
+	} else {
+		log.Infow("overlay teardown skipped; cleanupOverlay=false")
 	}
 
-	if err := gluster.Teardown(ctx, opts.GlusterMount); err != nil {
-		log.Warnw("gluster teardown failed", "err", err)
-		return err
+	if opts.CleanupGlusterfs {
+		if err := gluster.Teardown(ctx, opts.GlusterMount); err != nil {
+			log.Warnw("gluster teardown failed", "err", err)
+			return err
+		}
+	} else {
+		log.Infow("gluster teardown skipped; cleanupGlusterfs=false")
 	}
 
 	if err := swarm.Leave(ctx, true); err != nil {

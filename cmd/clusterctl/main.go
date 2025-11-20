@@ -247,7 +247,9 @@ func nodeReset(ctx context.Context, args []string) {
 	hostnameOverride := fs.String("hostname", "", "override detected hostname for deregistration")
 	overlayProvider := fs.String("overlay-provider", "none", "overlay provider (netbird|tailscale|wireguard|none)")
 	overlayConfig := fs.String("overlay-config", "", "overlay provider config string (e.g. setup/auth key for netbird/tailscale)")
-	glusterMount := fs.String("gluster-mount", defaultStateDir, "GlusterFS mount point to unmount")
+	cleanupOverlay := fs.Bool("cleanup-overlay", false, "tear down overlay provider on this node")
+	glusterMount := fs.String("gluster-mount", defaultStateDir, "GlusterFS mount point to unmount when --cleanup-glusterfs is set")
+	cleanupGluster := fs.Bool("cleanup-glusterfs", false, "unmount GlusterFS on this node")
 	deregister := fs.Bool("deregister", false, "deregister this node from the controller")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
@@ -266,6 +268,8 @@ func nodeReset(ctx context.Context, args []string) {
 		OverlayConfig:    *overlayConfig,
 		GlusterMount:     *glusterMount,
 		Deregister:       *deregister,
+		CleanupOverlay:   *cleanupOverlay,
+		CleanupGlusterfs: *cleanupGluster,
 	}
 
 	if err := nodeagent.Reset(ctx, opts); err != nil {
