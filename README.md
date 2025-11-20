@@ -29,7 +29,8 @@ optional convenience wrapper scripts for Linux.
 ## Quickstart (primary master on Linux)
 
 On a fresh Linux host that can reach your Netbird/Tailscale/WireGuard network,
-you can get to the binaries and start the primary master controller with:
+you can get to the binaries and start the primary master controller with
+GlusterFS state/brick/mount paths wired up by default:
 
 ```bash
 git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-Service.git && \
@@ -39,12 +40,26 @@ git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-
   clear && \
   ./cluster-master-init.sh \
     --primary-master \
+    --enable-glusterfs \
+    --state-dir /data/GlusterFS/0001/orchestration \
     --listen 0.0.0.0:7000 \
     --advertise-addr <PRIMARY_MANAGER_IP>:2377 \
     --min-managers 1 \
     --min-workers 0 \
     --wait-for-minimum
 ```
+
+One-line version:
+
+```bash
+git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-Service.git && cd ./Docker-Swarm-Cluster-Configuration-Service && chmod -R -v +x ./ && cd ./binaries && clear && ./cluster-master-init.sh --primary-master --enable-glusterfs --state-dir /data/GlusterFS/0001/orchestration --listen 0.0.0.0:7000 --advertise-addr <PRIMARY_MANAGER_IP>:2377 --min-managers 1 --min-workers 0 --wait-for-minimum
+```
+
+With `--enable-glusterfs` and the default `--state-dir`:
+
+- **State dir (controller + orchestration mount):** `/data/GlusterFS/0001/orchestration`
+- **Brick dir (where Gluster bricks live on this node):** `/data/GlusterFS/0001/brick`
+- **Volume name:** `0001` (derived from the parent directory name)
 
 Replace `<PRIMARY_MANAGER_IP>` with the address you want Swarm to use for this
 manager (often the overlay IP).
@@ -67,6 +82,12 @@ git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-
     --enable-glusterfs
 ```
 
+One-line version:
+
+```bash
+git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-Service.git && cd ./Docker-Swarm-Cluster-Configuration-Service && chmod -R -v +x ./ && cd ./binaries && clear && ./cluster-node-join.sh --master <PRIMARY_MANAGER_IP>:7000 --role manager --overlay-provider netbird --overlay-config <NETBIRD_SETUP_KEY> --enable-glusterfs
+```
+
 ### Quickstart: worker node (Linux)
 
 On a Linux host that should run Swarm **worker** tasks:
@@ -83,6 +104,12 @@ git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-
     --overlay-provider netbird \
     --overlay-config <NETBIRD_SETUP_KEY> \
     --enable-glusterfs
+```
+
+One-line version:
+
+```bash
+git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-Service.git && cd ./Docker-Swarm-Cluster-Configuration-Service && chmod -R -v +x ./ && cd ./binaries && clear && ./cluster-node-join.sh --master <PRIMARY_MANAGER_IP>:7000 --role worker --overlay-provider netbird --overlay-config <NETBIRD_SETUP_KEY> --enable-glusterfs
 ```
 
 Replace `<NETBIRD_SETUP_KEY>` with your Netbird setup key (or switch
