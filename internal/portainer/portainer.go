@@ -71,12 +71,14 @@ func deployPortainerAgent(ctx context.Context) error {
 	}
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
-	if output, err := cmd.CombinedOutput(); err != nil {
+	output, err := cmd.CombinedOutput()
+	if err != nil {
 		// If the service already exists (e.g., from a previous run), treat as success.
 		if strings.Contains(string(output), "already exists") || strings.Contains(err.Error(), "already exists") {
 			log.Infow("portainer agent service already exists, skipping creation")
 			return nil
 		}
+		log.Errorw("failed to create portainer agent service", "err", err, "output", string(output), "args", args)
 		return fmt.Errorf("failed to create portainer agent service: %w, output: %s", err, string(output))
 	}
 
@@ -126,12 +128,14 @@ func deployPortainerCE(ctx context.Context) error {
 	}
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
-	if output, err := cmd.CombinedOutput(); err != nil {
+	output, err := cmd.CombinedOutput()
+	if err != nil {
 		// If the service already exists (e.g., from a previous run), treat as success.
 		if strings.Contains(string(output), "already exists") || strings.Contains(err.Error(), "already exists") {
 			log.Infow("portainer service already exists, skipping creation")
 			return nil
 		}
+		log.Errorw("failed to create portainer service", "err", err, "output", string(output), "args", args)
 		return fmt.Errorf("failed to create portainer service: %w, output: %s", err, string(output))
 	}
 

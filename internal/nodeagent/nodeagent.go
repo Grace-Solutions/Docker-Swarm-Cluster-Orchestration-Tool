@@ -549,9 +549,15 @@ func waitForGlusterReady(ctx context.Context, opts JoinOptions) error {
 		resp, err := registerOnce(ctx, opts.MasterAddr, reg)
 		if err != nil {
 			log.Warnw("gluster ready check registration failed", "err", err)
-		} else if resp.GlusterReady {
-			log.Infow("gluster volume is ready")
-			return nil
+		} else {
+			if resp.GlusterReady {
+				log.Infow("gluster volume is ready")
+				return nil
+			}
+			// Log that we're still waiting (only on first check or every 10 seconds to reduce spam).
+			if backoff == time.Second || backoff >= 10*time.Second {
+				log.Infow("waiting for gluster volume to be ready", "backoff", backoff)
+			}
 		}
 
 		select {
