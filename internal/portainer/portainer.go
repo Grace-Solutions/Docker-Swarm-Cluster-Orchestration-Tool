@@ -121,11 +121,11 @@ func deployPortainerCE(ctx context.Context) error {
 		"service", "create",
 		"--name", "portainer",
 		"--replicas", "1",
+		"--constraint", "node.platform.os==linux",
 		"--constraint", "node.role==worker",
 		"--network", "DOCKER-SWARM-INTERNAL",
 		"--network", "DOCKER-SWARM-EXTERNAL",
 		"--publish", "published=9443,target=9443,protocol=tcp",
-		"--publish", "published=9000,target=9000,protocol=tcp",
 		"--publish", "published=8000,target=8000,protocol=tcp",
 		"--mount", fmt.Sprintf("type=bind,src=%s,dst=/data", portainerDataPath),
 		portainerCEImage,
@@ -138,8 +138,8 @@ func deployPortainerCE(ctx context.Context) error {
 		return fmt.Errorf("failed to create portainer service: %w, output: %s", err, string(output))
 	}
 
-	log.Infow(fmt.Sprintf("portainer service created successfully: accessible at https://<any-node-ip>:9443 or http://<any-node-ip>:9000 (routing mesh enabled), data stored at %s", portainerDataPath))
-	log.Infow(fmt.Sprintf("example: https://%s:9443 or http://%s:9000", primaryIPStr, primaryIPStr))
+	log.Infow(fmt.Sprintf("portainer service created successfully: accessible at https://<any-node-ip>:9443 (routing mesh enabled), data stored at %s", portainerDataPath))
+	log.Infow(fmt.Sprintf("example: https://%s:9443", primaryIPStr))
 	return nil
 }
 
