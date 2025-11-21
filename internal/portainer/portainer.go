@@ -3,8 +3,10 @@ package portainer
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"clusterctl/internal/ipdetect"
 	"clusterctl/internal/logging"
@@ -20,13 +22,21 @@ const (
 // This should only be called on a worker node after the swarm is initialized and the controller
 // has assigned this worker to deploy Portainer.
 // It uses the existing Docker Swarm overlay networks (DOCKER-SWARM-INTERNAL and DOCKER-SWARM-EXTERNAL).
-func DeployPortainer(ctx context.Context) error {
+// If glusterEnabled is true, it will wait for the GlusterFS mount to be ready before deploying.
+func DeployPortainer(ctx context.Context, glusterEnabled bool, glusterMount string) error {
 	log := logging.L()
 	log.Infow("deploying Portainer and Portainer Agent to Docker Swarm")
 
 	// Check if we're in a swarm.
 	if err := exec.CommandContext(ctx, "docker", "info", "--format", "{{.Swarm.LocalNodeState}}").Run(); err != nil {
 		return fmt.Errorf("portainer: not in a swarm or docker not available: %w", err)
+	}
+
+	// If GlusterFS is enabled, wait for the mount to be ready before deploying.
+	if glusterEnabled && glusterMount != "" {
+		if err := waitForGlusterMount(ctx, glusterMount); err != nil {
+			return fmt.Errorf("portainer: gluster mount not ready: %w", err)
+		}
 	}
 
 	// Deploy Portainer Agent as a global service.
@@ -128,5 +138,58 @@ func deployPortainerCE(ctx context.Context) error {
 	log.Infow(fmt.Sprintf("portainer service created successfully: accessible at https://<any-node-ip>:9443 (routing mesh enabled), data stored at %s", portainerDataPath))
 	log.Infow(fmt.Sprintf("example: https://%s:9443", primaryIPStr))
 	return nil
+}
+
+// waitForGlusterMount waits for the GlusterFS mount to be ready and accessible.
+// It checks that the mount point exists, is a directory, and is writable.
+// Retries for up to 60 seconds with exponential backoff.
+func waitForGlusterMount(ctx context.Context, mountPath string) error {
+	log := logging.L()
+	log.Infow("waiting for GlusterFS mount to be ready", "mountPath", mountPath)
+
+	maxWait := 60 * time.Second
+	backoff := 2 * time.Second
+	deadline := time.Now().Add(maxWait)
+
+	for {
+		// Check if we've exceeded the deadline.
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for GlusterFS mount at %s", mountPath)
+		}
+
+		// Check if context is cancelled.
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		// Check if mount point exists and is a directory.
+		info, err := os.Stat(mountPath)
+		if err == nil && info.IsDir() {
+			// Try to create a test file to verify write access.
+			testFile := mountPath + "/.portainer-mount-test"
+			if err := os.WriteFile(testFile, []byte("test"), 0o644); err == nil {
+				// Clean up test file.
+				os.Remove(testFile)
+				log.Infow("GlusterFS mount is ready and writable", "mountPath", mountPath)
+				return nil
+			} else {
+				log.Infow("GlusterFS mount exists but not writable yet, retrying", "mountPath", mountPath, "err", err)
+			}
+		} else {
+			log.Infow("GlusterFS mount not ready yet, retrying", "mountPath", mountPath, "err", err)
+		}
+
+		// Wait before retrying.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+
+		// Increase backoff up to 10 seconds.
+		if backoff < 10*time.Second {
+			backoff += 2 * time.Second
+		}
+	}
 }
 

@@ -180,7 +180,7 @@ func Join(ctx context.Context, opts JoinOptions) error {
 		// The controller ensures only one worker gets the deployment job.
 		if lastResp.DeployPortainer {
 			log.Infow("controller assigned this worker to deploy Portainer (GlusterFS is ready)")
-			if err := portainer.DeployPortainer(ctx); err != nil {
+			if err := portainer.DeployPortainer(ctx, true, lastResp.GlusterMount); err != nil {
 				log.Warnw("portainer deployment failed (non-fatal)", "err", err)
 				// Non-fatal; continue.
 			}
@@ -194,7 +194,7 @@ func Join(ctx context.Context, opts JoinOptions) error {
 		// The controller ensures only one worker gets the deployment job.
 		if lastResp.DeployPortainer {
 			log.Infow("controller assigned this worker to deploy Portainer (no GlusterFS)")
-			if err := portainer.DeployPortainer(ctx); err != nil {
+			if err := portainer.DeployPortainer(ctx, false, ""); err != nil {
 				log.Warnw("portainer deployment failed (non-fatal)", "err", err)
 				// Non-fatal; continue.
 			}
