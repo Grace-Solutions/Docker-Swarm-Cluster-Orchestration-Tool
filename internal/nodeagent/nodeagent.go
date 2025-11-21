@@ -32,7 +32,7 @@ type JoinOptions struct {
 	OverlayConfig    string
 	EnableGluster    bool
 	UseIPAddress     bool // If true, use IP address instead of hostname for Swarm/Gluster identity
-	DeployPortainer  bool // If true, deploy Portainer and Portainer Agent (manager nodes only)
+	DeployPortainer  bool // If true, request Portainer deployment (worker nodes only)
 }
 
 type ResetOptions struct {
@@ -63,14 +63,15 @@ func Join(ctx context.Context, opts JoinOptions) error {
 	}
 
 	reg := controller.NodeRegistration{
-		Hostname:       hostname,
-		Role:           opts.Role,
-		IP:             addr,
-		OS:             runtime.GOOS,
-		CPU:            runtime.NumCPU(),
-		MemoryMB:       memoryMB(),
-		DockerVersion:  dockerVersion(ctx),
-		GlusterCapable: opts.EnableGluster,
+		Hostname:        hostname,
+		Role:            opts.Role,
+		IP:              addr,
+		OS:              runtime.GOOS,
+		CPU:             runtime.NumCPU(),
+		MemoryMB:        memoryMB(),
+		DockerVersion:   dockerVersion(ctx),
+		GlusterCapable:  opts.EnableGluster,
+		DeployPortainer: opts.DeployPortainer,
 	}
 
 	// Resolve the address to an IP for logging purposes.
@@ -154,26 +155,30 @@ func Join(ctx context.Context, opts JoinOptions) error {
 			return err
 		}
 
-		// Deploy Portainer if requested (worker nodes only, after GlusterFS is ready).
-		// Portainer runs on workers to avoid consuming manager resources.
-		if opts.DeployPortainer && opts.Role == "worker" {
-			log.Infow("deploying Portainer and Portainer Agent (GlusterFS is ready)")
+		// Deploy Portainer if the controller assigned this worker to deploy it.
+		// The controller ensures only one worker gets the deployment job.
+		if lastResp.DeployPortainer {
+			log.Infow("controller assigned this worker to deploy Portainer (GlusterFS is ready)")
 			if err := portainer.DeployPortainer(ctx); err != nil {
 				log.Warnw("portainer deployment failed (non-fatal)", "err", err)
 				// Non-fatal; continue.
 			}
+		} else if opts.DeployPortainer {
+			log.Infow("portainer deployment requested but another worker was assigned by controller")
 		}
 	} else {
 		log.Infow("gluster not enabled for this node by controller")
 
-		// Deploy Portainer if requested (worker nodes only, no GlusterFS dependency).
-		// Portainer runs on workers to avoid consuming manager resources.
-		if opts.DeployPortainer && opts.Role == "worker" {
-			log.Infow("deploying Portainer and Portainer Agent (no GlusterFS)")
+		// Deploy Portainer if the controller assigned this worker to deploy it.
+		// The controller ensures only one worker gets the deployment job.
+		if lastResp.DeployPortainer {
+			log.Infow("controller assigned this worker to deploy Portainer (no GlusterFS)")
 			if err := portainer.DeployPortainer(ctx); err != nil {
 				log.Warnw("portainer deployment failed (non-fatal)", "err", err)
 				// Non-fatal; continue.
 			}
+		} else if opts.DeployPortainer {
+			log.Infow("portainer deployment requested but another worker was assigned by controller")
 		}
 	}
 

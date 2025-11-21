@@ -237,6 +237,27 @@ func handleConn(ctx context.Context, conn net.Conn, store *fileStore, opts Serve
 		}
 	}
 
+	// Handle Portainer deployment assignment (worker nodes only).
+	if reg.DeployPortainer && reg.Role == "worker" && action == "register" {
+		// Assign Portainer deployer if not yet assigned.
+		if state.PortainerDeployerHostname == "" {
+			if _, err := store.setPortainerDeployer(reg.Hostname); err != nil {
+				logging.L().Warnw("failed to assign portainer deployer", "hostname", reg.Hostname, "err", err)
+			} else {
+				state.PortainerDeployerHostname = reg.Hostname
+				logging.L().Infow("assigned portainer deployer", "hostname", reg.Hostname)
+			}
+		}
+
+		// If this worker is the assigned deployer, tell it to deploy Portainer.
+		if state.PortainerDeployerHostname == reg.Hostname {
+			resp.DeployPortainer = true
+			logging.L().Infow("worker assigned to deploy Portainer", "hostname", reg.Hostname)
+		} else {
+			logging.L().Infow("worker requested Portainer deployment but another worker already claimed it", "hostname", reg.Hostname, "deployer", state.PortainerDeployerHostname)
+		}
+	}
+
 	// Calculate total counts including the primary master for logging.
 	totalManagers := managers + 1 // +1 for primary master
 
@@ -263,7 +284,7 @@ func handleConn(ctx context.Context, conn net.Conn, store *fileStore, opts Serve
 	}
 
 	logging.L().Infow(fmt.Sprintf(
-		"handled node registration: hostname=%s sentAddress=%s resolvedIP=%s role=%s action=%s status=%s managers=%d workers=%d glusterClusterEnabled=%t glusterForNode=%t glusterVolume=%s glusterMount=%s glusterBrick=%s glusterOrchestrator=%t glusterReady=%t",
+		"handled node registration: hostname=%s sentAddress=%s resolvedIP=%s role=%s action=%s status=%s managers=%d workers=%d glusterClusterEnabled=%t glusterForNode=%t glusterVolume=%s glusterMount=%s glusterBrick=%s glusterOrchestrator=%t glusterReady=%t deployPortainer=%t portainerDeployer=%s",
 		reg.Hostname,
 		sentAddress,
 		resolvedIP,
@@ -279,6 +300,8 @@ func handleConn(ctx context.Context, conn net.Conn, store *fileStore, opts Serve
 		resp.GlusterBrick,
 		resp.GlusterOrchestrator,
 		resp.GlusterReady,
+		resp.DeployPortainer,
+		state.PortainerDeployerHostname,
 	))
 
 	enc := json.NewEncoder(conn)

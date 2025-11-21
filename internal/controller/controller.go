@@ -31,15 +31,16 @@ type MasterResetOptions struct {
 }
 
 type NodeRegistration struct {
-	Hostname       string    `json:"hostname"`
-	Role           string    `json:"role"`
-	IP             string    `json:"ip"`
-	OS             string    `json:"os"`
-	CPU            int       `json:"cpu"`
-	MemoryMB       int       `json:"memoryMb"`
-	DockerVersion  string    `json:"dockerVersion"`
-	GlusterCapable bool      `json:"glusterCapable"`
-	Timestamp      time.Time `json:"timestamp"`
+	Hostname        string    `json:"hostname"`
+	Role            string    `json:"role"`
+	IP              string    `json:"ip"`
+	OS              string    `json:"os"`
+	CPU             int       `json:"cpu"`
+	MemoryMB        int       `json:"memoryMb"`
+	DockerVersion   string    `json:"dockerVersion"`
+	GlusterCapable  bool      `json:"glusterCapable"`
+	DeployPortainer bool      `json:"deployPortainer,omitempty"`
+	Timestamp       time.Time `json:"timestamp"`
 	// Action controls how the controller treats this registration. If empty or
 	// "register", the node is upserted into state. If "deregister", the node
 	// is removed from state. If "gluster-ready", the orchestrator signals that
@@ -68,6 +69,7 @@ type NodeResponse struct {
 	GlusterOrchestrator bool               `json:"glusterOrchestrator"`
 	GlusterWorkerNodes  []string           `json:"glusterWorkerNodes,omitempty"`
 	GlusterReady        bool               `json:"glusterReady"`
+	DeployPortainer     bool               `json:"deployPortainer"`
 }
 
 // MasterInit prepares a host as the initial Swarm manager and optional GlusterFS brick.

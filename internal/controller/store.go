@@ -13,13 +13,14 @@ import (
 // clusterState is the on-disk representation of controller state.
 // It includes node registrations and cluster-wide GlusterFS configuration.
 type clusterState struct {
-	Nodes                     []NodeRegistration `json:"nodes"`
-	GlusterEnabled            bool               `json:"glusterEnabled"`
-	GlusterVolume             string             `json:"glusterVolume"`
-	GlusterMount              string             `json:"glusterMount"`
-	GlusterBrick              string             `json:"glusterBrick"`
-	GlusterOrchestratorHostname string           `json:"glusterOrchestratorHostname,omitempty"`
-	GlusterReady              bool               `json:"glusterReady"`
+	Nodes                       []NodeRegistration `json:"nodes"`
+	GlusterEnabled              bool               `json:"glusterEnabled"`
+	GlusterVolume               string             `json:"glusterVolume"`
+	GlusterMount                string             `json:"glusterMount"`
+	GlusterBrick                string             `json:"glusterBrick"`
+	GlusterOrchestratorHostname string             `json:"glusterOrchestratorHostname,omitempty"`
+	GlusterReady                bool               `json:"glusterReady"`
+	PortainerDeployerHostname   string             `json:"portainerDeployerHostname,omitempty"`
 }
 
 // fileStore is a simple JSON-backed state store stored under the configured
@@ -202,6 +203,18 @@ func (s *fileStore) setGlusterReady(ready bool) (clusterState, error) {
 	defer s.mu.Unlock()
 
 	s.state.GlusterReady = ready
+	if err := s.saveLocked(); err != nil {
+		return clusterState{}, err
+	}
+	return s.state, nil
+}
+
+// setPortainerDeployer assigns the Portainer deployer hostname and persists state.
+func (s *fileStore) setPortainerDeployer(hostname string) (clusterState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.state.PortainerDeployerHostname = hostname
 	if err := s.saveLocked(); err != nil {
 		return clusterState{}, err
 	}

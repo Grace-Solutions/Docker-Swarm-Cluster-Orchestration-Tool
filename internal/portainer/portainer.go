@@ -16,56 +16,18 @@ const (
 	portainerDataPath   = "/mnt/GlusterFS/Docker/Swarm/0001/data/Portainer"
 )
 
-// serviceExists checks if a Docker Swarm service with the given name exists.
-func serviceExists(ctx context.Context, serviceName string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "docker", "service", "inspect", serviceName)
-	err := cmd.Run()
-	if err != nil {
-		// If the service doesn't exist, docker service inspect returns an error.
-		// We need to distinguish between "service not found" and other errors.
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			// Exit code 1 typically means service not found.
-			if exitErr.ExitCode() == 1 {
-				return false, nil
-			}
-		}
-		// Some other error occurred.
-		return false, err
-	}
-	// Service exists.
-	return true, nil
-}
-
 // DeployPortainer deploys Portainer Agent as a global service and Portainer CE as a replicated service.
-// This should only be called on a worker node after the swarm is initialized.
+// This should only be called on a worker node after the swarm is initialized and the controller
+// has assigned this worker to deploy Portainer.
 // It uses the existing Docker Swarm overlay networks (DOCKER-SWARM-INTERNAL and DOCKER-SWARM-EXTERNAL).
-// If the services already exist (deployed by another worker), this function will skip deployment gracefully.
 func DeployPortainer(ctx context.Context) error {
 	log := logging.L()
-	log.Infow("checking if Portainer deployment is needed")
+	log.Infow("deploying Portainer and Portainer Agent to Docker Swarm")
 
 	// Check if we're in a swarm.
 	if err := exec.CommandContext(ctx, "docker", "info", "--format", "{{.Swarm.LocalNodeState}}").Run(); err != nil {
 		return fmt.Errorf("portainer: not in a swarm or docker not available: %w", err)
 	}
-
-	// Check if both services already exist (another worker already deployed them).
-	agentExists, err := serviceExists(ctx, "portainer_agent")
-	if err != nil {
-		return fmt.Errorf("portainer: failed to check if agent exists: %w", err)
-	}
-
-	ceExists, err := serviceExists(ctx, "portainer")
-	if err != nil {
-		return fmt.Errorf("portainer: failed to check if portainer CE exists: %w", err)
-	}
-
-	if agentExists && ceExists {
-		log.Infow("portainer services already deployed by another worker, skipping deployment")
-		return nil
-	}
-
-	log.Infow("deploying Portainer and Portainer Agent to Docker Swarm")
 
 	// Deploy Portainer Agent as a global service.
 	if err := deployPortainerAgent(ctx); err != nil {
@@ -84,17 +46,6 @@ func DeployPortainer(ctx context.Context) error {
 // deployPortainerAgent deploys the Portainer Agent as a global service.
 func deployPortainerAgent(ctx context.Context) error {
 	log := logging.L()
-
-	// Check if the service already exists (in case of race condition).
-	exists, err := serviceExists(ctx, "portainer_agent")
-	if err != nil {
-		return fmt.Errorf("failed to check if portainer agent exists: %w", err)
-	}
-	if exists {
-		log.Infow("portainer agent service already exists, skipping deployment")
-		return nil
-	}
-
 	log.Infow("deploying portainer agent as global service")
 
 	// Create the Portainer Agent service.
@@ -111,9 +62,9 @@ func deployPortainerAgent(ctx context.Context) error {
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	if output, err := cmd.CombinedOutput(); err != nil {
-		// Check if the error is because the service already exists (race condition).
+		// If the service already exists (e.g., from a previous run), treat as success.
 		if strings.Contains(string(output), "already exists") || strings.Contains(err.Error(), "already exists") {
-			log.Infow("portainer agent service already exists (race condition), skipping deployment")
+			log.Infow("portainer agent service already exists, skipping creation")
 			return nil
 		}
 		return fmt.Errorf("failed to create portainer agent service: %w, output: %s", err, string(output))
@@ -127,17 +78,6 @@ func deployPortainerAgent(ctx context.Context) error {
 // Runs on worker nodes only.
 func deployPortainerCE(ctx context.Context) error {
 	log := logging.L()
-
-	// Check if the service already exists (in case of race condition).
-	exists, err := serviceExists(ctx, "portainer")
-	if err != nil {
-		return fmt.Errorf("failed to check if portainer CE exists: %w", err)
-	}
-	if exists {
-		log.Infow("portainer service already exists, skipping deployment")
-		return nil
-	}
-
 	log.Infow("deploying portainer CE as replicated service (replica=1, workers only)")
 
 	// Ensure the data directory exists.
@@ -177,9 +117,9 @@ func deployPortainerCE(ctx context.Context) error {
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	if output, err := cmd.CombinedOutput(); err != nil {
-		// Check if the error is because the service already exists (race condition).
+		// If the service already exists (e.g., from a previous run), treat as success.
 		if strings.Contains(string(output), "already exists") || strings.Contains(err.Error(), "already exists") {
-			log.Infow("portainer service already exists (race condition), skipping deployment")
+			log.Infow("portainer service already exists, skipping creation")
 			return nil
 		}
 		return fmt.Errorf("failed to create portainer service: %w, output: %s", err, string(output))
