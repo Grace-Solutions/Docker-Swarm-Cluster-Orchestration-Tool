@@ -115,8 +115,8 @@ func deployPortainerCE(ctx context.Context) error {
 	}
 
 	// Create the Portainer CE service.
-	// Use mode=host to bind ports directly on the worker node (bypasses routing mesh).
-	// With mode=host, ports are only accessible on the specific worker running Portainer.
+	// Use mode=ingress (default) to enable routing mesh - accessible on any node.
+	// This provides automatic failover: if Portainer moves to another worker, clients don't need to change IPs.
 	args := []string{
 		"service", "create",
 		"--name", "portainer",
@@ -124,9 +124,9 @@ func deployPortainerCE(ctx context.Context) error {
 		"--constraint", "node.role==worker",
 		"--network", "DOCKER-SWARM-INTERNAL",
 		"--network", "DOCKER-SWARM-EXTERNAL",
-		"--publish", "published=9443,target=9443,protocol=tcp,mode=host",
-		"--publish", "published=9000,target=9000,protocol=tcp,mode=host",
-		"--publish", "published=8000,target=8000,protocol=tcp,mode=host",
+		"--publish", "published=9443,target=9443,protocol=tcp",
+		"--publish", "published=9000,target=9000,protocol=tcp",
+		"--publish", "published=8000,target=8000,protocol=tcp",
 		"--mount", fmt.Sprintf("type=bind,src=%s,dst=/data", portainerDataPath),
 		portainerCEImage,
 		"-H", "tcp://tasks.portainer_agent:9001",
@@ -138,7 +138,8 @@ func deployPortainerCE(ctx context.Context) error {
 		return fmt.Errorf("failed to create portainer service: %w, output: %s", err, string(output))
 	}
 
-	log.Infow(fmt.Sprintf("portainer service created successfully: accessible at https://%s:9443 or http://%s:9000, data stored at %s", primaryIPStr, primaryIPStr, portainerDataPath))
+	log.Infow(fmt.Sprintf("portainer service created successfully: accessible at https://<any-node-ip>:9443 or http://<any-node-ip>:9000 (routing mesh enabled), data stored at %s", portainerDataPath))
+	log.Infow(fmt.Sprintf("example: https://%s:9443 or http://%s:9000", primaryIPStr, primaryIPStr))
 	return nil
 }
 
