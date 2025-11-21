@@ -198,20 +198,46 @@ func isMounted(mountPoint string) bool {
 
 // PeerProbe adds a peer to the GlusterFS trusted storage pool.
 // It is idempotent: if the peer is already probed, the command succeeds.
+// It retries with exponential backoff if the peer's glusterd daemon is not yet ready.
 func PeerProbe(ctx context.Context, hostname string) error {
-	cmd := exec.CommandContext(ctx, "gluster", "peer", "probe", hostname)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
+	maxRetries := 5
+	backoff := 2 * time.Second
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		cmd := exec.CommandContext(ctx, "gluster", "peer", "probe", hostname)
+		out, err := cmd.CombinedOutput()
 		outStr := strings.TrimSpace(string(out))
-		// "peer probe: success" or "already in peer list" are both OK.
-		if strings.Contains(outStr, "success") || strings.Contains(outStr, "already in peer list") {
-			logging.L().Infow("gluster peer probe succeeded", "hostname", hostname)
+
+		if err == nil || strings.Contains(outStr, "success") || strings.Contains(outStr, "already in peer list") {
+			logging.L().Infow(fmt.Sprintf("gluster peer probe succeeded: hostname=%s attempt=%d", hostname, attempt))
 			return nil
 		}
-		return fmt.Errorf("gluster: peer probe failed for %s: %w (output: %s)", hostname, err, outStr)
+
+		// Check if it's a transient error (daemon not ready yet).
+		if strings.Contains(outStr, "Transport endpoint is not connected") ||
+		   strings.Contains(outStr, "Connection refused") ||
+		   strings.Contains(outStr, "Probe returned with") {
+			if attempt < maxRetries {
+				logging.L().Infow(fmt.Sprintf("gluster peer probe failed (daemon not ready), retrying: hostname=%s attempt=%d/%d backoff=%v",
+					hostname, attempt, maxRetries, backoff))
+
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(backoff):
+				}
+
+				// Exponential backoff: 2s, 4s, 8s, 16s
+				backoff *= 2
+				continue
+			}
+		}
+
+		// Non-retryable error or max retries exceeded.
+		return fmt.Errorf("gluster: peer probe failed for %s after %d attempts: %w (output: %s)", hostname, attempt, err, outStr)
 	}
-	logging.L().Infow("gluster peer probe succeeded", "hostname", hostname)
-	return nil
+
+	return fmt.Errorf("gluster: peer probe failed for %s: max retries exceeded", hostname)
 }
 
 // CreateReplicaVolume creates a replicated GlusterFS volume across multiple bricks.

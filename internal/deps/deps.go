@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"clusterctl/internal/logging"
 )
@@ -233,6 +234,7 @@ func EnsureGluster(ctx context.Context) error {
 
 	// Ensure glusterd daemon is running (idempotent).
 	// Try systemctl first, then fall back to service command.
+	daemonStarted := false
 	if err := exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", "glusterd").Run(); err != nil {
 		// Daemon is not active; try to start it.
 		logging.L().Infow("glusterd daemon not active; attempting to start")
@@ -243,16 +245,30 @@ func EnsureGluster(ctx context.Context) error {
 				logging.L().Warnw("systemctl start glusterd failed", "err", err)
 			} else {
 				logging.L().Infow("glusterd daemon started via systemctl")
-				return nil
+				daemonStarted = true
 			}
 		}
 
-		// Fall back to service command.
-		if err := exec.CommandContext(ctx, "service", "glusterd", "start").Run(); err != nil {
-			logging.L().Warnw("service glusterd start failed", "err", err)
-			// Non-fatal; the daemon might already be running or will be started by another mechanism.
-		} else {
-			logging.L().Infow("glusterd daemon started via service command")
+		// Fall back to service command if systemctl didn't work.
+		if !daemonStarted {
+			if err := exec.CommandContext(ctx, "service", "glusterd", "start").Run(); err != nil {
+				logging.L().Warnw("service glusterd start failed", "err", err)
+				// Non-fatal; the daemon might already be running or will be started by another mechanism.
+			} else {
+				logging.L().Infow("glusterd daemon started via service command")
+				daemonStarted = true
+			}
+		}
+
+		// If we just started the daemon, give it a moment to initialize before returning.
+		// This helps avoid "Transport endpoint is not connected" errors when peer probing immediately after.
+		if daemonStarted {
+			logging.L().Infow("waiting for glusterd daemon to initialize")
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(3 * time.Second):
+			}
 		}
 	}
 
