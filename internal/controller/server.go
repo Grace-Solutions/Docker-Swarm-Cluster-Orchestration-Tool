@@ -209,14 +209,21 @@ func handleConn(ctx context.Context, conn net.Conn, store *fileStore, opts Serve
 			if state.GlusterOrchestratorHostname == reg.Hostname {
 				resp.GlusterOrchestrator = true
 				glusterWorkers := store.getGlusterWorkers()
+
+				// Build detailed log of workers
+				var workerDetails []string
 				for _, w := range glusterWorkers {
 					if w.IP != "" {
 						resp.GlusterWorkerNodes = append(resp.GlusterWorkerNodes, w.IP)
+						workerDetails = append(workerDetails, fmt.Sprintf("hostname=%s ip=%s", w.Hostname, w.IP))
 					} else {
 						logging.L().Warnw(fmt.Sprintf("skipping worker with empty IP: hostname=%s role=%s", w.Hostname, w.Role))
 					}
 				}
-				logging.L().Infow(fmt.Sprintf("orchestrator assigned worker list: count=%d workers=%v", len(resp.GlusterWorkerNodes), resp.GlusterWorkerNodes))
+
+				logging.L().Infow(fmt.Sprintf("orchestrator assigned worker list: count=%d details=[%s]",
+					len(resp.GlusterWorkerNodes),
+					strings.Join(workerDetails, ", ")))
 			}
 
 			glusterForNode = true
