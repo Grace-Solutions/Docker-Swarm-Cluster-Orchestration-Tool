@@ -137,7 +137,7 @@ func masterInit(ctx context.Context, args []string) {
 	// --master value on joining nodes. We prefer overlay/CGNAT/local IPs via the
 	// existing ipdetect logic.
 	if adv, err := ipdetect.DetectPrimary(); err == nil {
-		logging.L().Infow("primary master advertise address", "address", fmt.Sprintf("%s:2377", adv.String()))
+		logging.L().Infow(fmt.Sprintf("primary master advertise address: %s:2377", adv.String()))
 	}
 
 	if err := swarm.EnsureDefaultNetworks(ctx); err != nil {

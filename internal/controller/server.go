@@ -39,7 +39,7 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 		"listen", opts.ListenAddr,
 		"stateDir", opts.StateDir,
 	)
-	log.Infow("controller listening")
+	log.Infow(fmt.Sprintf("controller listening on %s (stateDir=%s)", opts.ListenAddr, opts.StateDir))
 
 	var wg sync.WaitGroup
 
