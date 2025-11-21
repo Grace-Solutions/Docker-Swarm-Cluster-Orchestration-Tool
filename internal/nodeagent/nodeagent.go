@@ -140,7 +140,7 @@ func Join(ctx context.Context, opts JoinOptions) error {
 	}
 
 	if lastResp.GlusterEnabled {
-		if err := convergeGluster(ctx, opts, lastResp, log); err != nil {
+		if err := convergeGluster(ctx, opts, lastResp); err != nil {
 			log.Warnw("gluster convergence failed", "err", err)
 			return err
 		}
@@ -379,7 +379,9 @@ func memoryMB() int {
 	return 0
 }
 
-func convergeGluster(ctx context.Context, opts JoinOptions, resp *controller.NodeResponse, log *logging.Logger) error {
+func convergeGluster(ctx context.Context, opts JoinOptions, resp *controller.NodeResponse) error {
+	log := logging.L()
+
 	if opts.Role == "worker" {
 		// Workers host bricks.
 		if resp.GlusterOrchestrator {
@@ -404,7 +406,7 @@ func convergeGluster(ctx context.Context, opts JoinOptions, resp *controller.Nod
 			}
 
 			// Wait for volume to be ready (poll controller or wait for GlusterReady).
-			if err := waitForGlusterReady(ctx, opts, log); err != nil {
+			if err := waitForGlusterReady(ctx, opts); err != nil {
 				return fmt.Errorf("gluster wait for ready failed: %w", err)
 			}
 
@@ -442,7 +444,8 @@ func convergeGluster(ctx context.Context, opts JoinOptions, resp *controller.Nod
 	return nil
 }
 
-func waitForGlusterReady(ctx context.Context, opts JoinOptions, log *logging.Logger) error {
+func waitForGlusterReady(ctx context.Context, opts JoinOptions) error {
+	log := logging.L()
 	backoff := 2 * time.Second
 	for {
 		if ctx.Err() != nil {
