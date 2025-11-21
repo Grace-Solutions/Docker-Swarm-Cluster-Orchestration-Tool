@@ -162,9 +162,9 @@ func EnsureWireGuard(ctx context.Context) error {
 	return nil
 }
 
-// EnsureGluster ensures the GlusterFS CLI and client components are
-// installed. A best-effort installation is attempted using the system's
-// package manager when possible.
+// EnsureGluster ensures the GlusterFS server and client components are
+// installed. This is for worker nodes that will host bricks.
+// A best-effort installation is attempted using the system's package manager.
 func EnsureGluster(ctx context.Context) error {
 	if _, err := exec.LookPath("gluster"); err == nil {
 		return nil
@@ -223,6 +223,54 @@ func EnsureGluster(ctx context.Context) error {
 			}
 		}
 		return fmt.Errorf("deps: gluster installation did not make 'gluster' available on PATH: %w", err)
+	}
+
+	return nil
+}
+
+// EnsureGlusterClient ensures only the GlusterFS client components are installed.
+// This is for manager nodes that will mount volumes but not host bricks.
+// A best-effort installation is attempted using the system's package manager.
+func EnsureGlusterClient(ctx context.Context) error {
+	// Check if mount.glusterfs is available (the actual client binary).
+	if _, err := exec.LookPath("mount.glusterfs"); err == nil {
+		return nil
+	}
+
+	var (
+		script  string
+		manager string
+	)
+
+	if _, err := exec.LookPath("apt-get"); err == nil {
+		manager = "apt-get"
+		script = "apt-get update && apt-get install -y glusterfs-client"
+	} else if _, err := exec.LookPath("dnf"); err == nil {
+		manager = "dnf"
+		script = "dnf install -y glusterfs-fuse"
+	} else if _, err := exec.LookPath("yum"); err == nil {
+		manager = "yum"
+		script = "yum install -y glusterfs-fuse"
+	} else if _, err := exec.LookPath("zypper"); err == nil {
+		manager = "zypper"
+		script = "zypper --non-interactive install glusterfs-fuse"
+	} else if _, err := exec.LookPath("pacman"); err == nil {
+		manager = "pacman"
+		script = "pacman -Sy --noconfirm glusterfs"
+	} else if _, err := exec.LookPath("apk"); err == nil {
+		manager = "apk"
+		script = "apk add --no-cache glusterfs"
+	} else {
+		return fmt.Errorf("deps: glusterfs client not found and automatic installation is not implemented for this OS; install the GlusterFS client manually")
+	}
+
+	logging.L().Infow("glusterfs client not found; attempting installation via package manager", "manager", manager)
+	if err := runInstallScript(ctx, "glusterfs-client", script); err != nil {
+		return err
+	}
+
+	if _, err := exec.LookPath("mount.glusterfs"); err != nil {
+		return fmt.Errorf("deps: glusterfs client installation did not make 'mount.glusterfs' available on PATH: %w", err)
 	}
 
 	return nil
