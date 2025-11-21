@@ -185,7 +185,8 @@ func handleConn(ctx context.Context, conn net.Conn, store *fileStore, opts Serve
 	}
 
 	glusterForNode := false
-	if reg.GlusterCapable && state.GlusterEnabled && action == "register" {
+	if reg.GlusterCapable && state.GlusterEnabled {
+		// Always populate GlusterFS fields for capable nodes (both register and check-status).
 		resp.GlusterEnabled = true
 		resp.GlusterVolume = state.GlusterVolume
 		resp.GlusterMount = state.GlusterMount
@@ -195,13 +196,16 @@ func handleConn(ctx context.Context, conn net.Conn, store *fileStore, opts Serve
 			// Workers host bricks.
 			resp.GlusterBrick = state.GlusterBrick
 
-			// Assign orchestrator if not yet assigned.
-			if state.GlusterOrchestratorHostname == "" {
-				if _, err := store.setGlusterOrchestrator(reg.Hostname); err != nil {
-					logging.L().Warnw("failed to assign gluster orchestrator", "hostname", reg.Hostname, "err", err)
-				} else {
-					state.GlusterOrchestratorHostname = reg.Hostname
-					logging.L().Infow("assigned gluster orchestrator", "hostname", reg.Hostname)
+			// Only assign orchestrator on initial registration, not on status checks.
+			if action == "register" {
+				// Assign orchestrator if not yet assigned.
+				if state.GlusterOrchestratorHostname == "" {
+					if _, err := store.setGlusterOrchestrator(reg.Hostname); err != nil {
+						logging.L().Warnw("failed to assign gluster orchestrator", "hostname", reg.Hostname, "err", err)
+					} else {
+						state.GlusterOrchestratorHostname = reg.Hostname
+						logging.L().Infow("assigned gluster orchestrator", "hostname", reg.Hostname)
+					}
 				}
 			}
 
@@ -221,9 +225,11 @@ func handleConn(ctx context.Context, conn net.Conn, store *fileStore, opts Serve
 					}
 				}
 
-				logging.L().Infow(fmt.Sprintf("orchestrator assigned worker list: count=%d details=[%s]",
-					len(resp.GlusterWorkerNodes),
-					strings.Join(workerDetails, ", ")))
+				if action == "register" {
+					logging.L().Infow(fmt.Sprintf("orchestrator assigned worker list: count=%d details=[%s]",
+						len(resp.GlusterWorkerNodes),
+						strings.Join(workerDetails, ", ")))
+				}
 			}
 
 			glusterForNode = true
@@ -231,29 +237,36 @@ func handleConn(ctx context.Context, conn net.Conn, store *fileStore, opts Serve
 			// Managers mount only; they must wait for GlusterReady.
 			if !state.GlusterReady {
 				resp.Status = StatusWaiting
-				logging.L().Infow("manager waiting for gluster readiness", "hostname", reg.Hostname)
+				if action == "register" {
+					logging.L().Infow("manager waiting for gluster readiness", "hostname", reg.Hostname)
+				}
 			}
 			glusterForNode = true
 		}
 	}
 
 	// Handle Portainer deployment assignment (worker nodes only).
-	if reg.DeployPortainer && reg.Role == "worker" && action == "register" {
-		// Assign Portainer deployer if not yet assigned.
-		if state.PortainerDeployerHostname == "" {
-			if _, err := store.setPortainerDeployer(reg.Hostname); err != nil {
-				logging.L().Warnw("failed to assign portainer deployer", "hostname", reg.Hostname, "err", err)
-			} else {
-				state.PortainerDeployerHostname = reg.Hostname
-				logging.L().Infow("assigned portainer deployer", "hostname", reg.Hostname)
+	if reg.DeployPortainer && reg.Role == "worker" {
+		// Only assign deployer on initial registration, not on status checks.
+		if action == "register" {
+			// Assign Portainer deployer if not yet assigned.
+			if state.PortainerDeployerHostname == "" {
+				if _, err := store.setPortainerDeployer(reg.Hostname); err != nil {
+					logging.L().Warnw("failed to assign portainer deployer", "hostname", reg.Hostname, "err", err)
+				} else {
+					state.PortainerDeployerHostname = reg.Hostname
+					logging.L().Infow("assigned portainer deployer", "hostname", reg.Hostname)
+				}
 			}
 		}
 
-		// If this worker is the assigned deployer, tell it to deploy Portainer.
+		// Always tell the assigned deployer to deploy (both register and check-status).
 		if state.PortainerDeployerHostname == reg.Hostname {
 			resp.DeployPortainer = true
-			logging.L().Infow("worker assigned to deploy Portainer", "hostname", reg.Hostname)
-		} else {
+			if action == "register" {
+				logging.L().Infow("worker assigned to deploy Portainer", "hostname", reg.Hostname)
+			}
+		} else if action == "register" {
 			logging.L().Infow("worker requested Portainer deployment but another worker already claimed it", "hostname", reg.Hostname, "deployer", state.PortainerDeployerHostname)
 		}
 	}
