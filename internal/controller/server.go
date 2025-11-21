@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -68,7 +69,7 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 			defer wg.Done()
 			defer c.Close()
 			if err := handleConn(ctx, c, store, opts); err != nil {
-				log.Warnw("connection handler error", "remote", c.RemoteAddr().String(), "err", err)
+				log.Warnw(fmt.Sprintf("connection handler error from %s: %v", c.RemoteAddr().String(), err))
 			}
 		}(conn)
 	}
@@ -118,8 +119,14 @@ func handleConn(ctx context.Context, conn net.Conn, store *fileStore, opts Serve
 
 	managers, workers := countRoles(state.Nodes)
 
+	// Ensure SwarmManagerAddr includes port :2377
+	swarmManagerAddr := opts.AdvertiseAddr
+	if swarmManagerAddr != "" && !strings.Contains(swarmManagerAddr, ":") {
+		swarmManagerAddr = swarmManagerAddr + ":2377"
+	}
+
 	resp := NodeResponse{
-		SwarmManagerAddr: opts.AdvertiseAddr,
+		SwarmManagerAddr: swarmManagerAddr,
 		SwarmRole:        reg.Role,
 	}
 
@@ -127,10 +134,16 @@ func handleConn(ctx context.Context, conn net.Conn, store *fileStore, opts Serve
 		resp.Status = StatusReady
 	} else if !opts.WaitForMinimum {
 		resp.Status = StatusReady
-	} else if managers >= opts.MinManagers && workers >= opts.MinWorkers {
-		resp.Status = StatusReady
 	} else {
-		resp.Status = StatusWaiting
+		// MinManagers and MinWorkers count ADDITIONAL nodes beyond the primary master.
+		// The primary master is always a manager but is not counted in state.Nodes.
+		// So we need: (managers + 1) >= opts.MinManagers to account for the primary.
+		totalManagers := managers + 1 // +1 for primary master
+		if totalManagers >= opts.MinManagers && workers >= opts.MinWorkers {
+			resp.Status = StatusReady
+		} else {
+			resp.Status = StatusWaiting
+		}
 	}
 
 	if action == "register" && resp.Status == StatusReady && (reg.Role == "manager" || reg.Role == "worker") {

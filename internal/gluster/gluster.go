@@ -52,13 +52,22 @@ func Ensure(ctx context.Context, volume, mountPoint, brickPath string) error {
 	return nil
 }
 
-// Teardown attempts to unmount the GlusterFS mount on this node. It does not
-// destroy the volume itself; that is a cluster-level operation.
+// Teardown attempts to unmount the GlusterFS mount on this node and remove
+// the fstab entry. It does not destroy the volume itself; that is a
+// cluster-level operation.
 func Teardown(ctx context.Context, mountPoint string) error {
 	if mountPoint == "" {
 		return nil
 	}
+
+	// Remove from fstab first.
+	if err := RemoveFromFstab(mountPoint); err != nil {
+		logging.L().Warnw(fmt.Sprintf("failed to remove fstab entry for %s: %v", mountPoint, err))
+		// Non-fatal; continue with unmount.
+	}
+
 	if !isMounted(mountPoint) {
+		logging.L().Infow(fmt.Sprintf("gluster mount %s not mounted; skipping unmount", mountPoint))
 		return nil
 	}
 
@@ -68,7 +77,7 @@ func Teardown(ctx context.Context, mountPoint string) error {
 		return fmt.Errorf("gluster: umount failed: %w (output: %s)", err, strings.TrimSpace(string(out)))
 	}
 
-	logging.L().Infow("gluster unmounted", "mount", mountPoint)
+	logging.L().Infow(fmt.Sprintf("gluster unmounted: %s", mountPoint))
 	return nil
 }
 
@@ -309,6 +318,55 @@ func AddToFstab(volume, mountPoint string) error {
 	}
 
 	logging.L().Infow("gluster fstab entry added", "volume", volume, "mount", mountPoint)
+	return nil
+}
+
+// RemoveFromFstab idempotently removes a GlusterFS mount entry from /etc/fstab.
+func RemoveFromFstab(mountPoint string) error {
+	const fstabPath = "/etc/fstab"
+
+	// Read existing fstab.
+	data, err := os.ReadFile(fstabPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // No fstab, nothing to remove.
+		}
+		return fmt.Errorf("gluster: failed to read %s: %w", fstabPath, err)
+	}
+
+	content := string(data)
+	lines := strings.Split(content, "\n")
+
+	// Filter out lines matching the mount point.
+	var newLines []string
+	removed := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			newLines = append(newLines, line)
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		if len(fields) >= 2 && fields[1] == mountPoint {
+			// Skip this line (remove it).
+			removed = true
+			continue
+		}
+		newLines = append(newLines, line)
+	}
+
+	if !removed {
+		logging.L().Infow(fmt.Sprintf("gluster fstab entry not found for mount %s; nothing to remove", mountPoint))
+		return nil
+	}
+
+	// Write back the filtered content.
+	newContent := strings.Join(newLines, "\n")
+	if err := os.WriteFile(fstabPath, []byte(newContent), 0o644); err != nil {
+		return fmt.Errorf("gluster: failed to write %s: %w", fstabPath, err)
+	}
+
+	logging.L().Infow(fmt.Sprintf("gluster fstab entry removed for mount %s", mountPoint))
 	return nil
 }
 
