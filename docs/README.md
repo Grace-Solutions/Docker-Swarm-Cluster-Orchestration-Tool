@@ -53,9 +53,9 @@ git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-
   ./cluster-master-init.sh \
     --primary-master \
     --enable-glusterfs \
-    --state-dir /data/GlusterFS/0001/orchestration \
+    --state-dir /mnt/GlusterFS/0001/orchestration \
     --listen 0.0.0.0:7000 \
-    --advertise-addr <PRIMARY_MANAGER_IP>:2377 \
+    --advertise-addr <PRIMARY_MANAGER_ADDR> \
     --min-managers 1 \
     --min-workers 0 \
     --wait-for-minimum
@@ -64,13 +64,13 @@ git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-
 One-line version:
 
 ```bash
-git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-Service.git && cd ./Docker-Swarm-Cluster-Configuration-Service && chmod -R -v +x ./ && cd ./binaries && clear && ./cluster-master-init.sh --primary-master --enable-glusterfs --state-dir /data/GlusterFS/0001/orchestration --listen 0.0.0.0:7000 --advertise-addr <PRIMARY_MANAGER_IP>:2377 --min-managers 1 --min-workers 0 --wait-for-minimum
+git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-Service.git && cd ./Docker-Swarm-Cluster-Configuration-Service && chmod -R -v +x ./ && cd ./binaries && clear && ./cluster-master-init.sh --primary-master --enable-glusterfs --state-dir /mnt/GlusterFS/0001/orchestration --listen 0.0.0.0:7000 --advertise-addr <PRIMARY_MANAGER_ADDR> --min-managers 1 --min-workers 0 --wait-for-minimum
 ```
 
 With `--enable-glusterfs` and the default `--state-dir`:
 
-- **State dir (controller + orchestration mount):** `/data/GlusterFS/0001/orchestration`
-- **Brick dir (where Gluster bricks live on this node):** `/data/GlusterFS/0001/brick`
+- **State dir (controller + orchestration mount):** `/mnt/GlusterFS/0001/orchestration`
+- **Brick dir (where Gluster bricks live on this node):** `/mnt/GlusterFS/0001/brick`
 - **Volume name:** `0001` (derived from the parent directory name)
 
 Replace `<PRIMARY_MANAGER_IP>` with the address you want Swarm to use for this
@@ -140,7 +140,7 @@ Main commands:
 Commonly used flags:
 
 - `--state-dir` – controller state directory
-  (default: `/data/GlusterFS/0001/orchestration`).
+  (default: `/mnt/GlusterFS/0001/orchestration`).
 - `--listen` – controller listen address (default: `0.0.0.0:7000`).
 - `--advertise-addr` – Swarm advertise address for managers.
 - `--overlay-provider` – `netbird`, `tailscale`, `wireguard`, or `none`.

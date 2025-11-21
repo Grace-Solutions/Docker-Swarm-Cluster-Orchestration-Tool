@@ -12,6 +12,14 @@ import (
 	"clusterctl/internal/logging"
 )
 
+// errString makes it easy to log an error value that may be nil.
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
 // Provider represents an overlay connectivity provider (Netbird, Tailscale,
 // WireGuard, or "none"). Implementations must be idempotent: calling
 // EnsureConnected or Teardown multiple times should be safe.
@@ -23,6 +31,94 @@ import (
 type Provider interface {
 	EnsureConnected(ctx context.Context, config string) error
 	Teardown(ctx context.Context, config string) error
+}
+
+// NetbirdHostname returns the FQDN assigned to this node by Netbird, if
+// available, by parsing the output of `netbird status`.
+func NetbirdHostname(ctx context.Context) (string, error) {
+	if _, err := exec.LookPath("netbird"); err != nil {
+		return "", err
+	}
+
+	cmd := exec.CommandContext(ctx, "netbird", "status")
+	cmd.Env = os.Environ()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("overlay: netbird status failed: %w (output: %s)", err, strings.TrimSpace(string(out)))
+	}
+
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "FQDN:") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				fqdn := strings.TrimSpace(parts[1])
+				if fqdn != "" {
+					return fqdn, nil
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("overlay: netbird FQDN not found in status output")
+}
+
+// TailscaleHostname returns the DNSName assigned to this node by Tailscale, if
+// available, by parsing the JSON output of `tailscale status --json`.
+func TailscaleHostname(ctx context.Context) (string, error) {
+	if _, err := exec.LookPath("tailscale"); err != nil {
+		return "", err
+	}
+
+	cmd := exec.CommandContext(ctx, "tailscale", "status", "--json")
+	cmd.Env = os.Environ()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("overlay: tailscale status --json failed: %w (output: %s)", err, strings.TrimSpace(string(out)))
+	}
+
+	// We avoid a full JSON dependency and instead do a minimal search for
+	// '"Self"' then the first '"DNSName"' that follows.
+	text := string(out)
+	selfIdx := strings.Index(text, "\"Self\"")
+	if selfIdx == -1 {
+		return "", fmt.Errorf("overlay: tailscale Self section not found in status output")
+	}
+
+	sub := text[selfIdx:]
+	key := "\"DNSName\""
+	kidx := strings.Index(sub, key)
+	if kidx == -1 {
+		return "", fmt.Errorf("overlay: tailscale DNSName not found in Self section")
+	}
+
+	rest := sub[kidx+len(key):]
+	// Expect something like: : "hostname.example.",
+	colIdx := strings.Index(rest, ":")
+	if colIdx == -1 {
+		return "", fmt.Errorf("overlay: malformed DNSName entry in tailscale status output")
+	}
+
+	rest = rest[colIdx+1:]
+	// Trim spaces and any leading quotes, then read until the next quote.
+	rest = strings.TrimSpace(rest)
+	if !strings.HasPrefix(rest, "\"") {
+		return "", fmt.Errorf("overlay: unexpected tailscale DNSName format")
+	}
+
+	rest = rest[1:]
+	endIdx := strings.Index(rest, "\"")
+	if endIdx == -1 {
+		return "", fmt.Errorf("overlay: unterminated tailscale DNSName value")
+	}
+
+	dnsName := strings.TrimSpace(rest[:endIdx])
+	if dnsName == "" {
+		return "", fmt.Errorf("overlay: empty tailscale DNSName value")
+	}
+
+	return dnsName, nil
 }
 
 // EnsureConnected selects the appropriate provider by name and ensures overlay
@@ -110,7 +206,8 @@ func (p *netbirdProvider) EnsureConnected(ctx context.Context, config string) er
 		return fmt.Errorf("overlay: netbird up failed: %w (output: %s)", err, strings.TrimSpace(string(out)))
 	}
 
-	logging.L().Infow("netbird overlay ensured", "config_provided", config != "")
+	fqdn, herr := NetbirdHostname(ctx)
+	logging.L().Infow("netbird overlay ensured", "config_provided", config != "", "fqdn", fqdn, "hostname_lookup_error", errString(herr))
 	return nil
 }
 
@@ -153,7 +250,8 @@ func (p *tailscaleProvider) EnsureConnected(ctx context.Context, config string) 
 		return fmt.Errorf("overlay: tailscale up failed: %w (output: %s)", err, strings.TrimSpace(string(out)))
 	}
 
-	logging.L().Infow("tailscale overlay ensured", "config_provided", config != "")
+	dnsName, herr := TailscaleHostname(ctx)
+	logging.L().Infow("tailscale overlay ensured", "config_provided", config != "", "dns_name", dnsName, "hostname_lookup_error", errString(herr))
 	return nil
 }
 

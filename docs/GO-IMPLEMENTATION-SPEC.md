@@ -49,7 +49,7 @@ Internal components (Go packages):
 - `logging` – plain-text logs with log levels, writing `[utc-timestamp] - [LEVEL] - message` lines to stderr and an optional log file (`CLUSTERCTL_LOG_FILE`) with level controlled by `CLUSTERCTL_LOG_LEVEL`.
 
 Data store: simple local filesystem under a “state dir” (e.g.
-`/data/GlusterFS/0001/orchestration`) using JSON or BoltDB for durability.
+`/mnt/GlusterFS/0001/orchestration`) using JSON or BoltDB for durability.
 
 ---
 
@@ -82,8 +82,8 @@ Common flags:
 - `--enable-glusterfs` / `--disable-glusterfs`
 
 Master-only:
-- `--state-dir /data/GlusterFS/0001/orchestration`
-- `--advertise-addr <ip>`
+- `--state-dir /mnt/GlusterFS/0001/orchestration`
+- `--advertise-addr <ip or hostname:port>`
 - `--listen 0.0.0.0:7000`
 - `--min-managers N`
 - `--min-workers N`

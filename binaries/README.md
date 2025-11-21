@@ -36,7 +36,7 @@ Initialise the Swarm master node and optional GlusterFS paths.
 
 Example:
 
-- `./cluster-master-init.sh --state-dir /data/GlusterFS/0001/orchestration --enable-glusterfs`
+- `./cluster-master-init.sh --state-dir /mnt/GlusterFS/0001/orchestration --enable-glusterfs`
 
 ### `cluster-master-serve.sh`
 
@@ -48,7 +48,7 @@ Run the controller in listen/serve mode on the master:
 
 Example:
 
-- `./cluster-master-serve.sh --state-dir /data/GlusterFS/0001/orchestration --listen 0.0.0.0:7000 --wait-for-minimum --min-managers 1 --min-workers 1`
+- `./cluster-master-serve.sh --state-dir /mnt/GlusterFS/0001/orchestration --listen 0.0.0.0:7000 --wait-for-minimum --min-managers 1 --min-workers 1`
 
 ### `cluster-node-join.sh`
 
@@ -79,7 +79,7 @@ Example:
    the master with GlusterFS enabled:
 
    ```bash
-   ./cluster-master-init.sh --state-dir /data/GlusterFS/0001/orchestration --enable-glusterfs
+   ./cluster-master-init.sh --state-dir /mnt/GlusterFS/0001/orchestration --enable-glusterfs
    ```
 
 4. Overlay providers like Netbird and Tailscale accept configuration via
@@ -92,7 +92,7 @@ Example:
    invoke `clusterctl` directly:
 
    ```bash
-   ./clusterctl-linux-amd64 master reset --state-dir /data/GlusterFS/0001/orchestration
+   ./clusterctl-linux-amd64 master reset --state-dir /mnt/GlusterFS/0001/orchestration
    ./clusterctl-linux-amd64 node reset --master 10.0.0.10:7000 --deregister --overlay-provider tailscale
    ```
 

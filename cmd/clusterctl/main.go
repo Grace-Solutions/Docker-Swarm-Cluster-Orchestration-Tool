@@ -10,6 +10,7 @@ import (
 
 	"clusterctl/internal/controller"
 	"clusterctl/internal/deps"
+	"clusterctl/internal/ipdetect"
 	"clusterctl/internal/logging"
 	"clusterctl/internal/nodeagent"
 	"clusterctl/internal/swarm"
@@ -17,7 +18,10 @@ import (
 
 const (
 	defaultListenAddr = "0.0.0.0:7000"
-	defaultStateDir   = "/data/GlusterFS/0001/orchestration"
+	// defaultStateDir is the default controller state directory. It also
+	// serves as the default GlusterFS mount point when --enable-glusterfs
+	// is used. We keep this under /mnt for easier consumption by services.
+	defaultStateDir = "/mnt/GlusterFS/0001/orchestration"
 )
 
 func main() {
@@ -127,6 +131,13 @@ func masterInit(ctx context.Context, args []string) {
 	if err := swarm.Init(ctx, *advertise); err != nil {
 		fmt.Fprintf(os.Stderr, "master init (primary-master) swarm init failed: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Detect and log the effective advertise address so it can be reused as the
+	// --master value on joining nodes. We prefer overlay/CGNAT/local IPs via the
+	// existing ipdetect logic.
+	if adv, err := ipdetect.DetectPrimary(); err == nil {
+		logging.L().Infow("primary master advertise address", "address", fmt.Sprintf("%s:2377", adv.String()))
 	}
 
 	if err := swarm.EnsureDefaultNetworks(ctx); err != nil {

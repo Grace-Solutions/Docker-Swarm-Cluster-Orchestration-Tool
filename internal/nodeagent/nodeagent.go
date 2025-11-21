@@ -53,7 +53,7 @@ func Join(ctx context.Context, opts JoinOptions) error {
 		return err
 	}
 
-	ip, hostname, err := detectIdentity(opts)
+	addr, hostname, err := detectIdentity(ctx, opts)
 	if err != nil {
 		return err
 	}
@@ -61,7 +61,7 @@ func Join(ctx context.Context, opts JoinOptions) error {
 	reg := controller.NodeRegistration{
 		Hostname:       hostname,
 		Role:           opts.Role,
-		IP:             ip,
+		IP:             addr,
 		OS:             runtime.GOOS,
 		CPU:            runtime.NumCPU(),
 		MemoryMB:       memoryMB(),
@@ -239,17 +239,12 @@ func validateJoinOptions(opts JoinOptions) error {
 	return nil
 }
 
-func detectIdentity(opts JoinOptions) (ip string, hostname string, err error) {
-	if opts.IPOverride != "" {
-		ip = opts.IPOverride
-	} else {
-		addr, err := ipdetect.DetectPrimary()
-		if err != nil {
-			return "", "", err
-		}
-		ip = addr.String()
-	}
-
+// detectIdentity returns the address (typically an overlay hostname/FQDN or
+// IP) and hostname that should be used when registering the node with the
+// controller. The address is what Swarm/gluster will ultimately use to talk to
+// this node.
+func detectIdentity(ctx context.Context, opts JoinOptions) (addr string, hostname string, err error) {
+	// Hostname first: honour explicit override, otherwise fall back to os.Hostname.
 	if opts.HostnameOverride != "" {
 		hostname = opts.HostnameOverride
 	} else {
@@ -259,7 +254,36 @@ func detectIdentity(opts JoinOptions) (ip string, hostname string, err error) {
 		}
 	}
 
-	return ip, hostname, nil
+	// Address: prefer explicit override, otherwise ask overlay provider (if any)
+	// for a stable hostname/FQDN. If that fails, fall back to the detected
+	// primary IP.
+	if opts.IPOverride != "" {
+		addr = opts.IPOverride
+		return addr, hostname, nil
+	}
+
+	// Try overlay-specific hostname where possible.
+	overlayName := strings.ToLower(strings.TrimSpace(opts.OverlayProvider))
+	switch overlayName {
+	case "netbird":
+		if h, herr := overlay.NetbirdHostname(ctx); herr == nil && h != "" {
+			addr = h
+			return addr, hostname, nil
+		}
+	case "tailscale":
+		if h, herr := overlay.TailscaleHostname(ctx); herr == nil && h != "" {
+			addr = h
+			return addr, hostname, nil
+		}
+	}
+
+	// Fallback: primary IP as before.
+	ip, ierr := ipdetect.DetectPrimary()
+	if ierr != nil {
+		return "", "", ierr
+	}
+	addr = ip.String()
+	return addr, hostname, nil
 }
 
 func registerOnce(ctx context.Context, master string, reg controller.NodeRegistration) (*controller.NodeResponse, error) {
