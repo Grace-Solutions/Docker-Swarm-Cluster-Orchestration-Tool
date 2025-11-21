@@ -177,7 +177,7 @@ func EnsureGluster(ctx context.Context) error {
 
 	if _, err := exec.LookPath("apt-get"); err == nil {
 		manager = "apt-get"
-		script = "apt-get update && apt-get install -y glusterfs-cli glusterfs-client"
+		script = "apt-get update && apt-get install -y glusterfs-server glusterfs-client && systemctl enable --now glusterd || service glusterd start || true"
 	} else if _, err := exec.LookPath("dnf"); err == nil {
 		manager = "dnf"
 		script = "dnf install -y glusterfs glusterfs-fuse"
