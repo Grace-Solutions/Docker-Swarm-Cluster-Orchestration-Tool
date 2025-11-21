@@ -62,6 +62,12 @@ func retryWithBackoff(ctx context.Context, operation string, fn func() error) er
 // controller's instructions. It is designed to be idempotent: repeated calls
 // with the same parameters should converge cleanly.
 func Ensure(ctx context.Context, volume, mountPoint, brickPath string) error {
+	return EnsureWithFailover(ctx, volume, mountPoint, brickPath, nil)
+}
+
+// EnsureWithFailover converges the local GlusterFS state with automatic failover support.
+// backupServers is a list of backup servers to use if the primary (localhost) fails.
+func EnsureWithFailover(ctx context.Context, volume, mountPoint, brickPath string, backupServers []string) error {
 	if volume == "" && mountPoint == "" && brickPath == "" {
 		// Gluster not requested for this node.
 		return nil
@@ -88,8 +94,14 @@ func Ensure(ctx context.Context, volume, mountPoint, brickPath string) error {
 	}
 
 	if mountPoint != "" && volume != "" {
-		if err := ensureMount(ctx, volume, mountPoint); err != nil {
-			return err
+		if len(backupServers) > 0 {
+			if err := ensureMountWithFailover(ctx, "localhost", volume, mountPoint, backupServers); err != nil {
+				return err
+			}
+		} else {
+			if err := ensureMount(ctx, volume, mountPoint); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -169,10 +181,17 @@ func ensureVolume(ctx context.Context, name, brickPath string) error {
 }
 
 func ensureMount(ctx context.Context, volume, mountPoint string) error {
-	return ensureMountFrom(ctx, "localhost", volume, mountPoint)
+	return ensureMountFrom(ctx, "localhost", volume, mountPoint, nil)
 }
 
-func ensureMountFrom(ctx context.Context, hostname, volume, mountPoint string) error {
+// ensureMountWithFailover mounts a GlusterFS volume with automatic failover support.
+// primaryServer is the preferred server to mount from.
+// backupServers is a list of backup servers to use if the primary fails.
+func ensureMountWithFailover(ctx context.Context, primaryServer, volume, mountPoint string, backupServers []string) error {
+	return ensureMountFrom(ctx, primaryServer, volume, mountPoint, backupServers)
+}
+
+func ensureMountFrom(ctx context.Context, hostname, volume, mountPoint string, backupServers []string) error {
 	log := logging.L()
 
 	if isMounted(mountPoint) {
@@ -192,7 +211,16 @@ func ensureMountFrom(ctx context.Context, hostname, volume, mountPoint string) e
 	}
 
 	source := fmt.Sprintf("%s:%s", hostname, volume)
-	log.Infow(fmt.Sprintf("gluster mounting: source=%s mount=%s", source, mountPoint))
+
+	// Build mount options with backup servers for automatic failover.
+	var mountOpts []string
+	if len(backupServers) > 0 {
+		backupList := strings.Join(backupServers, ":")
+		mountOpts = []string{"-o", fmt.Sprintf("backupvolfile-server=%s", backupList)}
+		log.Infow(fmt.Sprintf("gluster mounting with failover: primary=%s backups=%s mount=%s", hostname, backupList, mountPoint))
+	} else {
+		log.Infow(fmt.Sprintf("gluster mounting: source=%s mount=%s", source, mountPoint))
+	}
 
 	// Use retry logic for mounting as it may fail if the volume is still initializing.
 	err := retryWithBackoff(ctx, fmt.Sprintf("mount %s", source), func() error {
@@ -200,7 +228,11 @@ func ensureMountFrom(ctx context.Context, hostname, volume, mountPoint string) e
 			return nil
 		}
 
-		cmd := exec.CommandContext(ctx, "mount", "-t", "glusterfs", source, mountPoint)
+		args := []string{"mount", "-t", "glusterfs"}
+		args = append(args, mountOpts...)
+		args = append(args, source, mountPoint)
+
+		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			log.Warnw(fmt.Sprintf("gluster mount attempt failed: source=%s mount=%s output=%s", source, mountPoint, strings.TrimSpace(string(out))))
@@ -531,6 +563,13 @@ func WaitForVolumeReady(ctx context.Context, name string, timeout time.Duration)
 
 // AddToFstab idempotently adds a GlusterFS mount entry to /etc/fstab.
 func AddToFstab(volume, mountPoint string) error {
+	return AddToFstabWithFailover(volume, mountPoint, "localhost", nil)
+}
+
+// AddToFstabWithFailover adds a GlusterFS mount entry to /etc/fstab with automatic failover support.
+// primaryServer is the preferred server to mount from.
+// backupServers is a list of backup servers to use if the primary fails.
+func AddToFstabWithFailover(volume, mountPoint, primaryServer string, backupServers []string) error {
 	const fstabPath = "/etc/fstab"
 
 	// Read existing fstab.
@@ -542,22 +581,30 @@ func AddToFstab(volume, mountPoint string) error {
 	content := string(data)
 	lines := strings.Split(content, "\n")
 
-	// Check if entry already exists.
-	source := fmt.Sprintf("localhost:%s", volume)
+	// Check if entry already exists for this mount point.
+	source := fmt.Sprintf("%s:%s", primaryServer, volume)
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
 		fields := strings.Fields(trimmed)
-		if len(fields) >= 2 && fields[0] == source && fields[1] == mountPoint {
+		if len(fields) >= 2 && fields[1] == mountPoint {
 			logging.L().Infow("gluster fstab entry already exists", "volume", volume, "mount", mountPoint)
 			return nil
 		}
 	}
 
+	// Build mount options with backup servers for automatic failover.
+	opts := "defaults,_netdev"
+	if len(backupServers) > 0 {
+		backupList := strings.Join(backupServers, ":")
+		opts = fmt.Sprintf("defaults,_netdev,backupvolfile-server=%s", backupList)
+		logging.L().Infow("gluster fstab entry will include failover", "primary", primaryServer, "backups", backupList)
+	}
+
 	// Append new entry.
-	entry := fmt.Sprintf("%s %s glusterfs defaults,_netdev 0 0\n", source, mountPoint)
+	entry := fmt.Sprintf("%s %s glusterfs %s 0 0\n", source, mountPoint, opts)
 	f, err := os.OpenFile(fstabPath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
 	if err != nil {
 		return fmt.Errorf("gluster: failed to open %s for append: %w", fstabPath, err)
@@ -568,7 +615,7 @@ func AddToFstab(volume, mountPoint string) error {
 		return fmt.Errorf("gluster: failed to write to %s: %w", fstabPath, err)
 	}
 
-	logging.L().Infow("gluster fstab entry added", "volume", volume, "mount", mountPoint)
+	logging.L().Infow("gluster fstab entry added", "volume", volume, "mount", mountPoint, "source", source)
 	return nil
 }
 
@@ -754,17 +801,26 @@ func Orchestrate(ctx context.Context, volume, brickPath, mountPoint string, work
 		return fmt.Errorf("gluster: orchestrator volume not ready: %w", err)
 	}
 
-	// Mount locally.
-	if err := ensureMount(ctx, volume, mountPoint); err != nil {
+	// Build backup server list for failover (all workers except self).
+	var backupServers []string
+	for _, wh := range workerHostnames {
+		if wh != selfIdentity && wh != "localhost" {
+			backupServers = append(backupServers, wh)
+		}
+	}
+
+	// Mount locally with failover support.
+	// Use localhost as primary (fastest), with all other workers as backups.
+	if err := ensureMountWithFailover(ctx, "localhost", volume, mountPoint, backupServers); err != nil {
 		return fmt.Errorf("gluster: orchestrator failed to mount: %w", err)
 	}
 
-	// Add to fstab.
-	if err := AddToFstab(volume, mountPoint); err != nil {
+	// Add to fstab with failover support.
+	if err := AddToFstabWithFailover(volume, mountPoint, "localhost", backupServers); err != nil {
 		return fmt.Errorf("gluster: orchestrator failed to add fstab entry: %w", err)
 	}
 
-	logging.L().Infow("gluster orchestration completed successfully", "volume", volume, "mount", mountPoint)
+	logging.L().Infow("gluster orchestration completed successfully", "volume", volume, "mount", mountPoint, "failoverServers", len(backupServers))
 
 	// Print comprehensive cluster status.
 	PrintClusterStatus(ctx, volume, mountPoint)

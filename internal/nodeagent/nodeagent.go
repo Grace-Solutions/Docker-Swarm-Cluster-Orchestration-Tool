@@ -490,15 +490,27 @@ func convergeGluster(ctx context.Context, opts JoinOptions, resp *controller.Nod
 				return fmt.Errorf("gluster wait for ready failed: %w", err)
 			}
 
-			// Mount and add to fstab.
-			if err := gluster.Ensure(ctx, resp.GlusterVolume, resp.GlusterMount, ""); err != nil {
+			// Build backup server list for failover (all workers except self).
+			// We use localhost as primary, with all other workers as backups.
+			var backupServers []string
+			selfIdentity, _, err := detectIdentity(ctx, opts)
+			if err == nil {
+				for _, wh := range resp.GlusterWorkerNodes {
+					if wh != selfIdentity && wh != "localhost" {
+						backupServers = append(backupServers, wh)
+					}
+				}
+			}
+
+			// Mount with failover support and add to fstab.
+			if err := gluster.EnsureWithFailover(ctx, resp.GlusterVolume, resp.GlusterMount, "", backupServers); err != nil {
 				return fmt.Errorf("gluster mount failed: %w", err)
 			}
-			if err := gluster.AddToFstab(resp.GlusterVolume, resp.GlusterMount); err != nil {
+			if err := gluster.AddToFstabWithFailover(resp.GlusterVolume, resp.GlusterMount, "localhost", backupServers); err != nil {
 				return fmt.Errorf("gluster fstab add failed: %w", err)
 			}
 
-			log.Infow("gluster converged on worker", "volume", resp.GlusterVolume, "mount", resp.GlusterMount)
+			log.Infow("gluster converged on worker", "volume", resp.GlusterVolume, "mount", resp.GlusterMount, "failoverServers", len(backupServers))
 		}
 	} else if opts.Role == "manager" {
 		// Managers mount only (no brick).
@@ -510,15 +522,27 @@ func convergeGluster(ctx context.Context, opts JoinOptions, resp *controller.Nod
 			return fmt.Errorf("gluster client install failed: %w", err)
 		}
 
-		// Mount and add to fstab.
-		if err := gluster.Ensure(ctx, resp.GlusterVolume, resp.GlusterMount, ""); err != nil {
+		// Build backup server list for failover (all workers).
+		// Managers don't have bricks, so we use all workers as potential mount sources.
+		var backupServers []string
+		if len(resp.GlusterWorkerNodes) > 1 {
+			// Use first worker as primary, rest as backups.
+			backupServers = resp.GlusterWorkerNodes[1:]
+		}
+		primaryServer := "localhost"
+		if len(resp.GlusterWorkerNodes) > 0 {
+			primaryServer = resp.GlusterWorkerNodes[0]
+		}
+
+		// Mount with failover support and add to fstab.
+		if err := gluster.EnsureWithFailover(ctx, resp.GlusterVolume, resp.GlusterMount, "", backupServers); err != nil {
 			return fmt.Errorf("gluster mount failed: %w", err)
 		}
-		if err := gluster.AddToFstab(resp.GlusterVolume, resp.GlusterMount); err != nil {
+		if err := gluster.AddToFstabWithFailover(resp.GlusterVolume, resp.GlusterMount, primaryServer, backupServers); err != nil {
 			return fmt.Errorf("gluster fstab add failed: %w", err)
 		}
 
-		log.Infow("gluster converged on manager", "volume", resp.GlusterVolume, "mount", resp.GlusterMount)
+		log.Infow("gluster converged on manager", "volume", resp.GlusterVolume, "mount", resp.GlusterMount, "failoverServers", len(backupServers))
 	}
 
 	return nil
