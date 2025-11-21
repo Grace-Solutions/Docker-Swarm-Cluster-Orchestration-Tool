@@ -42,7 +42,6 @@ git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-
     --primary-master \
     --enable-glusterfs \
     --listen 0.0.0.0:7000 \
-    --advertise-addr <PRIMARY_MANAGER_ADDR> \
     --min-managers 3 \
     --min-workers 6 \
     --wait-for-minimum
@@ -51,17 +50,16 @@ git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-
 One-line version:
 
 ```bash
-git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-Service.git && cd ./Docker-Swarm-Cluster-Configuration-Service && chmod -R -v +x ./ && cd ./binaries && clear && ./cluster-master-init.sh --primary-master --enable-glusterfs --listen 0.0.0.0:7000 --advertise-addr <PRIMARY_MANAGER_ADDR> --min-managers 3 --min-workers 6 --wait-for-minimum
+git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-Service.git && cd ./Docker-Swarm-Cluster-Configuration-Service && chmod -R -v +x ./ && cd ./binaries && clear && ./cluster-master-init.sh --primary-master --enable-glusterfs --listen 0.0.0.0:7000 --min-managers 3 --min-workers 6 --wait-for-minimum
 ```
 
 With `--enable-glusterfs` and the default `--state-dir`:
 
-- **State dir (controller + data mount):** `/mnt/GlusterFS/0001/data`
-- **Brick dir (where Gluster bricks live on this node):** `/mnt/GlusterFS/0001/brick`
+- **State dir (controller + data mount):** `/mnt/GlusterFS/Docker/Swarm/0001/data`
+- **Brick dir (where Gluster bricks live on worker nodes):** `/mnt/GlusterFS/Docker/Swarm/0001/brick`
 - **Volume name:** `0001` (derived from the parent directory name)
 
-Replace `<PRIMARY_MANAGER_IP>` with the address you want Swarm to use for this
-manager (often the overlay IP).
+The advertise address is automatically detected using IP priority: overlay (CGNAT) > private (RFC1918) > other non-loopback > loopback.
 
 ### Quickstart: additional manager node (Linux)
 
@@ -77,14 +75,13 @@ git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-
     --master <PRIMARY_MANAGER_IP>:7000 \
     --role manager \
     --overlay-provider netbird \
-    --overlay-config <NETBIRD_SETUP_KEY> \
-    --enable-glusterfs
+    --overlay-config <NETBIRD_SETUP_KEY>
 ```
 
 One-line version:
 
 ```bash
-git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-Service.git && cd ./Docker-Swarm-Cluster-Configuration-Service && chmod -R -v +x ./ && cd ./binaries && clear && ./cluster-node-join.sh --master <PRIMARY_MANAGER_IP>:7000 --role manager --overlay-provider netbird --overlay-config <NETBIRD_SETUP_KEY> --enable-glusterfs
+git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-Service.git && cd ./Docker-Swarm-Cluster-Configuration-Service && chmod -R -v +x ./ && cd ./binaries && clear && ./cluster-node-join.sh --master <PRIMARY_MANAGER_IP>:7000 --role manager --overlay-provider netbird --overlay-config <NETBIRD_SETUP_KEY>
 ```
 
 ### Quickstart: worker node (Linux)
@@ -102,17 +99,20 @@ git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-
     --role worker \
     --overlay-provider netbird \
     --overlay-config <NETBIRD_SETUP_KEY> \
-    --enable-glusterfs
+    --enable-glusterfs \
+    --deploy-portainer
 ```
 
 One-line version:
 
 ```bash
-git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-Service.git && cd ./Docker-Swarm-Cluster-Configuration-Service && chmod -R -v +x ./ && cd ./binaries && clear && ./cluster-node-join.sh --master <PRIMARY_MANAGER_IP>:7000 --role worker --overlay-provider netbird --overlay-config <NETBIRD_SETUP_KEY> --enable-glusterfs
+git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-Service.git && cd ./Docker-Swarm-Cluster-Configuration-Service && chmod -R -v +x ./ && cd ./binaries && clear && ./cluster-node-join.sh --master <PRIMARY_MANAGER_IP>:7000 --role worker --overlay-provider netbird --overlay-config <NETBIRD_SETUP_KEY> --enable-glusterfs --deploy-portainer
 ```
 
 Replace `<NETBIRD_SETUP_KEY>` with your Netbird setup key (or switch
 `--overlay-provider` / `--overlay-config` to match your chosen overlay).
+
+**Note**: The `--deploy-portainer` flag deploys Portainer CE and Portainer Agent as Docker Swarm services. Portainer will be accessible at `https://<any-node-ip>:9443` via the routing mesh. Only specify this flag on **one worker node** to avoid duplicate deployments.
 
 ## CLI overview
 

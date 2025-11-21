@@ -58,9 +58,19 @@ Join a node/client to the cluster:
 - Executes:
   - `clusterctl node join "$@"`
 
-Example:
+Examples:
 
-- `./cluster-node-join.sh --master 10.0.0.10:7000 --role worker --overlay-provider netbird --overlay-config YOUR_NETBIRD_SETUP_KEY --enable-glusterfs`
+- Manager node:
+  ```bash
+  ./cluster-node-join.sh --master 10.0.0.10:7000 --role manager --overlay-provider netbird --overlay-config YOUR_NETBIRD_SETUP_KEY
+  ```
+
+- Worker node with GlusterFS and Portainer:
+  ```bash
+  ./cluster-node-join.sh --master 10.0.0.10:7000 --role worker --overlay-provider netbird --overlay-config YOUR_NETBIRD_SETUP_KEY --enable-glusterfs --deploy-portainer
+  ```
+
+**Note**: The `--deploy-portainer` flag deploys Portainer CE and Portainer Agent. Only use this on **one worker node** to avoid duplicate deployments. Portainer will be accessible at `https://<any-node-ip>:9443`.
 
 ## Usage notes
 
@@ -79,20 +89,22 @@ Example:
    the master with GlusterFS enabled:
 
    ```bash
-   ./cluster-master-init.sh --enable-glusterfs
+   ./cluster-master-init.sh --primary-master --enable-glusterfs --listen 0.0.0.0:7000 --min-managers 3 --min-workers 6 --wait-for-minimum
    ```
 
-4. Overlay providers like Netbird and Tailscale accept configuration via
+   The advertise address is automatically detected using IP priority: overlay (CGNAT) > private (RFC1918) > other non-loopback > loopback.
+
+3. Overlay providers like Netbird and Tailscale accept configuration via
    environment variables, e.g. `NB_SETUP_KEY` and `TS_AUTHKEY`. The Go
    implementation already maps `--overlay-config` into these env vars for the
    underlying CLI.
 
-5. The scripts themselves are thin wrappers; **all logic lives in the Go
+4. The scripts themselves are thin wrappers; **all logic lives in the Go
    binary**. For advanced scenarios (e.g. Swarm reset, node deregistration),
    invoke `clusterctl` directly:
 
    ```bash
-   ./clusterctl-linux-amd64 master reset --state-dir /mnt/GlusterFS/0001/orchestration
+   ./clusterctl-linux-amd64 master reset --state-dir /mnt/GlusterFS/Docker/Swarm/0001/data
    ./clusterctl-linux-amd64 node reset --master 10.0.0.10:7000 --deregister --overlay-provider tailscale
    ```
 
