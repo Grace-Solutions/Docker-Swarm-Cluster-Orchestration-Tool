@@ -240,16 +240,32 @@ func handleConn(ctx context.Context, conn net.Conn, store *fileStore, opts Serve
 	// Calculate total counts including the primary master for logging.
 	totalManagers := managers + 1 // +1 for primary master
 
-	// Resolve the address to an IP for logging purposes.
+	// For logging: if this is a check-status action, the incoming reg has minimal fields.
+	// Look up the stored registration to get the actual IP address.
+	sentAddress := reg.IP
 	resolvedIP := reg.IP
-	if ips, err := net.LookupIP(reg.IP); err == nil && len(ips) > 0 {
-		resolvedIP = ips[0].String()
+	if action == "check-status" {
+		// Find the stored registration for this node.
+		for _, n := range state.Nodes {
+			if n.Hostname == reg.Hostname && n.Role == reg.Role {
+				sentAddress = n.IP
+				resolvedIP = n.IP
+				break
+			}
+		}
+	}
+
+	// Resolve the address to an IP for logging purposes.
+	if sentAddress != "" {
+		if ips, err := net.LookupIP(sentAddress); err == nil && len(ips) > 0 {
+			resolvedIP = ips[0].String()
+		}
 	}
 
 	logging.L().Infow(fmt.Sprintf(
 		"handled node registration: hostname=%s sentAddress=%s resolvedIP=%s role=%s action=%s status=%s managers=%d workers=%d glusterClusterEnabled=%t glusterForNode=%t glusterVolume=%s glusterMount=%s glusterBrick=%s glusterOrchestrator=%t glusterReady=%t",
 		reg.Hostname,
-		reg.IP,
+		sentAddress,
 		resolvedIP,
 		reg.Role,
 		action,
