@@ -173,16 +173,26 @@ func ensureMount(ctx context.Context, volume, mountPoint string) error {
 }
 
 func ensureMountFrom(ctx context.Context, hostname, volume, mountPoint string) error {
+	log := logging.L()
+
 	if isMounted(mountPoint) {
-		logging.L().Infow(fmt.Sprintf("gluster already mounted: mount=%s", mountPoint))
+		log.Infow(fmt.Sprintf("gluster already mounted: mount=%s", mountPoint))
+		// Verify mount is actually working by checking if we can stat it.
+		if info, err := os.Stat(mountPoint); err == nil && info.IsDir() {
+			log.Infow(fmt.Sprintf("gluster mount verified accessible: mount=%s", mountPoint))
+		} else {
+			log.Warnw(fmt.Sprintf("gluster mount point exists but not accessible: mount=%s err=%v", mountPoint, err))
+		}
 		return nil
 	}
 
+	log.Infow(fmt.Sprintf("gluster mount not detected, creating mount point: mount=%s", mountPoint))
 	if err := os.MkdirAll(mountPoint, 0o755); err != nil {
-		return err
+		return fmt.Errorf("failed to create mount point %s: %w", mountPoint, err)
 	}
 
 	source := fmt.Sprintf("%s:%s", hostname, volume)
+	log.Infow(fmt.Sprintf("gluster mounting: source=%s mount=%s", source, mountPoint))
 
 	// Use retry logic for mounting as it may fail if the volume is still initializing.
 	err := retryWithBackoff(ctx, fmt.Sprintf("mount %s", source), func() error {
@@ -193,8 +203,10 @@ func ensureMountFrom(ctx context.Context, hostname, volume, mountPoint string) e
 		cmd := exec.CommandContext(ctx, "mount", "-t", "glusterfs", source, mountPoint)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
+			log.Warnw(fmt.Sprintf("gluster mount attempt failed: source=%s mount=%s output=%s", source, mountPoint, strings.TrimSpace(string(out))))
 			return fmt.Errorf("mount failed: %w (output: %s)", err, strings.TrimSpace(string(out)))
 		}
+		log.Infow(fmt.Sprintf("gluster mount command succeeded: source=%s mount=%s", source, mountPoint))
 		return nil
 	})
 
@@ -202,7 +214,12 @@ func ensureMountFrom(ctx context.Context, hostname, volume, mountPoint string) e
 		return fmt.Errorf("gluster: %w", err)
 	}
 
-	logging.L().Infow(fmt.Sprintf("gluster mount ensured: source=%s mount=%s", source, mountPoint))
+	// Verify the mount is actually working.
+	if !isMounted(mountPoint) {
+		return fmt.Errorf("gluster: mount command succeeded but mount point %s is not showing as mounted", mountPoint)
+	}
+
+	log.Infow(fmt.Sprintf("gluster mount ensured and verified: source=%s mount=%s", source, mountPoint))
 	return nil
 }
 
@@ -224,8 +241,28 @@ func logStatus(ctx context.Context, volume, mountPoint string) {
 		return
 	}
 
+	log := logging.L()
 	mounted := isMounted(mountPoint)
-	logging.L().Infow(fmt.Sprintf("gluster mount status: mount=%s mounted=%t", mountPoint, mounted))
+	if mounted {
+		log.Infow(fmt.Sprintf("gluster mount status: MOUNTED at %s", mountPoint))
+
+		// Show what's in the mount.
+		if entries, err := os.ReadDir(mountPoint); err == nil {
+			var names []string
+			for _, e := range entries {
+				names = append(names, e.Name())
+			}
+			if len(names) > 0 {
+				log.Infow(fmt.Sprintf("gluster mount contents: %v", names))
+			} else {
+				log.Infow(fmt.Sprintf("gluster mount is empty (this is normal for new volumes)"))
+			}
+		} else {
+			log.Warnw(fmt.Sprintf("gluster mount exists but cannot read contents: %v", err))
+		}
+	} else {
+		log.Warnw(fmt.Sprintf("gluster mount status: NOT MOUNTED at %s", mountPoint))
+	}
 }
 
 func truncate(s string, max int) string {

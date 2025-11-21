@@ -1,5 +1,3 @@
-version: '3.8'
-
 # Portainer Standalone (Non-Swarm) Deployment
 # Deploy with: docker-compose -f portainer-compose.yml up -d
 #

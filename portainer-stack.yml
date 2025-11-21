@@ -1,5 +1,3 @@
-version: '3.8'
-
 # Portainer Stack for Docker Swarm
 # Deploy with: docker stack deploy -c portainer-stack.yml portainer
 #
