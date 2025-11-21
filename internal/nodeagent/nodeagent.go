@@ -149,6 +149,13 @@ func Join(ctx context.Context, opts JoinOptions) error {
 		return err
 	}
 
+	// Only proceed with GlusterFS and Portainer if the controller says we're ready.
+	// Managers may get StatusWaiting if GlusterFS is not ready yet.
+	if lastResp.Status == controller.StatusWaiting {
+		log.Infow("controller says to wait (GlusterFS not ready yet); node join will retry")
+		return nil
+	}
+
 	if lastResp.GlusterEnabled {
 		if err := convergeGluster(ctx, opts, lastResp); err != nil {
 			log.Warnw("gluster convergence failed", "err", err)
