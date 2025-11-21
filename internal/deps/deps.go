@@ -163,66 +163,97 @@ func EnsureWireGuard(ctx context.Context) error {
 }
 
 // EnsureGluster ensures the GlusterFS server and client components are
-// installed. This is for worker nodes that will host bricks.
+// installed and the glusterd daemon is running. This is for worker nodes that will host bricks.
 // A best-effort installation is attempted using the system's package manager.
 func EnsureGluster(ctx context.Context) error {
-	if _, err := exec.LookPath("gluster"); err == nil {
-		return nil
-	}
-
-	var (
-		script  string
-		manager string
-	)
-
-	if _, err := exec.LookPath("apt-get"); err == nil {
-		manager = "apt-get"
-		script = "apt-get update && apt-get install -y glusterfs-server glusterfs-client && systemctl enable --now glusterd || service glusterd start || true"
-	} else if _, err := exec.LookPath("dnf"); err == nil {
-		manager = "dnf"
-		script = "dnf install -y glusterfs glusterfs-fuse"
-	} else if _, err := exec.LookPath("yum"); err == nil {
-		manager = "yum"
-		script = "yum install -y glusterfs glusterfs-fuse"
-	} else if _, err := exec.LookPath("zypper"); err == nil {
-		manager = "zypper"
-		script = "zypper --non-interactive install glusterfs glusterfs-fuse"
-	} else if _, err := exec.LookPath("pacman"); err == nil {
-		manager = "pacman"
-		script = "pacman -Sy --noconfirm glusterfs"
-	} else if _, err := exec.LookPath("apk"); err == nil {
-		manager = "apk"
-		script = "apk add --no-cache glusterfs"
-	} else {
-		return fmt.Errorf("deps: gluster CLI not found and automatic installation is not implemented for this OS; install the GlusterFS client manually")
-	}
-
-	logging.L().Infow("gluster CLI not found; attempting installation via package manager", "manager", manager)
-	if err := runInstallScript(ctx, "gluster", script); err != nil {
-		return err
-	}
-
+	// Check if gluster CLI is available.
+	needsInstall := false
 	if _, err := exec.LookPath("gluster"); err != nil {
-		// On some systems the Gluster CLI lives in sbin directories that are not
-		// always present in PATH for non-login shells. As a best-effort, search
-		// a few common locations and, if found, append them to PATH so subsequent
-		// commands can locate `gluster`.
-		fallbackDirs := []string{"/usr/sbin", "/usr/local/sbin", "/sbin"}
-		for _, dir := range fallbackDirs {
-			candidate := dir + string(os.PathSeparator) + "gluster"
-			if st, statErr := os.Stat(candidate); statErr == nil && !st.IsDir() {
-				pathEnv := os.Getenv("PATH")
-				if !strings.Contains(pathEnv, dir) {
-					_ = os.Setenv("PATH", pathEnv+string(os.PathListSeparator)+dir)
-				}
-				// Re-check with the updated PATH.
-				if _, lookErr := exec.LookPath("gluster"); lookErr == nil {
-					logging.L().Infow(fmt.Sprintf("gluster CLI found at %s after PATH adjustment", candidate))
-					return nil
+		needsInstall = true
+	}
+
+	if needsInstall {
+		var (
+			script  string
+			manager string
+		)
+
+		if _, err := exec.LookPath("apt-get"); err == nil {
+			manager = "apt-get"
+			script = "apt-get update && apt-get install -y glusterfs-server glusterfs-client"
+		} else if _, err := exec.LookPath("dnf"); err == nil {
+			manager = "dnf"
+			script = "dnf install -y glusterfs glusterfs-fuse glusterfs-server"
+		} else if _, err := exec.LookPath("yum"); err == nil {
+			manager = "yum"
+			script = "yum install -y glusterfs glusterfs-fuse glusterfs-server"
+		} else if _, err := exec.LookPath("zypper"); err == nil {
+			manager = "zypper"
+			script = "zypper --non-interactive install glusterfs glusterfs-fuse"
+		} else if _, err := exec.LookPath("pacman"); err == nil {
+			manager = "pacman"
+			script = "pacman -Sy --noconfirm glusterfs"
+		} else if _, err := exec.LookPath("apk"); err == nil {
+			manager = "apk"
+			script = "apk add --no-cache glusterfs"
+		} else {
+			return fmt.Errorf("deps: gluster CLI not found and automatic installation is not implemented for this OS; install the GlusterFS server manually")
+		}
+
+		logging.L().Infow("gluster CLI not found; attempting installation via package manager", "manager", manager)
+		if err := runInstallScript(ctx, "gluster", script); err != nil {
+			return err
+		}
+
+		if _, err := exec.LookPath("gluster"); err != nil {
+			// On some systems the Gluster CLI lives in sbin directories that are not
+			// always present in PATH for non-login shells. As a best-effort, search
+			// a few common locations and, if found, append them to PATH so subsequent
+			// commands can locate `gluster`.
+			fallbackDirs := []string{"/usr/sbin", "/usr/local/sbin", "/sbin"}
+			for _, dir := range fallbackDirs {
+				candidate := dir + string(os.PathSeparator) + "gluster"
+				if st, statErr := os.Stat(candidate); statErr == nil && !st.IsDir() {
+					pathEnv := os.Getenv("PATH")
+					if !strings.Contains(pathEnv, dir) {
+						_ = os.Setenv("PATH", pathEnv+string(os.PathListSeparator)+dir)
+					}
+					// Re-check with the updated PATH.
+					if _, lookErr := exec.LookPath("gluster"); lookErr == nil {
+						logging.L().Infow(fmt.Sprintf("gluster CLI found at %s after PATH adjustment", candidate))
+						break
+					}
 				}
 			}
+			if _, err := exec.LookPath("gluster"); err != nil {
+				return fmt.Errorf("deps: gluster installation did not make 'gluster' available on PATH: %w", err)
+			}
 		}
-		return fmt.Errorf("deps: gluster installation did not make 'gluster' available on PATH: %w", err)
+	}
+
+	// Ensure glusterd daemon is running (idempotent).
+	// Try systemctl first, then fall back to service command.
+	if err := exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", "glusterd").Run(); err != nil {
+		// Daemon is not active; try to start it.
+		logging.L().Infow("glusterd daemon not active; attempting to start")
+
+		// Try systemctl enable and start.
+		if err := exec.CommandContext(ctx, "systemctl", "enable", "glusterd").Run(); err == nil {
+			if err := exec.CommandContext(ctx, "systemctl", "start", "glusterd").Run(); err != nil {
+				logging.L().Warnw("systemctl start glusterd failed", "err", err)
+			} else {
+				logging.L().Infow("glusterd daemon started via systemctl")
+				return nil
+			}
+		}
+
+		// Fall back to service command.
+		if err := exec.CommandContext(ctx, "service", "glusterd", "start").Run(); err != nil {
+			logging.L().Warnw("service glusterd start failed", "err", err)
+			// Non-fatal; the daemon might already be running or will be started by another mechanism.
+		} else {
+			logging.L().Infow("glusterd daemon started via service command")
+		}
 	}
 
 	return nil

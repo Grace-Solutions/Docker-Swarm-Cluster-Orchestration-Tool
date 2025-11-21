@@ -416,8 +416,15 @@ func convergeGluster(ctx context.Context, opts JoinOptions, resp *controller.Nod
 
 			log.Infow("gluster orchestration completed and signaled to controller")
 		} else {
-			// Non-orchestrator worker: ensure brick, wait for ready, then mount.
-			log.Infow("this worker is not the orchestrator; ensuring brick and waiting for volume readiness")
+			// Non-orchestrator worker: install GlusterFS, start daemon, ensure brick, wait for ready, then mount.
+			log.Infow("this worker is not the orchestrator; ensuring gluster daemon and brick, then waiting for volume readiness")
+
+			// Install GlusterFS and start the daemon so the orchestrator can peer probe us.
+			if err := deps.EnsureGluster(ctx); err != nil {
+				return fmt.Errorf("gluster install failed: %w", err)
+			}
+
+			// Ensure brick directory.
 			if err := gluster.Ensure(ctx, "", "", resp.GlusterBrick); err != nil {
 				return fmt.Errorf("gluster brick ensure failed: %w", err)
 			}
