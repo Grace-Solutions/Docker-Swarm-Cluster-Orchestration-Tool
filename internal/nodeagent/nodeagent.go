@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"clusterctl/internal/controller"
+	"clusterctl/internal/deps"
 	"clusterctl/internal/gluster"
 	"clusterctl/internal/ipdetect"
 	"clusterctl/internal/logging"
@@ -139,11 +140,10 @@ func Join(ctx context.Context, opts JoinOptions) error {
 	}
 
 	if lastResp.GlusterEnabled {
-		if err := gluster.Ensure(ctx, lastResp.GlusterVolume, lastResp.GlusterMount, lastResp.GlusterBrick); err != nil {
+		if err := convergeGluster(ctx, opts, lastResp, log); err != nil {
 			log.Warnw("gluster convergence failed", "err", err)
 			return err
 		}
-		log.Infow(fmt.Sprintf("gluster converged: volume=%s mount=%s brick=%s", lastResp.GlusterVolume, lastResp.GlusterMount, lastResp.GlusterBrick))
 	} else {
 		log.Infow("gluster not enabled for this node by controller")
 	}
@@ -377,5 +377,125 @@ func memoryMB() int {
 		return kb / 1024
 	}
 	return 0
+}
+
+func convergeGluster(ctx context.Context, opts JoinOptions, resp *controller.NodeResponse, log *logging.Logger) error {
+	if opts.Role == "worker" {
+		// Workers host bricks.
+		if resp.GlusterOrchestrator {
+			// This worker is the orchestrator.
+			log.Infow("this worker is the gluster orchestrator", "workers", len(resp.GlusterWorkerNodes))
+			if err := gluster.Orchestrate(ctx, resp.GlusterVolume, resp.GlusterBrick, resp.GlusterMount, resp.GlusterWorkerNodes); err != nil {
+				return fmt.Errorf("gluster orchestration failed: %w", err)
+			}
+
+			// Signal controller that GlusterFS is ready.
+			if err := signalGlusterReady(ctx, opts.MasterAddr); err != nil {
+				log.Warnw("failed to signal gluster ready to controller", "err", err)
+				// Non-fatal; continue.
+			}
+
+			log.Infow("gluster orchestration completed and signaled to controller")
+		} else {
+			// Non-orchestrator worker: ensure brick, wait for ready, then mount.
+			log.Infow("this worker is not the orchestrator; ensuring brick and waiting for volume readiness")
+			if err := gluster.Ensure(ctx, "", "", resp.GlusterBrick); err != nil {
+				return fmt.Errorf("gluster brick ensure failed: %w", err)
+			}
+
+			// Wait for volume to be ready (poll controller or wait for GlusterReady).
+			if err := waitForGlusterReady(ctx, opts, log); err != nil {
+				return fmt.Errorf("gluster wait for ready failed: %w", err)
+			}
+
+			// Mount and add to fstab.
+			if err := gluster.Ensure(ctx, resp.GlusterVolume, resp.GlusterMount, ""); err != nil {
+				return fmt.Errorf("gluster mount failed: %w", err)
+			}
+			if err := gluster.AddToFstab(resp.GlusterVolume, resp.GlusterMount); err != nil {
+				return fmt.Errorf("gluster fstab add failed: %w", err)
+			}
+
+			log.Infow("gluster converged on worker", "volume", resp.GlusterVolume, "mount", resp.GlusterMount)
+		}
+	} else if opts.Role == "manager" {
+		// Managers mount only (no brick).
+		log.Infow("this manager will mount gluster volume (no brick)")
+
+		// GlusterReady should already be true if we got here (controller gates StatusReady).
+		// Install client-only.
+		if err := deps.EnsureGlusterClient(ctx); err != nil {
+			return fmt.Errorf("gluster client install failed: %w", err)
+		}
+
+		// Mount and add to fstab.
+		if err := gluster.Ensure(ctx, resp.GlusterVolume, resp.GlusterMount, ""); err != nil {
+			return fmt.Errorf("gluster mount failed: %w", err)
+		}
+		if err := gluster.AddToFstab(resp.GlusterVolume, resp.GlusterMount); err != nil {
+			return fmt.Errorf("gluster fstab add failed: %w", err)
+		}
+
+		log.Infow("gluster converged on manager", "volume", resp.GlusterVolume, "mount", resp.GlusterMount)
+	}
+
+	return nil
+}
+
+func waitForGlusterReady(ctx context.Context, opts JoinOptions, log *logging.Logger) error {
+	backoff := 2 * time.Second
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		// Re-register to check GlusterReady status.
+		hostname, err := os.Hostname()
+		if err != nil {
+			return err
+		}
+
+		reg := controller.NodeRegistration{
+			Hostname:       hostname,
+			Role:           opts.Role,
+			OS:             runtime.GOOS,
+			GlusterCapable: opts.EnableGluster,
+		}
+
+		resp, err := registerOnce(ctx, opts.MasterAddr, reg)
+		if err != nil {
+			log.Warnw("gluster ready check registration failed", "err", err)
+		} else if resp.GlusterReady {
+			log.Infow("gluster volume is ready")
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+
+		if backoff < 10*time.Second {
+			backoff += time.Second
+		}
+	}
+}
+
+func signalGlusterReady(ctx context.Context, masterAddr string) error {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return err
+	}
+
+	reg := controller.NodeRegistration{
+		Hostname: hostname,
+		Role:     "worker",
+		OS:       runtime.GOOS,
+		Action:   "gluster-ready",
+	}
+
+	_, err = registerOnce(ctx, masterAddr, reg)
+	return err
 }
 
