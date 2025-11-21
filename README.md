@@ -52,12 +52,12 @@ git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-
 One-line version:
 
 ```bash
-git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-Service.git && cd ./Docker-Swarm-Cluster-Configuration-Service && chmod -R -v +x ./ && cd ./binaries && clear && ./cluster-master-init.sh --primary-master --enable-glusterfs --state-dir /mnt/GlusterFS/0001/orchestration --listen 0.0.0.0:7000 --advertise-addr <PRIMARY_MANAGER_ADDR> --min-managers 1 --min-workers 0 --wait-for-minimum
+git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-Service.git && cd ./Docker-Swarm-Cluster-Configuration-Service && chmod -R -v +x ./ && cd ./binaries && clear && ./cluster-master-init.sh --primary-master --enable-glusterfs --state-dir /mnt/GlusterFS/0001/data --listen 0.0.0.0:7000 --advertise-addr <PRIMARY_MANAGER_ADDR> --min-managers 1 --min-workers 0 --wait-for-minimum
 ```
 
 With `--enable-glusterfs` and the default `--state-dir`:
 
-- **State dir (controller + orchestration mount):** `/mnt/GlusterFS/0001/orchestration`
+- **State dir (controller + data mount):** `/mnt/GlusterFS/0001/data`
 - **Brick dir (where Gluster bricks live on this node):** `/mnt/GlusterFS/0001/brick`
 - **Volume name:** `0001` (derived from the parent directory name)
 

@@ -21,7 +21,7 @@ const (
 	// defaultStateDir is the default controller state directory. It also
 	// serves as the default GlusterFS mount point when --enable-glusterfs
 	// is used. We keep this under /mnt for easier consumption by services.
-	defaultStateDir = "/mnt/GlusterFS/Docker/Swarm/0001/orchestration"
+	defaultStateDir = "/mnt/GlusterFS/Docker/Swarm/0001/data"
 )
 
 func main() {
