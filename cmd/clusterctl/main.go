@@ -9,7 +9,9 @@ import (
 	"strings"
 	"syscall"
 
+	"clusterctl/internal/config"
 	"clusterctl/internal/controller"
+	"clusterctl/internal/deployer"
 	"clusterctl/internal/deps"
 	"clusterctl/internal/ipdetect"
 	"clusterctl/internal/logging"
@@ -44,6 +46,8 @@ func main() {
 	args := os.Args[2:]
 
 	switch cmd {
+	case "deploy":
+		runDeploy(ctx, args)
 	case "master":
 		runMaster(ctx, args)
 	case "node":
@@ -66,11 +70,12 @@ func usage() {
 	fmt.Fprint(os.Stderr, `clusterctl - Swarm cluster orchestrator
 
 Usage:
-  clusterctl master init [flags]
-  clusterctl master serve [flags]
-  clusterctl master reset [flags]
-  clusterctl node join [flags]
-  clusterctl node reset [flags]
+  clusterctl deploy [flags]           - Deploy cluster from JSON config (server-initiated)
+  clusterctl master init [flags]      - Initialize master (legacy)
+  clusterctl master serve [flags]     - Start master server (legacy)
+  clusterctl master reset [flags]     - Reset master state (legacy)
+  clusterctl node join [flags]        - Join node to cluster (legacy)
+  clusterctl node reset [flags]       - Reset node state (legacy)
 
 `)
 }
@@ -336,4 +341,50 @@ func detectAdvertiseAddress(ctx context.Context, overlayProvider string) string 
 
 	logging.L().Warnw("failed to detect advertise address; using empty string")
 	return ""
+}
+
+func runDeploy(ctx context.Context, args []string) {
+	fs := flag.NewFlagSet("deploy", flag.ExitOnError)
+	configPath := fs.String("config", "", "Path to JSON configuration file (default: <binary-name>.json in binary directory)")
+	keepSSHKeys := fs.Bool("keep-ssh-keys", false, "Keep SSH keys after successful deployment (opt-out)")
+	dryRun := fs.Bool("dry-run", false, "Validate configuration without deploying")
+
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to parse flags: %v\n", err)
+		os.Exit(1)
+	}
+
+	log := logging.L().With("command", "deploy")
+
+	// Load configuration
+	log.Infow("loading configuration", "configPath", *configPath)
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		log.Errorw("failed to load configuration", "err", err)
+		os.Exit(1)
+	}
+
+	// Override keepSSHKeys if flag is set
+	if *keepSSHKeys {
+		cfg.GlobalSettings.KeepSSHKeys = true
+	}
+
+	log.Infow("configuration loaded successfully",
+		"clusterName", cfg.GlobalSettings.ClusterName,
+		"nodes", len(cfg.Nodes),
+		"overlayProvider", cfg.GlobalSettings.OverlayProvider,
+	)
+
+	if *dryRun {
+		log.Infow("dry-run mode: configuration is valid")
+		return
+	}
+
+	// Run deployment
+	if err := deployer.Deploy(ctx, cfg); err != nil {
+		log.Errorw("deployment failed", "err", err)
+		os.Exit(1)
+	}
+
+	log.Infow("✅ Deployment completed successfully!")
 }

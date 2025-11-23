@@ -47,14 +47,9 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 	}
 	sshPublicKey := string(sshPublicKeyBytes)
 
-	sshPrivateKeyPath := filepath.Join(opts.StateDir, "ssh_key")
-	sshPrivateKeyBytes, err := os.ReadFile(sshPrivateKeyPath)
-	if err != nil {
-		return fmt.Errorf("failed to read SSH private key from %s: %w (did you run 'master init'?)", sshPrivateKeyPath, err)
-	}
-
-	// Create SSH connection pool for remote orchestration
-	sshPool := ssh.NewPool(sshPrivateKeyBytes, opts.SSHUser)
+	// NOTE: SSH pool creation disabled for legacy controller mode.
+	// Use the new 'deploy' command with JSON config for server-initiated deployment.
+	_ = sshPublicKey // Suppress unused variable warning
 
 	ln, err := net.Listen("tcp", opts.ListenAddr)
 	if err != nil {
@@ -71,12 +66,13 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 
 	var wg sync.WaitGroup
 
-	// Start background orchestration goroutine
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		runOrchestration(ctx, store, sshPool, opts)
-	}()
+	// NOTE: Background orchestration disabled for legacy controller mode.
+	// Use the new 'deploy' command with JSON config for server-initiated deployment.
+	// wg.Add(1)
+	// go func() {
+	// 	defer wg.Done()
+	// 	runOrchestration(ctx, store, sshPool, opts)
+	// }()
 
 	// Stop accepting new connections when the context is cancelled.
 	go func() {
