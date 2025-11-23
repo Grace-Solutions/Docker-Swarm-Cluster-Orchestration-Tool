@@ -230,7 +230,7 @@ func testReplication(ctx context.Context, sshPool *ssh.Pool, workers []string, m
 
 	// Create test file on first worker
 	createCmd := fmt.Sprintf("echo '%s' > %s", testContent, testFile)
-	stdout, stderr, err := sshPool.Run(ctx, workers[0], createCmd)
+	_, stderr, err := sshPool.Run(ctx, workers[0], createCmd)
 	if err != nil {
 		return fmt.Errorf("failed to create test file on %s: %w (stderr: %s)", workers[0], err, stderr)
 	}
