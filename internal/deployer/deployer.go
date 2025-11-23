@@ -71,17 +71,9 @@ func Deploy(ctx context.Context, cfg *config.Config) error {
 		log.Infow("⚠️  Portainer deployment not yet implemented")
 	}
 
-	// Phase 7: Cleanup SSH keys if not keeping them
-	if !cfg.GlobalSettings.KeepSSHKeys {
-		log.Infow("Phase 7: Cleaning up SSH keys")
-		if err := cleanupSSHKeys(ctx, cfg, sshPool); err != nil {
-			log.Warnw("failed to cleanup SSH keys (non-fatal)", "err", err)
-		} else {
-			log.Infow("✅ SSH keys cleaned up")
-		}
-	} else {
-		log.Infow("Phase 7: Keeping SSH keys (--keep-ssh-keys flag set)")
-	}
+	// Phase 7: SSH key cleanup (not needed for config-based deployment)
+	// Since we use credentials from the config file, we don't add/remove SSH keys
+	log.Infow("Phase 7: SSH key management (using credentials from config, no cleanup needed)")
 
 	log.Infow("🎉 Cluster deployment complete!")
 	return nil
@@ -209,11 +201,7 @@ func categorizeNodes(cfg *config.Config) (primaryMaster string, managers []strin
 	return
 }
 
-// cleanupSSHKeys removes SSH keys from all nodes.
-func cleanupSSHKeys(ctx context.Context, cfg *config.Config, sshPool *ssh.Pool) error {
-	// TODO: Implement SSH key cleanup
-	// This would remove the authorized_keys entry we added during setup
-	logging.L().Warnw("SSH key cleanup not yet implemented")
-	return nil
-}
+// NOTE: SSH key cleanup is not needed for config-based deployment.
+// We use credentials from the config file (password or privateKeyPath),
+// so we don't add/remove SSH keys during deployment.
 

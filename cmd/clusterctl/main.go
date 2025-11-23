@@ -346,7 +346,6 @@ func detectAdvertiseAddress(ctx context.Context, overlayProvider string) string 
 func runDeploy(ctx context.Context, args []string) {
 	fs := flag.NewFlagSet("deploy", flag.ExitOnError)
 	configPath := fs.String("config", "", "Path to JSON configuration file (default: <binary-name>.json in binary directory)")
-	keepSSHKeys := fs.Bool("keep-ssh-keys", false, "Keep SSH keys after successful deployment (opt-out)")
 	dryRun := fs.Bool("dry-run", false, "Validate configuration without deploying")
 
 	if err := fs.Parse(args); err != nil {
@@ -362,11 +361,6 @@ func runDeploy(ctx context.Context, args []string) {
 	if err != nil {
 		log.Errorw("failed to load configuration", "err", err)
 		os.Exit(1)
-	}
-
-	// Override keepSSHKeys if flag is set
-	if *keepSSHKeys {
-		cfg.GlobalSettings.KeepSSHKeys = true
 	}
 
 	log.Infow("configuration loaded successfully",

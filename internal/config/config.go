@@ -19,7 +19,6 @@ type GlobalSettings struct {
 	OverlayProvider   string `json:"overlayProvider"`   // "netbird", "tailscale", "wireguard"
 	OverlayConfig     string `json:"overlayConfig"`     // Provider-specific config
 	SSHUser           string `json:"sshUser"`           // Default SSH user (default: "root")
-	KeepSSHKeys       bool   `json:"keepSSHKeys"`       // Keep SSH keys after setup (default: false)
 	GlusterVolume     string `json:"glusterVolume"`     // GlusterFS volume name (default: "docker-swarm-0001")
 	GlusterMount      string `json:"glusterMount"`      // GlusterFS mount path (default: "/mnt/GlusterFS/Docker/Swarm/0001/data")
 	GlusterBrick      string `json:"glusterBrick"`      // GlusterFS brick path (default: "/mnt/GlusterFS/Docker/Swarm/0001/brick")
