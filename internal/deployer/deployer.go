@@ -297,14 +297,35 @@ func prepareSSHKeys(cfg *config.Config) (*sshkeys.KeyPair, error) {
 	// Install public key on nodes that don't use automatic key pair
 	// (these nodes will use password/privateKeyPath for initial connection)
 	ctx := context.Background()
+
+	// Count nodes that need public key installation
+	var nodesToInstall []config.NodeConfig
 	for _, node := range cfg.Nodes {
-		if node.UseSSHAutomaticKeyPair {
-			continue // Will use automatic key pair directly
+		if !node.UseSSHAutomaticKeyPair {
+			nodesToInstall = append(nodesToInstall, node)
+		}
+	}
+
+	if len(nodesToInstall) > 0 {
+		log.Infow("installing public key on nodes using password/key auth", "totalNodes", len(nodesToInstall))
+	}
+
+	for i, node := range nodesToInstall {
+		nodeNum := i + 1
+		authMethod := "password"
+		if node.PrivateKeyPath != "" {
+			authMethod = "private-key"
 		}
 
-		// Connect using password or privateKeyPath and install public key
-		nodeLog := log.With("node", node.Hostname)
-		nodeLog.Infow("installing public key on node")
+		nodeLog := log.With(
+			"server", fmt.Sprintf("%d/%d", nodeNum, len(nodesToInstall)),
+			"hostname", node.Hostname,
+			"user", node.Username,
+			"port", node.SSHPort,
+			"authMethod", authMethod,
+		)
+
+		nodeLog.Infow("→ installing public key for future automatic authentication")
 
 		authConfig := ssh.AuthConfig{
 			Username:       node.Username,
@@ -327,9 +348,9 @@ func prepareSSHKeys(cfg *config.Config) (*sshkeys.KeyPair, error) {
 		)
 
 		if _, stderr, err := tempPool.Run(ctx, node.Hostname, installCmd); err != nil {
-			nodeLog.Warnw("failed to install public key", "error", err, "stderr", stderr)
+			nodeLog.Warnw("✗ failed to install public key", "error", err, "stderr", stderr)
 		} else {
-			nodeLog.Infow("public key installed successfully")
+			nodeLog.Infow("✓ public key installed successfully")
 		}
 	}
 
@@ -338,9 +359,31 @@ func prepareSSHKeys(cfg *config.Config) (*sshkeys.KeyPair, error) {
 
 // createSSHPool creates an SSH connection pool from the configuration.
 func createSSHPool(cfg *config.Config, keyPair *sshkeys.KeyPair) (*ssh.Pool, error) {
+	log := logging.L().With("phase", "ssh-pool")
 	authConfigs := make(map[string]ssh.AuthConfig)
 
-	for _, node := range cfg.Nodes {
+	totalNodes := len(cfg.Nodes)
+	log.Infow("creating SSH connection pool", "totalNodes", totalNodes)
+
+	for i, node := range cfg.Nodes {
+		nodeNum := i + 1
+		authMethod := "password"
+		if node.UseSSHAutomaticKeyPair && keyPair != nil {
+			authMethod = "automatic-keypair"
+		} else if node.PrivateKeyPath != "" {
+			authMethod = "private-key"
+		}
+
+		nodeLog := log.With(
+			"server", fmt.Sprintf("%d/%d", nodeNum, totalNodes),
+			"hostname", node.Hostname,
+			"user", node.Username,
+			"port", node.SSHPort,
+			"authMethod", authMethod,
+		)
+
+		nodeLog.Infow("→ configuring SSH connection")
+
 		authConfig := ssh.AuthConfig{
 			Username: node.Username,
 			Port:     node.SSHPort,
@@ -349,15 +392,22 @@ func createSSHPool(cfg *config.Config, keyPair *sshkeys.KeyPair) (*ssh.Pool, err
 		if node.UseSSHAutomaticKeyPair && keyPair != nil {
 			// Use automatic key pair
 			authConfig.PrivateKeyPath = keyPair.PrivateKeyPath
+			nodeLog.Infow("✓ using automatic SSH key pair", "keyPath", keyPair.PrivateKeyPath)
 		} else {
 			// Use configured credentials
 			authConfig.Password = node.Password
 			authConfig.PrivateKeyPath = node.PrivateKeyPath
+			if node.PrivateKeyPath != "" {
+				nodeLog.Infow("✓ using configured private key", "keyPath", node.PrivateKeyPath)
+			} else {
+				nodeLog.Infow("✓ using password authentication")
+			}
 		}
 
 		authConfigs[node.Hostname] = authConfig
 	}
 
+	log.Infow("SSH connection pool configured", "totalNodes", totalNodes)
 	return ssh.NewPool(authConfigs), nil
 }
 
@@ -365,25 +415,45 @@ func createSSHPool(cfg *config.Config, keyPair *sshkeys.KeyPair) (*ssh.Pool, err
 func installDependencies(ctx context.Context, cfg *config.Config, sshPool *ssh.Pool) error {
 	log := logging.L().With("phase", "dependencies")
 
-	for _, node := range cfg.Nodes {
-		log.Infow("installing dependencies", "node", node.Hostname, "role", node.Role)
+	totalNodes := len(cfg.Nodes)
+	log.Infow("installing dependencies on all nodes", "totalNodes", totalNodes)
+
+	for i, node := range cfg.Nodes {
+		nodeNum := i + 1
+		nodeLog := log.With(
+			"server", fmt.Sprintf("%d/%d", nodeNum, totalNodes),
+			"hostname", node.Hostname,
+			"role", node.Role,
+			"user", node.Username,
+			"port", node.SSHPort,
+		)
+
+		nodeLog.Infow("→ starting dependency installation")
 
 		// Install Docker
+		nodeLog.Infow("→ installing Docker")
 		if err := installDocker(ctx, sshPool, node.Hostname); err != nil {
 			return fmt.Errorf("failed to install Docker on %s: %w", node.Hostname, err)
 		}
+		nodeLog.Infow("✓ Docker installed")
 
 		// Install GlusterFS if needed
 		if node.GlusterEnabled {
+			nodeLog.Infow("→ installing GlusterFS server")
 			if err := installGlusterFS(ctx, sshPool, node.Hostname, true); err != nil {
 				return fmt.Errorf("failed to install GlusterFS on %s: %w", node.Hostname, err)
 			}
+			nodeLog.Infow("✓ GlusterFS server installed")
 		} else if node.Role == "manager" && len(getGlusterWorkers(cfg)) > 0 {
 			// Managers need GlusterFS client if any workers have GlusterFS
+			nodeLog.Infow("→ installing GlusterFS client")
 			if err := installGlusterFS(ctx, sshPool, node.Hostname, false); err != nil {
 				return fmt.Errorf("failed to install GlusterFS client on %s: %w", node.Hostname, err)
 			}
+			nodeLog.Infow("✓ GlusterFS client installed")
 		}
+
+		nodeLog.Infow("✓ all dependencies installed")
 	}
 
 	return nil
@@ -441,13 +511,25 @@ func configureOverlay(ctx context.Context, cfg *config.Config, sshPool *ssh.Pool
 	}
 
 	overlayConfig := cfg.GlobalSettings.OverlayConfig
-	log.Infow("configuring overlay network", "provider", provider, "nodes", len(cfg.Nodes))
+	totalNodes := len(cfg.Nodes)
+	log.Infow("configuring overlay network", "provider", provider, "totalNodes", totalNodes)
 
-	// Configure overlay on all nodes in parallel
-	for _, node := range cfg.Nodes {
+	// Configure overlay on all nodes
+	for i, node := range cfg.Nodes {
+		nodeNum := i + 1
+		nodeLog := log.With(
+			"server", fmt.Sprintf("%d/%d", nodeNum, totalNodes),
+			"hostname", node.Hostname,
+			"provider", provider,
+			"user", node.Username,
+			"port", node.SSHPort,
+		)
+
+		nodeLog.Infow("→ configuring overlay network")
 		if err := configureOverlayOnNode(ctx, sshPool, node, provider, overlayConfig); err != nil {
 			return fmt.Errorf("failed to configure %s overlay on %s: %w", provider, node.Hostname, err)
 		}
+		nodeLog.Infow("✓ overlay network configured")
 	}
 
 	log.Infow("✅ overlay network configured", "provider", provider)
@@ -619,27 +701,49 @@ func categorizeNodes(cfg *config.Config) (managers []string, workers []string) {
 func setHostnames(ctx context.Context, cfg *config.Config, sshPool *ssh.Pool) error {
 	log := logging.L().With("phase", "hostnames")
 
+	// Count nodes that need hostname changes
+	var nodesToUpdate []config.NodeConfig
 	for _, node := range cfg.Nodes {
-		if node.NewHostname == "" {
-			continue
+		if node.NewHostname != "" {
+			nodesToUpdate = append(nodesToUpdate, node)
 		}
+	}
 
-		nodeLog := log.With("node", node.Hostname, "newHostname", node.NewHostname)
+	if len(nodesToUpdate) == 0 {
+		log.Infow("no hostname changes required")
+		return nil
+	}
+
+	log.Infow("setting hostnames", "totalNodes", len(nodesToUpdate))
+
+	for i, node := range nodesToUpdate {
+		nodeNum := i + 1
+		nodeLog := log.With(
+			"server", fmt.Sprintf("%d/%d", nodeNum, len(nodesToUpdate)),
+			"hostname", node.Hostname,
+			"newHostname", node.NewHostname,
+			"user", node.Username,
+			"port", node.SSHPort,
+		)
+
+		nodeLog.Infow("→ checking current hostname")
 
 		// Check current hostname
 		stdout, _, err := sshPool.Run(ctx, node.Hostname, "hostname")
 		if err == nil && stdout == node.NewHostname+"\n" {
-			nodeLog.Infow("hostname already set")
+			nodeLog.Infow("✓ hostname already set, skipping")
 			continue
 		}
 
 		// Set hostname idempotently
 		setCmd := fmt.Sprintf("hostnamectl set-hostname %s", node.NewHostname)
+		nodeLog.Infow("→ executing hostname change", "command", setCmd)
+
 		if _, stderr, err := sshPool.Run(ctx, node.Hostname, setCmd); err != nil {
 			return fmt.Errorf("failed to set hostname on %s: %w (stderr: %s)", node.Hostname, err, stderr)
 		}
 
-		nodeLog.Infow("hostname set successfully")
+		nodeLog.Infow("✓ hostname set successfully")
 	}
 
 	return nil
@@ -654,27 +758,53 @@ func executeScripts(ctx context.Context, cfg *config.Config, sshPool *ssh.Pool, 
 		return nil
 	}
 
-	for i, script := range scripts {
-		if !script.Enabled {
-			log.Infow("skipping disabled script", "name", script.Name)
-			continue
+	// Count enabled scripts
+	var enabledScripts []config.ScriptConfig
+	for _, script := range scripts {
+		if script.Enabled {
+			enabledScripts = append(enabledScripts, script)
+		}
+	}
+
+	log.Infow("executing scripts", "totalScripts", len(enabledScripts))
+
+	for i, script := range enabledScripts {
+		scriptNum := i + 1
+		scriptLog := log.With(
+			"script", fmt.Sprintf("%d/%d", scriptNum, len(enabledScripts)),
+			"name", script.Name,
+			"source", script.Source,
+		)
+		scriptLog.Infow("→ executing script")
+
+		// Count nodes that will execute this script
+		var targetNodes []config.NodeConfig
+		for _, node := range cfg.Nodes {
+			if node.ScriptsEnabled {
+				targetNodes = append(targetNodes, node)
+			}
 		}
 
-		scriptLog := log.With("script", script.Name, "index", i)
-		scriptLog.Infow("executing script", "source", script.Source)
+		scriptLog.Infow("script will run on nodes", "targetNodes", len(targetNodes))
 
-		// Execute script on all nodes (or only enabled nodes)
-		for _, node := range cfg.Nodes {
-			if !node.ScriptsEnabled {
-				continue
-			}
+		// Execute script on all enabled nodes
+		for j, node := range targetNodes {
+			nodeNum := j + 1
+			nodeLog := scriptLog.With(
+				"server", fmt.Sprintf("%d/%d", nodeNum, len(targetNodes)),
+				"hostname", node.Hostname,
+				"user", node.Username,
+				"port", node.SSHPort,
+			)
 
+			nodeLog.Infow("→ executing script on node")
 			if err := executeScriptOnNode(ctx, sshPool, node, script); err != nil {
 				return fmt.Errorf("failed to execute script %s on %s: %w", script.Name, node.Hostname, err)
 			}
+			nodeLog.Infow("✓ script executed successfully on node")
 		}
 
-		scriptLog.Infow("script executed successfully")
+		scriptLog.Infow("✓ script executed successfully on all nodes")
 	}
 
 	return nil
