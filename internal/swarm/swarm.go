@@ -162,9 +162,10 @@ func Leave(ctx context.Context, force bool) error {
 
 // NetworkSpec describes the desired shape of a Swarm overlay network.
 type NetworkSpec struct {
-	Name    string
-	Subnet  string
-	Gateway string
+	Name     string
+	Subnet   string
+	Gateway  string
+	Internal bool // If true, network is internal-only (no external access)
 }
 
 const (
@@ -192,6 +193,9 @@ func EnsureOverlayNetwork(ctx context.Context, spec NetworkSpec) error {
 	}
 
 	args := []string{"network", "create", "--driver", "overlay", "--attachable"}
+	if spec.Internal {
+		args = append(args, "--internal")
+	}
 	if spec.Subnet != "" {
 		args = append(args, "--subnet", spec.Subnet)
 	}
@@ -209,7 +213,11 @@ func EnsureOverlayNetwork(ctx context.Context, spec NetworkSpec) error {
 		return fmt.Errorf("swarm: network create %s failed: %w (output: %s)", spec.Name, err, strings.TrimSpace(string(out)))
 	}
 
-	logging.L().Infow("✅ swarm overlay network created", "name", spec.Name, "subnet", spec.Subnet, "gateway", spec.Gateway)
+	internalStr := "external"
+	if spec.Internal {
+		internalStr = "internal-only"
+	}
+	logging.L().Infow("✅ swarm overlay network created", "name", spec.Name, "subnet", spec.Subnet, "gateway", spec.Gateway, "type", internalStr)
 	return nil
 }
 
@@ -217,18 +225,20 @@ func EnsureOverlayNetwork(ctx context.Context, spec NetworkSpec) error {
 // networks exist on the primary manager. It is safe to call multiple times.
 func EnsureDefaultNetworks(ctx context.Context) error {
 	internal := NetworkSpec{
-		Name:    DefaultInternalNetworkName,
-		Subnet:  "172.17.16.0/20",
-		Gateway: "172.17.16.1",
+		Name:     DefaultInternalNetworkName,
+		Subnet:   "172.17.16.0/20",
+		Gateway:  "172.17.16.1",
+		Internal: true, // Internal-only network (no external access)
 	}
 	if err := EnsureOverlayNetwork(ctx, internal); err != nil {
 		return err
 	}
 
 	external := NetworkSpec{
-		Name:    DefaultExternalNetworkName,
-		Subnet:  "172.17.32.0/20",
-		Gateway: "172.17.32.1",
+		Name:     DefaultExternalNetworkName,
+		Subnet:   "172.17.32.0/20",
+		Gateway:  "172.17.32.1",
+		Internal: false, // External-facing network
 	}
 	if err := EnsureOverlayNetwork(ctx, external); err != nil {
 		return err
