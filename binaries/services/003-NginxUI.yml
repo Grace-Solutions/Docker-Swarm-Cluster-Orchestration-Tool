@@ -1,6 +1,6 @@
 # NAME: NginxUI
 # DESCRIPTION: Nginx UI - Web-based Nginx management interface
-# ENABLED: true
+# ENABLED: false
 
 services:
   nginx-ui:

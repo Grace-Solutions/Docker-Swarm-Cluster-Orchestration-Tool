@@ -131,8 +131,7 @@ See `clusterctl.json.example` for a complete example. The configuration has two 
     "glusterVolume": "docker-swarm-0001",
     "glusterMount": "/mnt/GlusterFS/Docker/Swarm/0001/data",
     "glusterBrick": "/mnt/GlusterFS/Docker/Swarm/0001/brick",
-    "deployPortainer": true,
-    "portainerPassword": "",
+    "servicesDir": "",
     "removeSSHPublicKeyOnCompletion": false,
     "preScripts": [
       {
@@ -164,8 +163,7 @@ See `clusterctl.json.example` for a complete example. The configuration has two 
 - `glusterVolume`: GlusterFS volume name (default: `docker-swarm-0001`)
 - `glusterMount`: Default mount path for GlusterFS (default: `/mnt/GlusterFS/Docker/Swarm/0001/data`)
 - `glusterBrick`: Default brick path for GlusterFS (default: `/mnt/GlusterFS/Docker/Swarm/0001/brick`)
-- `deployPortainer`: Deploy Portainer web UI (default: `true`)
-- `portainerPassword`: Portainer admin password (default: auto-generated)
+- `servicesDir`: Directory containing service YAML files (default: `services` relative to binary)
 - `removeSSHPublicKeyOnCompletion`: Remove SSH public key from nodes on deployment completion (default: `false`)
   - **Note**: Only affects nodes using `useSSHAutomaticKeyPair=true`
   - When `false` (default): SSH public key remains installed on nodes for future deployments
@@ -427,20 +425,19 @@ git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-
     --role worker \
     --overlay-provider netbird \
     --overlay-config <NETBIRD_SETUP_KEY> \
-    --enable-glusterfs \
-    --deploy-portainer
+    --enable-glusterfs
 ```
 
 One-line version:
 
 ```bash
-git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-Service.git && cd ./Docker-Swarm-Cluster-Configuration-Service && chmod -R -v +x ./ && cd ./binaries && clear && ./cluster-node-join.sh --master <PRIMARY_MANAGER_IP>:7000 --role worker --overlay-provider netbird --overlay-config <NETBIRD_SETUP_KEY> --enable-glusterfs --deploy-portainer
+git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-Service.git && cd ./Docker-Swarm-Cluster-Configuration-Service && chmod -R -v +x ./ && cd ./binaries && clear && ./cluster-node-join.sh --master <PRIMARY_MANAGER_IP>:7000 --role worker --overlay-provider netbird --overlay-config <NETBIRD_SETUP_KEY> --enable-glusterfs
 ```
 
 Replace `<NETBIRD_SETUP_KEY>` with your Netbird setup key (or switch
 `--overlay-provider` / `--overlay-config` to match your chosen overlay).
 
-**Note**: The `--deploy-portainer` flag deploys Portainer CE and Portainer Agent as Docker Swarm services. Portainer will be accessible at `https://<any-node-ip>:9443` via the routing mesh. Only specify this flag on **one worker node** to avoid duplicate deployments.
+**Note**: Services are deployed via the generic service deployment system from YAML files in the `binaries/services/` directory.
 
 ## CLI overview
 
