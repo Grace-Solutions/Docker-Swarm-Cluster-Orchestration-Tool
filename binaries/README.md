@@ -43,7 +43,7 @@ All binaries are:
 
 ## Configuration
 
-Create a JSON configuration file (see `clusterctl.json.example` in the repository root) that defines:
+Create a JSON configuration file (see `clusterctl.json.example` in this directory) that defines:
 
 - **Global settings**: Cluster name, overlay provider, GlusterFS paths, Portainer settings
 - **Node definitions**: SSH connection details, roles (manager/worker), hostnames, labels

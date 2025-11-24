@@ -60,24 +60,24 @@ graph TB
 ### Deploy a Cluster
 
 ```bash
-# 1. Create a configuration file (see clusterctl.json.example)
-cp clusterctl.json.example clusterctl.json
+# 1. Create a configuration file (see binaries/clusterctl.json.example)
+cp binaries/clusterctl.json.example clusterctl.json
 
 # 2. Edit the configuration with your nodes and credentials
 nano clusterctl.json
 
 # 3. Deploy the cluster
-./clusterctl -config clusterctl.json
+./binaries/clusterctl-linux-amd64 -config clusterctl.json
 ```
 
 ### Teardown a Cluster
 
 ```bash
 # Teardown cluster (keeps networks and data for connectivity)
-./clusterctl -config clusterctl.json -teardown
+./binaries/clusterctl-linux-amd64 -config clusterctl.json -teardown
 
 # Full teardown (removes everything including data - WARNING: destructive)
-./clusterctl -config clusterctl.json -teardown -remove-overlays -remove-gluster-data
+./binaries/clusterctl-linux-amd64 -config clusterctl.json -teardown -remove-overlays -remove-gluster-data
 ```
 
 ### Deployment Phases
@@ -118,7 +118,7 @@ When you run `clusterctl -config clusterctl.json -teardown`, the following phase
 
 ### Configuration File Format
 
-See `clusterctl.json.example` for a complete example. The configuration has two main sections:
+See `binaries/clusterctl.json.example` for a complete example. The configuration has two main sections:
 
 #### Global Settings
 
