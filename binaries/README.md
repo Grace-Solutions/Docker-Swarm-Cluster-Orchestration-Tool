@@ -1,135 +1,92 @@
-#Repository Clone command
-   ```bash
-    git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-Service.git && cd ./Docker-Swarm-Cluster-Configuration-Service && chmod -R -v +x ./
-   ```
+# Binaries
 
-# Linux wrapper scripts for clusterctl
+This directory contains pre-built `clusterctl` binaries for Linux (amd64 and arm64) and Windows (amd64).
 
-This directory contains pre-built `clusterctl` binaries and convenience
-wrapper scripts for Linux.
+## Available Binaries
 
-## Binaries
+- **`clusterctl-linux-amd64`**: Linux binary for x86_64 / amd64 systems
+- **`clusterctl-linux-arm64`**: Linux binary for aarch64 / arm64 systems  
+- **`clusterctl-windows-amd64.exe`**: Windows binary for x86_64 / amd64 systems
 
-The following binaries are tracked and expected in this directory:
+All binaries are:
+- ✅ **Statically linked** (CGO_ENABLED=0) - no external dependencies
+- ✅ **Self-contained** - no runtime requirements beyond OS kernel
+- ✅ **Cross-platform** - run from any machine with SSH access to target nodes
 
-- `clusterctl-linux-amd64`  "linux/amd64" build of the Go CLI.
-- `clusterctl-linux-arm64`  "linux/arm64" build of the Go CLI.
-- `clusterctl-windows-amd64.exe`  "windows/amd64" build (for reference and
-  distribution; not used by the Linux wrapper scripts).
+## Usage
 
-## Wrapper scripts
+### Linux
 
-The scripts below are intended for **Linux** and execute the local
-`clusterctl` Linux binary from this directory, selecting the correct build
-based on `uname -m`.
+``bash
+# Deploy cluster from configuration file
+./clusterctl-linux-amd64 -config clusterctl.json
 
-### `cluster-master-init.sh`
+# Validate configuration without deploying
+./clusterctl-linux-amd64 -config clusterctl.json -dry-run
 
-Initialise the Swarm master node and optional GlusterFS paths.
+# Show help
+./clusterctl-linux-amd64 -help
+``
 
-- Resolves its own directory.
-- Detects the architecture via `uname -m` and chooses:
-  - `clusterctl-linux-amd64` for `x86_64` / `amd64`.
-  - `clusterctl-linux-arm64` for `aarch64` / `arm64`.
-- Executes:
-  - `clusterctl master init "$@"`
+### Windows
 
-Example:
+``powershell
+# Deploy cluster from configuration file
+.\clusterctl-windows-amd64.exe -config clusterctl.json
 
-- `./cluster-master-init.sh --enable-glusterfs`
+# Validate configuration without deploying
+.\clusterctl-windows-amd64.exe -config clusterctl.json -dry-run
 
-### `cluster-master-serve.sh`
+# Show help
+.\clusterctl-windows-amd64.exe -help
+``
 
-Run the controller in listen/serve mode on the master:
+## Configuration
 
-- Performs the same architecture detection as `cluster-master-init.sh`.
-- Executes:
-  - `clusterctl master serve "$@"`
+Create a JSON configuration file (see `clusterctl.json.example` in the repository root) that defines:
 
-Example:
+- **Global settings**: Cluster name, overlay provider, GlusterFS paths, Portainer settings
+- **Node definitions**: SSH connection details, roles (manager/worker), hostnames, labels
+- **Scripts**: Pre/post deployment scripts (optional)
 
-- `./cluster-master-serve.sh --listen 0.0.0.0:7000 --wait-for-minimum --min-managers 3 --min-workers 6`
+The tool will:
+1. SSH into each node
+2. Install dependencies (Docker, overlay provider, GlusterFS)
+3. Configure Docker Swarm with managers and workers
+4. Set up GlusterFS distributed storage (if enabled)
+5. Deploy Portainer (if enabled)
+6. Apply custom labels for service placement
 
-### `cluster-node-join.sh`
+## SSH Key Management
 
-Join a node/client to the cluster:
+The tool automatically generates and manages ED25519 SSH keys:
 
-- Performs architecture detection as above.
-- Executes:
-  - `clusterctl node join "$@"`
+- Keys are stored in `sshkeys/yyyy.MM.dd.HHmm/` next to the binary
+- Existing keys are reused across deployments
+- Keys are never deleted (kept for future use)
+- Per-node control via `useSSHAutomaticKeyPair` setting
 
-Examples:
+## Examples
 
-- Manager node:
-  ```bash
-  ./cluster-node-join.sh --master 10.0.0.10:7000 --role manager --overlay-provider netbird --overlay-config YOUR_NETBIRD_SETUP_KEY
-  ```
+**Basic deployment:**
+``bash
+./clusterctl-linux-amd64 -config production.json
+``
 
-- Worker node with GlusterFS and Portainer:
-  ```bash
-  ./cluster-node-join.sh --master 10.0.0.10:7000 --role worker --overlay-provider netbird --overlay-config YOUR_NETBIRD_SETUP_KEY --enable-glusterfs --deploy-portainer
-  ```
+**Test configuration:**
+``bash
+./clusterctl-linux-amd64 -config staging.json -dry-run
+``
 
-**Note**: The `--deploy-portainer` flag deploys Portainer CE and Portainer Agent. Only use this on **one worker node** to avoid duplicate deployments. Portainer will be accessible at `https://<any-node-ip>:9443`.
+**Deploy from Windows to Linux nodes:**
+``powershell
+.\clusterctl-windows-amd64.exe -config cluster.json
+``
 
-## Usage notes
+## Repository Clone Command
 
-1. On a fresh Linux host, you can clone the repo, make everything
-   executable, and enter the `binaries/` directory in one shot:
-
-   ```bash
-   git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-Service.git && \
-     cd ./Docker-Swarm-Cluster-Configuration-Service && \
-     chmod -R -v +x ./ && \
-     cd ./binaries && \
-     clear
-   ```
-
-2. From there, run the wrapper scripts as usual. For example, to initialise
-   the master with GlusterFS enabled:
-
-   ```bash
-   ./cluster-master-init.sh --primary-master --enable-glusterfs --listen 0.0.0.0:7000 --min-managers 3 --min-workers 6 --wait-for-minimum
-   ```
-
-   The advertise address is automatically detected using IP priority: overlay (CGNAT) > private (RFC1918) > other non-loopback > loopback.
-
-3. Overlay providers like Netbird and Tailscale accept configuration via
-   environment variables, e.g. `NB_SETUP_KEY` and `TS_AUTHKEY`. The Go
-   implementation already maps `--overlay-config` into these env vars for the
-   underlying CLI.
-
-4. The scripts themselves are thin wrappers; **all logic lives in the Go
-   binary**. For advanced scenarios (e.g. Swarm reset, node deregistration),
-   invoke `clusterctl` directly:
-
-   ```bash
-   ./clusterctl-linux-amd64 master reset --state-dir /mnt/GlusterFS/Docker/Swarm/0001/data
-   ./clusterctl-linux-amd64 node reset --master 10.0.0.10:7000 --deregister --overlay-provider tailscale
-   ```
-
-## Logging
-
-The `clusterctl` binary used by these scripts logs plain text lines in the format:
-
-```text
-[2025-01-01T12:00:00Z] - [INFO] - message
-```
-
-- By default, logs go to **stderr** and to a log file named `clusterctl.log` in the
-  current directory (typically this `binaries/` folder).
-- You can override the log file path via `CLUSTERCTL_LOG_FILE`.
-- You can control the minimum log level via `CLUSTERCTL_LOG_LEVEL`
-  (e.g. `debug`, `info`, `warn`, `error`; default is `info`).
-
-When debugging node joins, run the wrapper script and in another shell:
-
-```bash
-tail -f clusterctl.log
-```
-
-on that host to see detailed Swarm/GlusterFS status as it converges.
-
-For a more detailed system overview, see `../docs/README.md` and the root
-`README.md`.
-
+``bash
+git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-Service.git && \
+  cd ./Docker-Swarm-Cluster-Configuration-Service && \
+  chmod -R -v +x ./
+``
