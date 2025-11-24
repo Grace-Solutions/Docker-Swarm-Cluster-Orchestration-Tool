@@ -2,11 +2,28 @@
   "globalSettings": {
     "clusterName": "production-swarm",
     "overlayProvider": "netbird",
+    "overlayConfig": "your-netbird-setup-key-here",
     "glusterVolume": "docker-swarm-0001",
     "glusterMount": "/mnt/GlusterFS/Docker/Swarm/0001/data",
     "glusterBrick": "/mnt/GlusterFS/Docker/Swarm/0001/brick",
     "deployPortainer": true,
-    "portainerPassword": ""
+    "portainerPassword": "",
+    "preScripts": [
+      {
+        "enabled": true,
+        "name": "pre-deployment-check",
+        "source": "https://example.com/scripts/pre-check.sh",
+        "parameters": "--verbose"
+      }
+    ],
+    "postScripts": [
+      {
+        "enabled": true,
+        "name": "post-deployment-validation",
+        "source": "https://example.com/scripts/post-validate.sh",
+        "parameters": ""
+      }
+    ]
   },
   "nodes": [
     {
@@ -17,12 +34,13 @@
       "sshPort": 22,
       "primaryMaster": true,
       "role": "manager",
-      "overlayProvider": "",
-      "overlayConfig": "your-netbird-setup-key-here",
+      "newHostname": "swarm-manager-01",
+      "rebootOnCompletion": false,
       "glusterEnabled": false,
       "glusterMount": "",
       "glusterBrick": "",
-      "advertiseAddr": ""
+      "advertiseAddr": "",
+      "scriptsEnabled": true
     },
     {
       "hostname": "manager2.example.com",
@@ -32,12 +50,13 @@
       "sshPort": 22,
       "primaryMaster": false,
       "role": "manager",
-      "overlayProvider": "",
-      "overlayConfig": "your-netbird-setup-key-here",
+      "newHostname": "swarm-manager-02",
+      "rebootOnCompletion": false,
       "glusterEnabled": false,
       "glusterMount": "",
       "glusterBrick": "",
-      "advertiseAddr": ""
+      "advertiseAddr": "",
+      "scriptsEnabled": true
     },
     {
       "hostname": "manager3.example.com",
@@ -47,12 +66,13 @@
       "sshPort": 22,
       "primaryMaster": false,
       "role": "manager",
-      "overlayProvider": "",
-      "overlayConfig": "your-netbird-setup-key-here",
+      "newHostname": "swarm-manager-03",
+      "rebootOnCompletion": false,
       "glusterEnabled": false,
       "glusterMount": "",
       "glusterBrick": "",
-      "advertiseAddr": ""
+      "advertiseAddr": "",
+      "scriptsEnabled": true
     },
     {
       "hostname": "worker1.example.com",
@@ -62,12 +82,13 @@
       "sshPort": 22,
       "primaryMaster": false,
       "role": "worker",
-      "overlayProvider": "",
-      "overlayConfig": "your-netbird-setup-key-here",
+      "newHostname": "swarm-worker-01",
+      "rebootOnCompletion": false,
       "glusterEnabled": true,
       "glusterMount": "",
       "glusterBrick": "",
-      "advertiseAddr": ""
+      "advertiseAddr": "",
+      "scriptsEnabled": true
     },
     {
       "hostname": "worker2.example.com",
@@ -77,12 +98,13 @@
       "sshPort": 22,
       "primaryMaster": false,
       "role": "worker",
-      "overlayProvider": "",
-      "overlayConfig": "your-netbird-setup-key-here",
+      "newHostname": "swarm-worker-02",
+      "rebootOnCompletion": false,
       "glusterEnabled": true,
       "glusterMount": "",
       "glusterBrick": "",
-      "advertiseAddr": ""
+      "advertiseAddr": "",
+      "scriptsEnabled": true
     },
     {
       "hostname": "worker3.example.com",
@@ -92,12 +114,13 @@
       "sshPort": 22,
       "primaryMaster": false,
       "role": "worker",
-      "overlayProvider": "",
-      "overlayConfig": "your-netbird-setup-key-here",
+      "newHostname": "swarm-worker-03",
+      "rebootOnCompletion": false,
       "glusterEnabled": true,
       "glusterMount": "",
       "glusterBrick": "",
-      "advertiseAddr": ""
+      "advertiseAddr": "",
+      "scriptsEnabled": true
     },
     {
       "hostname": "worker4.example.com",
@@ -107,12 +130,13 @@
       "sshPort": 2222,
       "primaryMaster": false,
       "role": "worker",
-      "overlayProvider": "tailscale",
-      "overlayConfig": "your-tailscale-auth-key-here",
+      "newHostname": "swarm-worker-04",
+      "rebootOnCompletion": false,
       "glusterEnabled": true,
       "glusterMount": "",
       "glusterBrick": "",
-      "advertiseAddr": ""
+      "advertiseAddr": "",
+      "scriptsEnabled": true
     },
     {
       "hostname": "worker5.example.com",
@@ -122,12 +146,13 @@
       "sshPort": 22,
       "primaryMaster": false,
       "role": "worker",
-      "overlayProvider": "",
-      "overlayConfig": "your-netbird-setup-key-here",
+      "newHostname": "swarm-worker-05",
+      "rebootOnCompletion": false,
       "glusterEnabled": true,
       "glusterMount": "",
       "glusterBrick": "",
-      "advertiseAddr": ""
+      "advertiseAddr": "",
+      "scriptsEnabled": true
     },
     {
       "hostname": "worker6.example.com",
@@ -137,12 +162,13 @@
       "sshPort": 22,
       "primaryMaster": false,
       "role": "worker",
-      "overlayProvider": "",
-      "overlayConfig": "your-netbird-setup-key-here",
+      "newHostname": "swarm-worker-06",
+      "rebootOnCompletion": true,
       "glusterEnabled": true,
       "glusterMount": "",
       "glusterBrick": "",
-      "advertiseAddr": ""
+      "advertiseAddr": "",
+      "scriptsEnabled": true
     }
   ]
 }

@@ -13,15 +13,26 @@ type Config struct {
 	Nodes          []NodeConfig   `json:"nodes"`
 }
 
+// ScriptConfig represents a script to execute on nodes.
+type ScriptConfig struct {
+	Enabled    bool   `json:"enabled"`    // Enable this script (default: true)
+	Name       string `json:"name"`       // Script name/description
+	Source     string `json:"source"`     // Local path or http/https URL
+	Parameters string `json:"parameters"` // Script parameters/arguments
+}
+
 // GlobalSettings contains cluster-wide configuration.
 type GlobalSettings struct {
-	ClusterName       string `json:"clusterName"`       // Cluster name (required)
-	OverlayProvider   string `json:"overlayProvider"`   // "netbird", "tailscale", "wireguard", "none" (default: "none")
-	GlusterVolume     string `json:"glusterVolume"`     // GlusterFS volume name (default: "docker-swarm-0001")
-	GlusterMount      string `json:"glusterMount"`      // GlusterFS mount path (default: "/mnt/GlusterFS/Docker/Swarm/0001/data")
-	GlusterBrick      string `json:"glusterBrick"`      // GlusterFS brick path (default: "/mnt/GlusterFS/Docker/Swarm/0001/brick")
-	DeployPortainer   bool   `json:"deployPortainer"`   // Deploy Portainer after setup (default: true)
-	PortainerPassword string `json:"portainerPassword"` // Portainer admin password (default: auto-generated)
+	ClusterName       string         `json:"clusterName"`       // Cluster name (required)
+	OverlayProvider   string         `json:"overlayProvider"`   // "netbird", "tailscale", "wireguard", "none" (default: "none")
+	OverlayConfig     string         `json:"overlayConfig"`     // Provider-specific config (e.g., Netbird setup key, Tailscale auth key)
+	GlusterVolume     string         `json:"glusterVolume"`     // GlusterFS volume name (default: "docker-swarm-0001")
+	GlusterMount      string         `json:"glusterMount"`      // GlusterFS mount path (default: "/mnt/GlusterFS/Docker/Swarm/0001/data")
+	GlusterBrick      string         `json:"glusterBrick"`      // GlusterFS brick path (default: "/mnt/GlusterFS/Docker/Swarm/0001/brick")
+	DeployPortainer   bool           `json:"deployPortainer"`   // Deploy Portainer after setup (default: true)
+	PortainerPassword string         `json:"portainerPassword"` // Portainer admin password (default: auto-generated)
+	PreScripts        []ScriptConfig `json:"preScripts"`        // Scripts to execute before deployment
+	PostScripts       []ScriptConfig `json:"postScripts"`       // Scripts to execute after deployment
 }
 
 // NodeConfig represents a single node's configuration.
@@ -37,9 +48,9 @@ type NodeConfig struct {
 	PrimaryMaster bool   `json:"primaryMaster"` // Is this the primary master? (exactly one required)
 	Role          string `json:"role"`          // "manager" or "worker" (required)
 
-	// Overlay Network Settings (per-node overrides)
-	OverlayProvider string `json:"overlayProvider"` // Override global overlayProvider for this node
-	OverlayConfig   string `json:"overlayConfig"`   // Provider-specific config (e.g., Netbird setup key, Tailscale auth key)
+	// System Settings
+	NewHostname string `json:"newHostname"` // New hostname to set (optional, idempotent)
+	RebootOnCompletion bool `json:"rebootOnCompletion"` // Reboot node after deployment (default: false)
 
 	// GlusterFS Settings (per-node overrides)
 	GlusterEnabled bool   `json:"glusterEnabled"` // Enable GlusterFS on this node (workers only)
@@ -48,6 +59,9 @@ type NodeConfig struct {
 
 	// Docker Swarm Settings
 	AdvertiseAddr string `json:"advertiseAddr"` // Override auto-detected advertise address for Swarm
+
+	// Script Execution
+	ScriptsEnabled bool `json:"scriptsEnabled"` // Enable script execution on this node (default: true)
 }
 
 // Load loads the configuration from a JSON file.
@@ -143,6 +157,18 @@ func (c *Config) ApplyDefaults() {
 		c.GlobalSettings.GlusterBrick = "/mnt/GlusterFS/Docker/Swarm/0001/brick"
 	}
 
+	// Script defaults
+	for i := range c.GlobalSettings.PreScripts {
+		if !c.GlobalSettings.PreScripts[i].Enabled {
+			c.GlobalSettings.PreScripts[i].Enabled = true
+		}
+	}
+	for i := range c.GlobalSettings.PostScripts {
+		if !c.GlobalSettings.PostScripts[i].Enabled {
+			c.GlobalSettings.PostScripts[i].Enabled = true
+		}
+	}
+
 	// Node defaults
 	for i := range c.Nodes {
 		// SSH defaults
@@ -153,11 +179,6 @@ func (c *Config) ApplyDefaults() {
 			c.Nodes[i].SSHPort = 22
 		}
 
-		// Overlay defaults (inherit from global if not set)
-		if c.Nodes[i].OverlayProvider == "" {
-			c.Nodes[i].OverlayProvider = c.GlobalSettings.OverlayProvider
-		}
-
 		// GlusterFS defaults (inherit from global if not set)
 		if c.Nodes[i].GlusterMount == "" {
 			c.Nodes[i].GlusterMount = c.GlobalSettings.GlusterMount
@@ -166,14 +187,6 @@ func (c *Config) ApplyDefaults() {
 			c.Nodes[i].GlusterBrick = c.GlobalSettings.GlusterBrick
 		}
 	}
-}
-
-// GetEffectiveOverlayProvider returns the effective overlay provider for a node.
-func (n *NodeConfig) GetEffectiveOverlayProvider(globalProvider string) string {
-	if n.OverlayProvider != "" {
-		return n.OverlayProvider
-	}
-	return globalProvider
 }
 
 // GetEffectiveGlusterMount returns the effective GlusterFS mount path for a node.

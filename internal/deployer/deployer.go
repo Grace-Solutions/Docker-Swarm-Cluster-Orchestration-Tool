@@ -27,24 +27,38 @@ func Deploy(ctx context.Context, cfg *config.Config) error {
 	}
 	log.Infow("✅ SSH connection pool ready")
 
-	// Phase 2: Install dependencies on all nodes
-	log.Infow("Phase 2: Installing dependencies on all nodes")
+	// Phase 2: Set hostnames if configured
+	log.Infow("Phase 2: Setting hostnames")
+	if err := setHostnames(ctx, cfg, sshPool); err != nil {
+		return fmt.Errorf("failed to set hostnames: %w", err)
+	}
+	log.Infow("✅ Hostnames configured")
+
+	// Phase 3: Execute pre-deployment scripts
+	log.Infow("Phase 3: Executing pre-deployment scripts")
+	if err := executeScripts(ctx, cfg, sshPool, cfg.GlobalSettings.PreScripts, "pre"); err != nil {
+		return fmt.Errorf("failed to execute pre-deployment scripts: %w", err)
+	}
+	log.Infow("✅ Pre-deployment scripts complete")
+
+	// Phase 4: Install dependencies on all nodes
+	log.Infow("Phase 4: Installing dependencies on all nodes")
 	if err := installDependencies(ctx, cfg, sshPool); err != nil {
 		return fmt.Errorf("failed to install dependencies: %w", err)
 	}
 	log.Infow("✅ Dependencies installed")
 
-	// Phase 3: Configure overlay network on all nodes
-	log.Infow("Phase 3: Configuring overlay network")
+	// Phase 5: Configure overlay network on all nodes
+	log.Infow("Phase 5: Configuring overlay network")
 	if err := configureOverlay(ctx, cfg, sshPool); err != nil {
 		return fmt.Errorf("failed to configure overlay network: %w", err)
 	}
 	log.Infow("✅ Overlay network configured")
 
-	// Phase 4: Setup GlusterFS if enabled
+	// Phase 6: Setup GlusterFS if enabled
 	glusterWorkers := getGlusterWorkers(cfg)
 	if len(glusterWorkers) > 0 {
-		log.Infow("Phase 4: Setting up GlusterFS", "workers", len(glusterWorkers))
+		log.Infow("Phase 6: Setting up GlusterFS", "workers", len(glusterWorkers))
 		if err := orchestrator.GlusterSetup(ctx, sshPool, glusterWorkers,
 			cfg.GlobalSettings.GlusterVolume,
 			cfg.GlobalSettings.GlusterMount,
@@ -53,27 +67,37 @@ func Deploy(ctx context.Context, cfg *config.Config) error {
 		}
 		log.Infow("✅ GlusterFS setup complete")
 	} else {
-		log.Infow("Phase 4: Skipping GlusterFS (no workers with glusterEnabled)")
+		log.Infow("Phase 6: Skipping GlusterFS (no workers with glusterEnabled)")
 	}
 
-	// Phase 5: Setup Docker Swarm
-	log.Infow("Phase 5: Setting up Docker Swarm")
+	// Phase 7: Setup Docker Swarm
+	log.Infow("Phase 7: Setting up Docker Swarm")
 	primaryMaster, managers, workers := categorizeNodes(cfg)
 	if err := orchestrator.SwarmSetup(ctx, sshPool, primaryMaster, managers, workers, primaryMaster); err != nil {
 		return fmt.Errorf("failed to setup Docker Swarm: %w", err)
 	}
 	log.Infow("✅ Docker Swarm setup complete")
 
-	// Phase 6: Deploy Portainer if enabled
+	// Phase 8: Deploy Portainer if enabled
 	if cfg.GlobalSettings.DeployPortainer {
-		log.Infow("Phase 6: Deploying Portainer")
+		log.Infow("Phase 8: Deploying Portainer")
 		// TODO: Implement Portainer deployment
 		log.Infow("⚠️  Portainer deployment not yet implemented")
 	}
 
-	// Phase 7: SSH key cleanup (not needed for config-based deployment)
-	// Since we use credentials from the config file, we don't add/remove SSH keys
-	log.Infow("Phase 7: SSH key management (using credentials from config, no cleanup needed)")
+	// Phase 9: Execute post-deployment scripts
+	log.Infow("Phase 9: Executing post-deployment scripts")
+	if err := executeScripts(ctx, cfg, sshPool, cfg.GlobalSettings.PostScripts, "post"); err != nil {
+		return fmt.Errorf("failed to execute post-deployment scripts: %w", err)
+	}
+	log.Infow("✅ Post-deployment scripts complete")
+
+	// Phase 10: Reboot nodes if configured
+	log.Infow("Phase 10: Rebooting nodes if configured")
+	if err := rebootNodes(ctx, cfg, sshPool); err != nil {
+		return fmt.Errorf("failed to reboot nodes: %w", err)
+	}
+	log.Infow("✅ Reboot initiated for configured nodes")
 
 	log.Infow("🎉 Cluster deployment complete!")
 	return nil
@@ -168,46 +192,35 @@ func installGlusterFS(ctx context.Context, sshPool *ssh.Pool, host string, serve
 func configureOverlay(ctx context.Context, cfg *config.Config, sshPool *ssh.Pool) error {
 	log := logging.L().With("phase", "overlay")
 
-	// Group nodes by overlay provider
-	providerNodes := make(map[string][]config.NodeConfig)
-	for _, node := range cfg.Nodes {
-		provider := node.GetEffectiveOverlayProvider(cfg.GlobalSettings.OverlayProvider)
-		if provider == "" || provider == "none" {
-			continue
-		}
-		providerNodes[provider] = append(providerNodes[provider], node)
-	}
-
-	if len(providerNodes) == 0 {
+	provider := cfg.GlobalSettings.OverlayProvider
+	if provider == "" || provider == "none" {
 		log.Infow("no overlay provider configured, skipping overlay setup")
 		return nil
 	}
 
-	// Configure each provider group
-	for provider, nodes := range providerNodes {
-		log.Infow("configuring overlay network", "provider", provider, "nodes", len(nodes))
+	overlayConfig := cfg.GlobalSettings.OverlayConfig
+	log.Infow("configuring overlay network", "provider", provider, "nodes", len(cfg.Nodes))
 
-		for _, node := range nodes {
-			if err := configureOverlayOnNode(ctx, sshPool, node, provider); err != nil {
-				return fmt.Errorf("failed to configure %s overlay on %s: %w", provider, node.Hostname, err)
-			}
+	// Configure overlay on all nodes in parallel
+	for _, node := range cfg.Nodes {
+		if err := configureOverlayOnNode(ctx, sshPool, node, provider, overlayConfig); err != nil {
+			return fmt.Errorf("failed to configure %s overlay on %s: %w", provider, node.Hostname, err)
 		}
-
-		log.Infow("✅ overlay network configured", "provider", provider)
 	}
 
+	log.Infow("✅ overlay network configured", "provider", provider)
 	return nil
 }
 
 // configureOverlayOnNode configures the overlay network on a single node idempotently.
-func configureOverlayOnNode(ctx context.Context, sshPool *ssh.Pool, node config.NodeConfig, provider string) error {
+func configureOverlayOnNode(ctx context.Context, sshPool *ssh.Pool, node config.NodeConfig, provider string, overlayConfig string) error {
 	switch provider {
 	case "netbird":
-		return configureNetbirdOnNode(ctx, sshPool, node)
+		return configureNetbirdOnNode(ctx, sshPool, node, overlayConfig)
 	case "tailscale":
-		return configureTailscaleOnNode(ctx, sshPool, node)
+		return configureTailscaleOnNode(ctx, sshPool, node, overlayConfig)
 	case "wireguard":
-		return configureWireGuardOnNode(ctx, sshPool, node)
+		return configureWireGuardOnNode(ctx, sshPool, node, overlayConfig)
 	case "none", "":
 		return nil
 	default:
@@ -216,7 +229,7 @@ func configureOverlayOnNode(ctx context.Context, sshPool *ssh.Pool, node config.
 }
 
 // configureNetbirdOnNode configures Netbird on a single node idempotently.
-func configureNetbirdOnNode(ctx context.Context, sshPool *ssh.Pool, node config.NodeConfig) error {
+func configureNetbirdOnNode(ctx context.Context, sshPool *ssh.Pool, node config.NodeConfig, overlayConfig string) error {
 	log := logging.L().With("node", node.Hostname, "provider", "netbird")
 
 	// Check if netbird is already running
@@ -240,8 +253,8 @@ fi
 
 	// Start netbird with setup key if provided
 	upCmd := "netbird up"
-	if node.OverlayConfig != "" {
-		upCmd = fmt.Sprintf("NB_SETUP_KEY='%s' netbird up", node.OverlayConfig)
+	if overlayConfig != "" {
+		upCmd = fmt.Sprintf("NB_SETUP_KEY='%s' netbird up", overlayConfig)
 	}
 
 	if _, stderr, err := sshPool.Run(ctx, node.Hostname, upCmd); err != nil {
@@ -253,7 +266,7 @@ fi
 }
 
 // configureTailscaleOnNode configures Tailscale on a single node idempotently.
-func configureTailscaleOnNode(ctx context.Context, sshPool *ssh.Pool, node config.NodeConfig) error {
+func configureTailscaleOnNode(ctx context.Context, sshPool *ssh.Pool, node config.NodeConfig, overlayConfig string) error {
 	log := logging.L().With("node", node.Hostname, "provider", "tailscale")
 
 	// Check if tailscale is already running
@@ -277,8 +290,8 @@ fi
 
 	// Start tailscale with auth key if provided
 	upCmd := "tailscale up"
-	if node.OverlayConfig != "" {
-		upCmd = fmt.Sprintf("TS_AUTHKEY='%s' tailscale up", node.OverlayConfig)
+	if overlayConfig != "" {
+		upCmd = fmt.Sprintf("TS_AUTHKEY='%s' tailscale up", overlayConfig)
 	}
 
 	if _, stderr, err := sshPool.Run(ctx, node.Hostname, upCmd); err != nil {
@@ -290,16 +303,16 @@ fi
 }
 
 // configureWireGuardOnNode configures WireGuard on a single node idempotently.
-func configureWireGuardOnNode(ctx context.Context, sshPool *ssh.Pool, node config.NodeConfig) error {
+func configureWireGuardOnNode(ctx context.Context, sshPool *ssh.Pool, node config.NodeConfig, overlayConfig string) error {
 	log := logging.L().With("node", node.Hostname, "provider", "wireguard")
 
 	// WireGuard requires a config file path in overlayConfig
-	if node.OverlayConfig == "" {
+	if overlayConfig == "" {
 		return fmt.Errorf("wireguard requires overlayConfig to specify interface name or config path")
 	}
 
 	// Parse interface name from config (format: "wg0" or "/etc/wireguard/wg0.conf")
-	iface := node.OverlayConfig
+	iface := overlayConfig
 	if len(iface) > 5 && iface[len(iface)-5:] == ".conf" {
 		// Extract interface name from path
 		parts := iface[len(iface)-10:]
@@ -328,7 +341,7 @@ fi
 	}
 
 	// Start wireguard interface
-	upCmd := fmt.Sprintf("wg-quick up %s", node.OverlayConfig)
+	upCmd := fmt.Sprintf("wg-quick up %s", overlayConfig)
 	if _, stderr, err := sshPool.Run(ctx, node.Hostname, upCmd); err != nil {
 		return fmt.Errorf("failed to start wireguard: %w (stderr: %s)", err, stderr)
 	}
@@ -360,6 +373,140 @@ func categorizeNodes(cfg *config.Config) (primaryMaster string, managers []strin
 		}
 	}
 	return
+}
+
+// setHostnames sets hostnames on nodes if configured.
+func setHostnames(ctx context.Context, cfg *config.Config, sshPool *ssh.Pool) error {
+	log := logging.L().With("phase", "hostnames")
+
+	for _, node := range cfg.Nodes {
+		if node.NewHostname == "" {
+			continue
+		}
+
+		nodeLog := log.With("node", node.Hostname, "newHostname", node.NewHostname)
+
+		// Check current hostname
+		stdout, _, err := sshPool.Run(ctx, node.Hostname, "hostname")
+		if err == nil && stdout == node.NewHostname+"\n" {
+			nodeLog.Infow("hostname already set")
+			continue
+		}
+
+		// Set hostname idempotently
+		setCmd := fmt.Sprintf("hostnamectl set-hostname %s", node.NewHostname)
+		if _, stderr, err := sshPool.Run(ctx, node.Hostname, setCmd); err != nil {
+			return fmt.Errorf("failed to set hostname on %s: %w (stderr: %s)", node.Hostname, err, stderr)
+		}
+
+		nodeLog.Infow("hostname set successfully")
+	}
+
+	return nil
+}
+
+// executeScripts executes scripts on nodes.
+func executeScripts(ctx context.Context, cfg *config.Config, sshPool *ssh.Pool, scripts []config.ScriptConfig, phase string) error {
+	log := logging.L().With("phase", fmt.Sprintf("%s-scripts", phase))
+
+	if len(scripts) == 0 {
+		log.Infow("no scripts to execute")
+		return nil
+	}
+
+	for i, script := range scripts {
+		if !script.Enabled {
+			log.Infow("skipping disabled script", "name", script.Name)
+			continue
+		}
+
+		scriptLog := log.With("script", script.Name, "index", i)
+		scriptLog.Infow("executing script", "source", script.Source)
+
+		// Execute script on all nodes (or only enabled nodes)
+		for _, node := range cfg.Nodes {
+			if !node.ScriptsEnabled {
+				continue
+			}
+
+			if err := executeScriptOnNode(ctx, sshPool, node, script); err != nil {
+				return fmt.Errorf("failed to execute script %s on %s: %w", script.Name, node.Hostname, err)
+			}
+		}
+
+		scriptLog.Infow("script executed successfully")
+	}
+
+	return nil
+}
+
+// executeScriptOnNode executes a single script on a single node.
+func executeScriptOnNode(ctx context.Context, sshPool *ssh.Pool, node config.NodeConfig, script config.ScriptConfig) error {
+	log := logging.L().With("node", node.Hostname, "script", script.Name)
+
+	// Determine if script is local or remote
+	isRemote := len(script.Source) > 7 && (script.Source[:7] == "http://" || script.Source[:8] == "https://")
+
+	var scriptPath string
+	if isRemote {
+		// Download remote script
+		scriptPath = fmt.Sprintf("/tmp/clusterctl-script-%s.sh", script.Name)
+		downloadCmd := fmt.Sprintf("curl -fsSL -o %s %s", scriptPath, script.Source)
+		if _, stderr, err := sshPool.Run(ctx, node.Hostname, downloadCmd); err != nil {
+			return fmt.Errorf("failed to download script: %w (stderr: %s)", err, stderr)
+		}
+		log.Infow("downloaded remote script", "url", script.Source)
+	} else {
+		// Transfer local script
+		// TODO: Implement file transfer via SSH (SCP or SFTP)
+		// For now, we'll assume the script is already on the remote host or use a workaround
+		return fmt.Errorf("local script transfer not yet implemented (script: %s)", script.Source)
+	}
+
+	// Make script executable
+	chmodCmd := fmt.Sprintf("chmod +x %s", scriptPath)
+	if _, stderr, err := sshPool.Run(ctx, node.Hostname, chmodCmd); err != nil {
+		return fmt.Errorf("failed to make script executable: %w (stderr: %s)", err, stderr)
+	}
+
+	// Execute script with parameters
+	execCmd := scriptPath
+	if script.Parameters != "" {
+		execCmd = fmt.Sprintf("%s %s", scriptPath, script.Parameters)
+	}
+
+	stdout, stderr, err := sshPool.Run(ctx, node.Hostname, execCmd)
+	if err != nil {
+		return fmt.Errorf("script execution failed: %w (stderr: %s)", err, stderr)
+	}
+
+	log.Infow("script executed", "stdout", stdout, "stderr", stderr)
+	return nil
+}
+
+// rebootNodes reboots nodes if configured.
+func rebootNodes(ctx context.Context, cfg *config.Config, sshPool *ssh.Pool) error {
+	log := logging.L().With("phase", "reboot")
+
+	for _, node := range cfg.Nodes {
+		if !node.RebootOnCompletion {
+			continue
+		}
+
+		nodeLog := log.With("node", node.Hostname)
+		nodeLog.Infow("initiating reboot with 15 second delay")
+
+		// Initiate reboot with 15 second delay and terminate SSH connection cleanly
+		rebootCmd := "nohup sh -c 'sleep 15 && reboot' > /dev/null 2>&1 &"
+		if _, stderr, err := sshPool.Run(ctx, node.Hostname, rebootCmd); err != nil {
+			// Ignore errors as the connection may be terminated
+			nodeLog.Infow("reboot initiated (connection may have terminated)", "stderr", stderr)
+		} else {
+			nodeLog.Infow("reboot scheduled successfully")
+		}
+	}
+
+	return nil
 }
 
 // NOTE: SSH key cleanup is not needed for config-based deployment.
