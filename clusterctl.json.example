@@ -6,8 +6,7 @@
     "glusterVolume": "docker-swarm-0001",
     "glusterMount": "/mnt/GlusterFS/Docker/Swarm/0001/data",
     "glusterBrick": "/mnt/GlusterFS/Docker/Swarm/0001/brick",
-    "deployPortainer": true,
-    "portainerPassword": "",
+    "servicesDir": "",
     "removeSSHPublicKeyOnCompletion": false,
     "preScripts": [
       {

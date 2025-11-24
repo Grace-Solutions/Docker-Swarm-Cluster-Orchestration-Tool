@@ -26,11 +26,10 @@ type GlobalSettings struct {
 	ClusterName              string         `json:"clusterName"`              // Cluster name (required)
 	OverlayProvider          string         `json:"overlayProvider"`          // "netbird", "tailscale", "wireguard", "none" (default: "none")
 	OverlayConfig            string         `json:"overlayConfig"`            // Provider-specific config (e.g., Netbird setup key, Tailscale auth key)
-	GlusterVolume            string         `json:"glusterVolume"`            // GlusterFS volume name (default: "docker-swarm-0001")
-	GlusterMount             string         `json:"glusterMount"`             // GlusterFS mount path (default: "/mnt/GlusterFS/Docker/Swarm/0001/data")
-	GlusterBrick             string         `json:"glusterBrick"`             // GlusterFS brick path (default: "/mnt/GlusterFS/Docker/Swarm/0001/brick")
-	DeployPortainer          bool           `json:"deployPortainer"`          // Deploy Portainer after setup (default: true)
-	PortainerPassword        string         `json:"portainerPassword"`        // Portainer admin password (default: auto-generated)
+	GlusterVolume                  string         `json:"glusterVolume"`                  // GlusterFS volume name (default: "docker-swarm-0001")
+	GlusterMount                   string         `json:"glusterMount"`                   // GlusterFS mount path (default: "/mnt/GlusterFS/Docker/Swarm/0001/data")
+	GlusterBrick                   string         `json:"glusterBrick"`                   // GlusterFS brick path (default: "/mnt/GlusterFS/Docker/Swarm/0001/brick")
+	ServicesDir                    string         `json:"servicesDir"`                    // Directory containing service YAML files (default: "services" relative to binary)
 	PreScripts                     []ScriptConfig `json:"preScripts"`                     // Scripts to execute before deployment
 	PostScripts                    []ScriptConfig `json:"postScripts"`                    // Scripts to execute after deployment
 	RemoveSSHPublicKeyOnCompletion bool           `json:"removeSSHPublicKeyOnCompletion"` // Remove SSH public key from nodes on completion (default: false)

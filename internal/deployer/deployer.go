@@ -9,6 +9,7 @@ import (
 	"clusterctl/internal/geolocation"
 	"clusterctl/internal/logging"
 	"clusterctl/internal/orchestrator"
+	"clusterctl/internal/services"
 	"clusterctl/internal/ssh"
 	"clusterctl/internal/sshkeys"
 )
@@ -97,11 +98,21 @@ func Deploy(ctx context.Context, cfg *config.Config) error {
 	}
 	log.Infow("✅ Node labels applied")
 
-	// Phase 9: Deploy Portainer if enabled
-	if cfg.GlobalSettings.DeployPortainer {
-		log.Infow("Phase 9: Deploying Portainer")
-		// TODO: Implement Portainer deployment
-		log.Infow("⚠️  Portainer deployment not yet implemented")
+	// Phase 9: Deploy services from YAML files
+	log.Infow("Phase 9: Deploying services")
+	metrics, err := services.DeployServices(ctx, sshPool, primaryMaster, cfg.GlobalSettings.ServicesDir)
+	if err != nil {
+		log.Warnw("service deployment encountered errors", "error", err)
+	}
+	if metrics != nil {
+		log.Infow("✅ Service deployment complete",
+			"found", metrics.TotalFound,
+			"enabled", metrics.TotalEnabled,
+			"disabled", metrics.TotalDisabled,
+			"success", metrics.TotalSuccess,
+			"failed", metrics.TotalFailed,
+			"duration", metrics.Duration.String(),
+		)
 	}
 
 	// Phase 10: Execute post-deployment scripts
