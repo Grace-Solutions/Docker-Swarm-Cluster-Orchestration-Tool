@@ -1,0 +1,55 @@
+# NAME: NginxUI
+# DESCRIPTION: Nginx UI - Web-based Nginx management interface
+# ENABLED: true
+
+services:
+  nginx-ui:
+    image: 0xjacky/nginx-ui:latest
+    hostname: 'nginx-ui-{{.Task.Slot}}'
+    environment:
+      TZ: UTC
+    ports:
+      - target: 9000
+        published: 9000
+        protocol: tcp
+        mode: ingress
+      - target: 80
+        published: 80
+        protocol: tcp
+        mode: ingress
+      - target: 443
+        published: 443
+        protocol: tcp
+        mode: ingress
+    volumes:
+      - /mnt/GlusterFS/Docker/Swarm/0001/data/NginxUI:/etc/nginx
+      - /mnt/GlusterFS/Docker/Swarm/0001/data/NginxUI/app:/app
+    networks:
+      - DOCKER-SWARM-CLUSTER-INTERNAL-COMMUNICATION
+      - DOCKER-SWARM-CLUSTER-EXTERNAL-INGRESS
+    deploy:
+      replicas: 3
+      placement:
+        constraints:
+          - node.platform.os==linux
+          - node.role==worker
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+
+networks:
+  DOCKER-SWARM-CLUSTER-INTERNAL-COMMUNICATION:
+    external: true
+  DOCKER-SWARM-CLUSTER-EXTERNAL-INGRESS:
+    external: true
+

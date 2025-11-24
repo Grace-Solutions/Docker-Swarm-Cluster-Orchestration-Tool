@@ -255,8 +255,8 @@ func deployService(ctx context.Context, sshPool *ssh.Pool, primaryMaster string,
 		return fmt.Errorf("failed to upload service file: %w (stderr: %s)", err, stderr)
 	}
 
-	// Deploy using docker stack deploy
-	deployCmd := fmt.Sprintf("docker stack deploy -c %s %s", remoteFile, svc.Name)
+	// Deploy using docker stack deploy with --prune to remove orphaned services
+	deployCmd := fmt.Sprintf("docker stack deploy --prune -c %s %s", remoteFile, svc.Name)
 
 	log.Infow("deploying Docker stack", "host", primaryMaster, "stack", svc.Name, "command", deployCmd)
 

@@ -2,8 +2,6 @@
 # DESCRIPTION: Portainer CE - Container management UI for Docker Swarm
 # ENABLED: true
 
-version: '3.8'
-
 services:
   portainer:
     image: portainer/portainer-ce:latest

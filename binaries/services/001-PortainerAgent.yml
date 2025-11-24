@@ -2,8 +2,6 @@
 # DESCRIPTION: Portainer Agent - Global service for Docker Swarm node management
 # ENABLED: true
 
-version: '3.8'
-
 services:
   portainer-agent:
     image: portainer/agent:latest

@@ -1,17 +1,63 @@
 # Docker Swarm Cluster Configuration Service
 
-`clusterctl` is a Go-based orchestrator that automates Docker Swarm
-initialization, node joins, overlay networking, and GlusterFS integration.
+`clusterctl` is a Go-based orchestrator that automates Docker Swarm cluster deployment, management, and teardown with GlusterFS storage integration via SSH.
 
-The project is designed around a **single binary** (`clusterctl`) that supports
-two deployment modes:
+## Features
 
-1. **Server-Initiated Deployment (Recommended)** - Deploy from a JSON configuration file
-2. **Legacy Node-Agent Mode** - Nodes register with a controller server
+- ✅ **Automated Deployment** - Deploy complete Docker Swarm clusters from JSON configuration
+- ✅ **SSH-Based Orchestration** - Server-initiated connections, no agents required
+- ✅ **GlusterFS Integration** - Replicated storage with automatic setup
+- ✅ **Overlay Networking** - Support for Netbird, Tailscale, and WireGuard
+- ✅ **Service Deployment** - Generic YAML-based service deployment system
+- ✅ **Teardown/Reset** - Clean cluster removal with optional data preservation
+- ✅ **Geolocation Detection** - Automatic region detection and node labeling
 
-## Quick Start (Server-Initiated Deployment)
+## Deployment & Teardown Flow
 
-The recommended way to deploy a cluster is using the `deploy` command with a JSON configuration file:
+```mermaid
+graph TB
+    Start([Start]) --> Config[Load Configuration]
+    Config --> Deploy{Deploy or Teardown?}
+
+    Deploy -->|Deploy| SSH1[Phase 1: SSH Setup]
+    SSH1 --> Hostname[Phase 2: Set Hostnames]
+    Hostname --> PreScript[Phase 3: Pre-Scripts]
+    PreScript --> Deps[Phase 4: Install Dependencies]
+    Deps --> Overlay[Phase 5: Overlay Network]
+    Overlay --> Gluster[Phase 6: GlusterFS Setup]
+    Gluster --> Swarm[Phase 7: Docker Swarm]
+    Swarm --> Labels[Phase 8: Geolocation & Labels]
+    Labels --> Services[Phase 9: Deploy Services]
+    Services --> PostScript[Phase 10: Post-Scripts]
+    PostScript --> Reboot[Phase 11: Reboot Nodes]
+    Reboot --> Complete1([✅ Deployment Complete])
+
+    Deploy -->|Teardown| SSH2[Phase 1: SSH Setup]
+    SSH2 --> RemoveStacks[Phase 2: Remove Stacks]
+    RemoveStacks --> LeaveSwarm[Phase 3: Leave Swarm]
+    LeaveSwarm --> UnmountGluster[Phase 4: Unmount GlusterFS]
+    UnmountGluster --> DeleteVolume[Phase 5: Delete Volume]
+    DeleteVolume --> DataDecision{Remove Data?}
+    DataDecision -->|Yes| RemoveData[Phase 6: Remove Data]
+    DataDecision -->|No| SkipData[Phase 6: Skip Data]
+    RemoveData --> NetworkDecision{Remove Networks?}
+    SkipData --> NetworkDecision
+    NetworkDecision -->|Yes| RemoveNetworks[Phase 7: Remove Networks]
+    NetworkDecision -->|No| SkipNetworks[Phase 7: Skip Networks]
+    RemoveNetworks --> Complete2([✅ Teardown Complete])
+    SkipNetworks --> Complete2
+
+    style Start fill:#90EE90
+    style Complete1 fill:#90EE90
+    style Complete2 fill:#FFB6C1
+    style Deploy fill:#87CEEB
+    style DataDecision fill:#FFD700
+    style NetworkDecision fill:#FFD700
+```
+
+## Quick Start
+
+### Deploy a Cluster
 
 ```bash
 # 1. Create a configuration file (see clusterctl.json.example)
@@ -21,20 +67,22 @@ cp clusterctl.json.example clusterctl.json
 nano clusterctl.json
 
 # 3. Deploy the cluster
-./clusterctl deploy --config clusterctl.json
+./clusterctl -config clusterctl.json
 ```
 
-This will:
-- ✅ Install Docker and GlusterFS on all nodes via SSH
-- ✅ Configure overlay network (Netbird/Tailscale/WireGuard)
-- ✅ Setup GlusterFS with replication and failover
-- ✅ Initialize Docker Swarm with managers and workers
-- ✅ Automatic geolocation detection and node labeling
-- ✅ Deploy Portainer (optional)
+### Teardown a Cluster
 
-### Deployment Flow
+```bash
+# Teardown cluster (keeps networks and data for connectivity)
+./clusterctl -config clusterctl.json -teardown
 
-When you run `clusterctl deploy --config clusterctl.json`, the following phases execute:
+# Full teardown (removes everything including data - WARNING: destructive)
+./clusterctl -config clusterctl.json -teardown -remove-overlays -remove-gluster-data
+```
+
+### Deployment Phases
+
+When you run `clusterctl -config clusterctl.json`, the following phases execute:
 
 1. **Phase 1**: SSH Connection Pool - Establish SSH connections to all nodes
 2. **Phase 2**: Set Hostnames - Idempotently set new hostnames (if configured)
@@ -44,9 +92,22 @@ When you run `clusterctl deploy --config clusterctl.json`, the following phases 
 6. **Phase 6**: Setup GlusterFS - Create trusted storage pool, volume, and mounts
 7. **Phase 7**: Setup Docker Swarm - Initialize swarm and join nodes
 8. **Phase 8**: Detect Geolocation & Apply Labels - Auto-detect region and apply all labels
-9. **Phase 9**: Deploy Portainer - Deploy Portainer web UI (if enabled)
+9. **Phase 9**: Deploy Services - Deploy services from `binaries/services/` folder
 10. **Phase 10**: Post-Deployment Scripts - Execute custom scripts after setup
 11. **Phase 11**: Reboot Nodes - Gracefully reboot nodes (if configured)
+12. **Phase 12**: SSH Key Cleanup - Remove SSH keys from nodes (if configured)
+
+### Teardown Phases
+
+When you run `clusterctl -config clusterctl.json -teardown`, the following phases execute:
+
+1. **Phase 1**: SSH Connection Pool - Establish SSH connections to all nodes
+2. **Phase 2**: Remove Stacks - Remove all deployed Docker stacks
+3. **Phase 3**: Leave Swarm - All nodes leave the Docker Swarm
+4. **Phase 4**: Unmount GlusterFS - Unmount GlusterFS volumes on managers
+5. **Phase 5**: Delete Volume - Stop and delete GlusterFS volume
+6. **Phase 6**: Remove Data (Optional) - Remove GlusterFS data directories (`-remove-gluster-data`)
+7. **Phase 7**: Remove Networks (Optional) - Remove overlay networks (`-remove-overlays`)
 
 **Key Features:**
 - ✅ **Parallel execution** - All nodes configured simultaneously for speed

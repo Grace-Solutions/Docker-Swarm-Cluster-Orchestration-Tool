@@ -13,6 +13,7 @@ import (
 	"clusterctl/internal/services"
 	"clusterctl/internal/ssh"
 	"clusterctl/internal/sshkeys"
+	"clusterctl/internal/swarm"
 )
 
 // Deploy orchestrates the complete cluster deployment from the configuration.
@@ -157,6 +158,110 @@ func Deploy(ctx context.Context, cfg *config.Config) error {
 		"totalDuration", duration.String(),
 		"phasesCompleted", phasesCompleted,
 		"phasesFailed", phasesFailed,
+		"startTime", startTime.Format(time.RFC3339),
+		"endTime", endTime.Format(time.RFC3339),
+	)
+	return nil
+}
+
+// Teardown orchestrates the complete cluster teardown from the configuration.
+func Teardown(ctx context.Context, cfg *config.Config, removeOverlays, removeGlusterData bool) error {
+	log := logging.L().With("component", "teardown")
+
+	startTime := time.Now()
+
+	log.Infow("🔥 Starting cluster teardown",
+		"clusterName", cfg.GlobalSettings.ClusterName,
+		"nodes", len(cfg.Nodes),
+		"removeOverlays", removeOverlays,
+		"removeGlusterData", removeGlusterData,
+		"startTime", startTime.Format(time.RFC3339),
+	)
+
+	// Phase 1: Prepare SSH keys and connection pool
+	log.Infow("Phase 1: Preparing SSH connections")
+	keyPair, err := prepareSSHKeys(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to prepare SSH keys: %w", err)
+	}
+
+	sshPool, err := createSSHPool(cfg, keyPair)
+	if err != nil {
+		return fmt.Errorf("failed to create SSH pool: %w", err)
+	}
+	log.Infow("✅ SSH connection pool ready")
+
+	// Get node lists
+	managers, workers := categorizeNodes(cfg)
+	allNodes := append(managers, workers...)
+	primaryManager := managers[0]
+
+	// Phase 2: Remove all deployed stacks
+	log.Infow("Phase 2: Removing deployed stacks")
+	if err := removeStacks(ctx, sshPool, primaryManager); err != nil {
+		log.Warnw("failed to remove stacks", "error", err)
+	} else {
+		log.Infow("✅ Stacks removed")
+	}
+
+	// Phase 3: Leave swarm on all nodes
+	log.Infow("Phase 3: Leaving Docker Swarm")
+	if err := leaveSwarm(ctx, sshPool, allNodes); err != nil {
+		log.Warnw("failed to leave swarm", "error", err)
+	} else {
+		log.Infow("✅ Swarm left on all nodes")
+	}
+
+	// Phase 4: Unmount GlusterFS volumes on managers
+	if len(managers) > 0 {
+		log.Infow("Phase 4: Unmounting GlusterFS volumes on managers")
+		if err := unmountGlusterFS(ctx, sshPool, managers, cfg); err != nil {
+			log.Warnw("failed to unmount GlusterFS", "error", err)
+		} else {
+			log.Infow("✅ GlusterFS unmounted on managers")
+		}
+	}
+
+	// Phase 5: Stop and delete GlusterFS volume on workers
+	if len(workers) > 0 {
+		log.Infow("Phase 5: Stopping and deleting GlusterFS volume")
+		if err := deleteGlusterVolume(ctx, sshPool, workers, cfg); err != nil {
+			log.Warnw("failed to delete GlusterFS volume", "error", err)
+		} else {
+			log.Infow("✅ GlusterFS volume deleted")
+		}
+	}
+
+	// Phase 6: Remove GlusterFS data if requested
+	if removeGlusterData && len(workers) > 0 {
+		log.Infow("Phase 6: Removing GlusterFS data directories")
+		if err := removeGlusterData_func(ctx, sshPool, workers, cfg); err != nil {
+			log.Warnw("failed to remove GlusterFS data", "error", err)
+		} else {
+			log.Infow("✅ GlusterFS data removed")
+		}
+	} else {
+		log.Infow("Phase 6: Skipping GlusterFS data removal (use -remove-gluster-data to remove)")
+	}
+
+	// Phase 7: Remove overlay networks if requested
+	if removeOverlays {
+		log.Infow("Phase 7: Removing overlay networks")
+		if err := removeOverlayNetworks(ctx, sshPool, primaryManager); err != nil {
+			log.Warnw("failed to remove overlay networks", "error", err)
+		} else {
+			log.Infow("✅ Overlay networks removed")
+		}
+	} else {
+		log.Infow("Phase 7: Skipping overlay network removal (use -remove-overlays to remove)")
+	}
+
+	// Calculate final metrics
+	endTime := time.Now()
+	duration := endTime.Sub(startTime)
+
+	log.Infow("🎉 Cluster teardown complete!",
+		"totalDuration", duration.String(),
 		"startTime", startTime.Format(time.RFC3339),
 		"endTime", endTime.Format(time.RFC3339),
 	)
@@ -779,6 +884,174 @@ func removeSSHPublicKeyFromNodes(ctx context.Context, cfg *config.Config, sshPoo
 			nodeLog.Warnw("failed to remove public key", "error", err, "stderr", stderr)
 		} else {
 			nodeLog.Infow("public key removed successfully")
+		}
+	}
+
+	return nil
+}
+
+// removeStacks removes all deployed Docker stacks from the primary manager.
+func removeStacks(ctx context.Context, sshPool *ssh.Pool, primaryManager string) error {
+	log := logging.L().With("component", "teardown-stacks")
+
+	// List all stacks
+	listCmd := "docker stack ls --format '{{.Name}}'"
+	log.Infow("listing Docker stacks", "host", primaryManager, "command", listCmd)
+	stdout, stderr, err := sshPool.Run(ctx, primaryManager, listCmd)
+	if err != nil {
+		return fmt.Errorf("failed to list stacks: %w (stderr: %s)", err, stderr)
+	}
+
+	stacks := strings.Split(strings.TrimSpace(stdout), "\n")
+	if len(stacks) == 0 || (len(stacks) == 1 && stacks[0] == "") {
+		log.Infow("no stacks found to remove")
+		return nil
+	}
+
+	// Remove each stack
+	for _, stack := range stacks {
+		stack = strings.TrimSpace(stack)
+		if stack == "" {
+			continue
+		}
+
+		removeCmd := fmt.Sprintf("docker stack rm %s", stack)
+		log.Infow("removing Docker stack", "host", primaryManager, "stack", stack, "command", removeCmd)
+		if _, stderr, err := sshPool.Run(ctx, primaryManager, removeCmd); err != nil {
+			log.Warnw("failed to remove stack", "stack", stack, "error", err, "stderr", stderr)
+		} else {
+			log.Infow("✅ stack removed", "stack", stack)
+		}
+	}
+
+	return nil
+}
+
+// leaveSwarm makes all nodes leave the Docker Swarm.
+func leaveSwarm(ctx context.Context, sshPool *ssh.Pool, allNodes []string) error {
+	log := logging.L().With("component", "teardown-swarm")
+
+	for _, node := range allNodes {
+		leaveCmd := "docker swarm leave --force"
+		log.Infow("leaving Docker Swarm", "host", node, "command", leaveCmd)
+		if _, stderr, err := sshPool.Run(ctx, node, leaveCmd); err != nil {
+			// Ignore errors if node is not in swarm
+			if !strings.Contains(stderr, "not part of a swarm") {
+				log.Warnw("failed to leave swarm", "host", node, "error", err, "stderr", stderr)
+			}
+		} else {
+			log.Infow("✅ left swarm", "host", node)
+		}
+	}
+
+	return nil
+}
+
+// unmountGlusterFS unmounts GlusterFS volumes on manager nodes.
+func unmountGlusterFS(ctx context.Context, sshPool *ssh.Pool, managers []string, cfg *config.Config) error {
+	log := logging.L().With("component", "teardown-gluster-unmount")
+
+	for _, manager := range managers {
+		if cfg.GlobalSettings.GlusterMount == "" {
+			continue
+		}
+
+		unmountCmd := fmt.Sprintf("umount %s 2>/dev/null || true", cfg.GlobalSettings.GlusterMount)
+		log.Infow("unmounting GlusterFS", "host", manager, "mountPoint", cfg.GlobalSettings.GlusterMount, "command", unmountCmd)
+		if _, stderr, err := sshPool.Run(ctx, manager, unmountCmd); err != nil {
+			log.Warnw("failed to unmount GlusterFS", "host", manager, "error", err, "stderr", stderr)
+		} else {
+			log.Infow("✅ GlusterFS unmounted", "host", manager)
+		}
+
+		// Remove from fstab
+		removeFstabCmd := fmt.Sprintf("sed -i '\\|%s|d' /etc/fstab", cfg.GlobalSettings.GlusterMount)
+		log.Infow("removing from fstab", "host", manager, "command", removeFstabCmd)
+		if _, stderr, err := sshPool.Run(ctx, manager, removeFstabCmd); err != nil {
+			log.Warnw("failed to remove from fstab", "host", manager, "error", err, "stderr", stderr)
+		}
+	}
+
+	return nil
+}
+
+// deleteGlusterVolume stops and deletes the GlusterFS volume.
+func deleteGlusterVolume(ctx context.Context, sshPool *ssh.Pool, workers []string, cfg *config.Config) error {
+	log := logging.L().With("component", "teardown-gluster-volume")
+
+	if len(workers) == 0 || cfg.GlobalSettings.GlusterVolume == "" {
+		return nil
+	}
+
+	orchestrator := workers[0]
+
+	// Stop volume
+	stopCmd := fmt.Sprintf("gluster volume stop %s force 2>/dev/null || true", cfg.GlobalSettings.GlusterVolume)
+	log.Infow("stopping GlusterFS volume", "host", orchestrator, "volume", cfg.GlobalSettings.GlusterVolume, "command", stopCmd)
+	if _, stderr, err := sshPool.Run(ctx, orchestrator, stopCmd); err != nil {
+		log.Warnw("failed to stop volume", "error", err, "stderr", stderr)
+	} else {
+		log.Infow("✅ volume stopped", "volume", cfg.GlobalSettings.GlusterVolume)
+	}
+
+	// Delete volume
+	deleteCmd := fmt.Sprintf("gluster volume delete %s 2>/dev/null || true", cfg.GlobalSettings.GlusterVolume)
+	log.Infow("deleting GlusterFS volume", "host", orchestrator, "volume", cfg.GlobalSettings.GlusterVolume, "command", deleteCmd)
+	if _, stderr, err := sshPool.Run(ctx, orchestrator, deleteCmd); err != nil {
+		log.Warnw("failed to delete volume", "error", err, "stderr", stderr)
+	} else {
+		log.Infow("✅ volume deleted", "volume", cfg.GlobalSettings.GlusterVolume)
+	}
+
+	// Detach peers
+	for _, worker := range workers[1:] {
+		detachCmd := fmt.Sprintf("gluster peer detach %s force 2>/dev/null || true", worker)
+		log.Infow("detaching GlusterFS peer", "host", orchestrator, "peer", worker, "command", detachCmd)
+		if _, stderr, err := sshPool.Run(ctx, orchestrator, detachCmd); err != nil {
+			log.Warnw("failed to detach peer", "peer", worker, "error", err, "stderr", stderr)
+		}
+	}
+
+	return nil
+}
+
+// removeGlusterData_func removes GlusterFS data directories on worker nodes.
+func removeGlusterData_func(ctx context.Context, sshPool *ssh.Pool, workers []string, cfg *config.Config) error {
+	log := logging.L().With("component", "teardown-gluster-data")
+
+	if cfg.GlobalSettings.GlusterBrick == "" {
+		return nil
+	}
+
+	for _, worker := range workers {
+		removeCmd := fmt.Sprintf("rm -rf %s", cfg.GlobalSettings.GlusterBrick)
+		log.Infow("removing GlusterFS data", "host", worker, "path", cfg.GlobalSettings.GlusterBrick, "command", removeCmd)
+		if _, stderr, err := sshPool.Run(ctx, worker, removeCmd); err != nil {
+			log.Warnw("failed to remove data", "host", worker, "error", err, "stderr", stderr)
+		} else {
+			log.Infow("✅ data removed", "host", worker, "path", cfg.GlobalSettings.GlusterBrick)
+		}
+	}
+
+	return nil
+}
+
+// removeOverlayNetworks removes Docker overlay networks.
+func removeOverlayNetworks(ctx context.Context, sshPool *ssh.Pool, primaryManager string) error {
+	log := logging.L().With("component", "teardown-networks")
+
+	networks := []string{
+		swarm.DefaultInternalNetworkName,
+		swarm.DefaultExternalNetworkName,
+	}
+
+	for _, network := range networks {
+		removeCmd := fmt.Sprintf("docker network rm %s 2>/dev/null || true", network)
+		log.Infow("removing overlay network", "host", primaryManager, "network", network, "command", removeCmd)
+		if _, stderr, err := sshPool.Run(ctx, primaryManager, removeCmd); err != nil {
+			log.Warnw("failed to remove network", "network", network, "error", err, "stderr", stderr)
+		} else {
+			log.Infow("✅ network removed", "network", network)
 		}
 	}
 

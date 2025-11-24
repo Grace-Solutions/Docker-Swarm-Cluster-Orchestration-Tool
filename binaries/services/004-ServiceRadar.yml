@@ -1,0 +1,39 @@
+# NAME: ServiceRadar
+# DESCRIPTION: ServiceRadar - Docker Swarm service monitoring and visualization
+# ENABLED: false
+
+services:
+  serviceradar:
+    image: serviceradar/serviceradar:latest
+    hostname: 'serviceradar-{{.Task.Slot}}'
+    environment:
+      TZ: UTC
+    ports:
+      - target: 8080
+        published: 8080
+        protocol: tcp
+        mode: ingress
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /mnt/GlusterFS/Docker/Swarm/0001/data/ServiceRadar:/data
+    networks:
+      - DOCKER-SWARM-CLUSTER-INTERNAL-COMMUNICATION
+      - DOCKER-SWARM-CLUSTER-EXTERNAL-INGRESS
+    deploy:
+      mode: global
+      placement:
+        constraints:
+          - node.platform.os==linux
+          - node.role==manager
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+
+networks:
+  DOCKER-SWARM-CLUSTER-INTERNAL-COMMUNICATION:
+    external: true
+  DOCKER-SWARM-CLUSTER-EXTERNAL-INGRESS:
+    external: true
+
