@@ -31,9 +31,9 @@ type GlobalSettings struct {
 	GlusterBrick             string         `json:"glusterBrick"`             // GlusterFS brick path (default: "/mnt/GlusterFS/Docker/Swarm/0001/brick")
 	DeployPortainer          bool           `json:"deployPortainer"`          // Deploy Portainer after setup (default: true)
 	PortainerPassword        string         `json:"portainerPassword"`        // Portainer admin password (default: auto-generated)
-	PreScripts               []ScriptConfig `json:"preScripts"`               // Scripts to execute before deployment
-	PostScripts              []ScriptConfig `json:"postScripts"`              // Scripts to execute after deployment
-	RemoveSSHPublicKey       bool           `json:"removeSSHPublicKey"`       // Remove SSH public key from nodes after deployment (default: false)
+	PreScripts                     []ScriptConfig `json:"preScripts"`                     // Scripts to execute before deployment
+	PostScripts                    []ScriptConfig `json:"postScripts"`                    // Scripts to execute after deployment
+	RemoveSSHPublicKeyOnCompletion bool           `json:"removeSSHPublicKeyOnCompletion"` // Remove SSH public key from nodes on completion (default: false)
 }
 
 // NodeConfig represents a single node's configuration.

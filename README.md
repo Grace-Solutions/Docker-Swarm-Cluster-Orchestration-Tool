@@ -72,7 +72,7 @@ See `clusterctl.json.example` for a complete example. The configuration has two 
     "glusterBrick": "/mnt/GlusterFS/Docker/Swarm/0001/brick",
     "deployPortainer": true,
     "portainerPassword": "",
-    "removeSSHPublicKey": false,
+    "removeSSHPublicKeyOnCompletion": false,
     "preScripts": [
       {
         "enabled": true,
@@ -105,10 +105,10 @@ See `clusterctl.json.example` for a complete example. The configuration has two 
 - `glusterBrick`: Default brick path for GlusterFS (default: `/mnt/GlusterFS/Docker/Swarm/0001/brick`)
 - `deployPortainer`: Deploy Portainer web UI (default: `true`)
 - `portainerPassword`: Portainer admin password (default: auto-generated)
-- `removeSSHPublicKey`: Remove SSH public key from nodes after deployment (default: `false`)
+- `removeSSHPublicKeyOnCompletion`: Remove SSH public key from nodes on deployment completion (default: `false`)
   - **Note**: Only affects nodes using `useSSHAutomaticKeyPair=true`
   - When `false` (default): SSH public key remains installed on nodes for future deployments
-  - When `true`: SSH public key is removed from nodes' `~/.ssh/authorized_keys`
+  - When `true`: SSH public key is removed from nodes' `~/.ssh/authorized_keys` after deployment completes
   - **Important**: Local private key is always kept in timestamped folders for future use
 - `preScripts`: Array of scripts to execute **before** deployment on all nodes
 - `postScripts`: Array of scripts to execute **after** deployment on all nodes
@@ -176,9 +176,12 @@ Each node supports extensive per-node configuration with overrides:
 - `useSSHAutomaticKeyPair`: Use automatically generated ED25519 key pair (default: `false`)
   - When `true`: Uses auto-generated key from `sshkeys/` directory (generated once, reused across deployments)
   - When `false`: Connects with `password` or `privateKeyPath` and installs the auto-generated public key for future use
-  - **Note**: Key pair is only generated if it doesn't already exist
+  - **Key Generation**: New key pair is generated **only when**:
+    - The `sshkeys/` directory doesn't exist, OR
+    - The `sshkeys/` directory is empty (no timestamped folders), OR
+    - The latest timestamped folder doesn't contain valid `PrivateKey` and `PublicKey` files
+  - **Key Reuse**: Otherwise, uses existing key pair from latest folder (by modified date descending)
   - **Location**: `sshkeys/yyyy.MM.dd.HHmm/PrivateKey` and `sshkeys/yyyy.MM.dd.HHmm/PublicKey` next to binary
-  - **Reuse**: Uses latest folder based on modified date descending
   - **Persistence**: Keys are never deleted from disk, always kept for future deployments
 - `sshPort`: SSH port per node (default: `22`)
 

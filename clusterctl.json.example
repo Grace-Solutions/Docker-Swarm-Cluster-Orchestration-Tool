@@ -8,7 +8,7 @@
     "glusterBrick": "/mnt/GlusterFS/Docker/Swarm/0001/brick",
     "deployPortainer": true,
     "portainerPassword": "",
-    "removeSSHPublicKey": false,
+    "removeSSHPublicKeyOnCompletion": false,
     "preScripts": [
       {
         "enabled": true,
