@@ -24,6 +24,7 @@ type AuthConfig struct {
 	Password       string
 	PrivateKeyPEM  []byte
 	PrivateKeyPath string
+	Port           int // SSH port (default: 22)
 }
 
 // NewClient creates a new SSH client connection to the specified host using the provided authentication.
@@ -69,7 +70,11 @@ func NewClient(ctx context.Context, host string, auth AuthConfig) (*Client, erro
 	// Add port if not present
 	addr := host
 	if _, _, err := net.SplitHostPort(host); err != nil {
-		addr = net.JoinHostPort(host, "22")
+		port := "22"
+		if auth.Port > 0 {
+			port = fmt.Sprintf("%d", auth.Port)
+		}
+		addr = net.JoinHostPort(host, port)
 	}
 
 	// Dial with context support

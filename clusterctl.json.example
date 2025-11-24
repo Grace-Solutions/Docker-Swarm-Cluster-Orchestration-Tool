@@ -2,8 +2,6 @@
   "globalSettings": {
     "clusterName": "production-swarm",
     "overlayProvider": "netbird",
-    "overlayConfig": "",
-    "sshUser": "root",
     "glusterVolume": "docker-swarm-0001",
     "glusterMount": "/mnt/GlusterFS/Docker/Swarm/0001/data",
     "glusterBrick": "/mnt/GlusterFS/Docker/Swarm/0001/brick",
@@ -16,81 +14,135 @@
       "username": "root",
       "password": "",
       "privateKeyPath": "/root/.ssh/id_ed25519",
+      "sshPort": 22,
       "primaryMaster": true,
       "role": "manager",
-      "glusterEnabled": false
+      "overlayProvider": "",
+      "overlayConfig": "your-netbird-setup-key-here",
+      "glusterEnabled": false,
+      "glusterMount": "",
+      "glusterBrick": "",
+      "advertiseAddr": ""
     },
     {
       "hostname": "manager2.example.com",
       "username": "root",
       "password": "",
       "privateKeyPath": "/root/.ssh/id_ed25519",
+      "sshPort": 22,
       "primaryMaster": false,
       "role": "manager",
-      "glusterEnabled": false
+      "overlayProvider": "",
+      "overlayConfig": "your-netbird-setup-key-here",
+      "glusterEnabled": false,
+      "glusterMount": "",
+      "glusterBrick": "",
+      "advertiseAddr": ""
     },
     {
       "hostname": "manager3.example.com",
       "username": "root",
       "password": "",
       "privateKeyPath": "/root/.ssh/id_ed25519",
+      "sshPort": 22,
       "primaryMaster": false,
       "role": "manager",
-      "glusterEnabled": false
+      "overlayProvider": "",
+      "overlayConfig": "your-netbird-setup-key-here",
+      "glusterEnabled": false,
+      "glusterMount": "",
+      "glusterBrick": "",
+      "advertiseAddr": ""
     },
     {
       "hostname": "worker1.example.com",
       "username": "root",
-      "password": "",
-      "privateKeyPath": "/root/.ssh/id_ed25519",
+      "password": "your-password-here",
+      "privateKeyPath": "",
+      "sshPort": 22,
       "primaryMaster": false,
       "role": "worker",
-      "glusterEnabled": true
+      "overlayProvider": "",
+      "overlayConfig": "your-netbird-setup-key-here",
+      "glusterEnabled": true,
+      "glusterMount": "",
+      "glusterBrick": "",
+      "advertiseAddr": ""
     },
     {
       "hostname": "worker2.example.com",
       "username": "root",
       "password": "",
       "privateKeyPath": "/root/.ssh/id_ed25519",
+      "sshPort": 22,
       "primaryMaster": false,
       "role": "worker",
-      "glusterEnabled": true
+      "overlayProvider": "",
+      "overlayConfig": "your-netbird-setup-key-here",
+      "glusterEnabled": true,
+      "glusterMount": "",
+      "glusterBrick": "",
+      "advertiseAddr": ""
     },
     {
       "hostname": "worker3.example.com",
       "username": "root",
       "password": "",
       "privateKeyPath": "/root/.ssh/id_ed25519",
+      "sshPort": 22,
       "primaryMaster": false,
       "role": "worker",
-      "glusterEnabled": true
+      "overlayProvider": "",
+      "overlayConfig": "your-netbird-setup-key-here",
+      "glusterEnabled": true,
+      "glusterMount": "",
+      "glusterBrick": "",
+      "advertiseAddr": ""
     },
     {
       "hostname": "worker4.example.com",
-      "username": "root",
+      "username": "admin",
       "password": "",
       "privateKeyPath": "/root/.ssh/id_ed25519",
+      "sshPort": 2222,
       "primaryMaster": false,
       "role": "worker",
-      "glusterEnabled": true
+      "overlayProvider": "tailscale",
+      "overlayConfig": "your-tailscale-auth-key-here",
+      "glusterEnabled": true,
+      "glusterMount": "",
+      "glusterBrick": "",
+      "advertiseAddr": ""
     },
     {
       "hostname": "worker5.example.com",
       "username": "root",
       "password": "",
       "privateKeyPath": "/root/.ssh/id_ed25519",
+      "sshPort": 22,
       "primaryMaster": false,
       "role": "worker",
-      "glusterEnabled": true
+      "overlayProvider": "",
+      "overlayConfig": "your-netbird-setup-key-here",
+      "glusterEnabled": true,
+      "glusterMount": "",
+      "glusterBrick": "",
+      "advertiseAddr": ""
     },
     {
       "hostname": "worker6.example.com",
       "username": "root",
       "password": "",
       "privateKeyPath": "/root/.ssh/id_ed25519",
+      "sshPort": 22,
       "primaryMaster": false,
       "role": "worker",
-      "glusterEnabled": true
+      "overlayProvider": "",
+      "overlayConfig": "your-netbird-setup-key-here",
+      "glusterEnabled": true,
+      "glusterMount": "",
+      "glusterBrick": "",
+      "advertiseAddr": ""
     }
   ]
 }

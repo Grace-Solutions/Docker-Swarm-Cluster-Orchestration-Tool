@@ -88,6 +88,7 @@ func createSSHPool(cfg *config.Config) (*ssh.Pool, error) {
 			Username:       node.Username,
 			Password:       node.Password,
 			PrivateKeyPath: node.PrivateKeyPath,
+			Port:           node.SSHPort,
 		}
 	}
 
@@ -163,16 +164,176 @@ func installGlusterFS(ctx context.Context, sshPool *ssh.Pool, host string, serve
 	return nil
 }
 
-// configureOverlay configures the overlay network on all nodes.
+// configureOverlay configures the overlay network on all nodes idempotently.
 func configureOverlay(ctx context.Context, cfg *config.Config, sshPool *ssh.Pool) error {
-	if cfg.GlobalSettings.OverlayProvider == "" {
-		logging.L().Infow("no overlay provider specified, skipping overlay configuration")
+	log := logging.L().With("phase", "overlay")
+
+	// Group nodes by overlay provider
+	providerNodes := make(map[string][]config.NodeConfig)
+	for _, node := range cfg.Nodes {
+		provider := node.GetEffectiveOverlayProvider(cfg.GlobalSettings.OverlayProvider)
+		if provider == "" || provider == "none" {
+			continue
+		}
+		providerNodes[provider] = append(providerNodes[provider], node)
+	}
+
+	if len(providerNodes) == 0 {
+		log.Infow("no overlay provider configured, skipping overlay setup")
 		return nil
 	}
 
-	// TODO: Implement overlay network configuration via SSH
-	// For now, assume overlay is already configured
-	logging.L().Warnw("overlay network configuration not yet implemented via SSH")
+	// Configure each provider group
+	for provider, nodes := range providerNodes {
+		log.Infow("configuring overlay network", "provider", provider, "nodes", len(nodes))
+
+		for _, node := range nodes {
+			if err := configureOverlayOnNode(ctx, sshPool, node, provider); err != nil {
+				return fmt.Errorf("failed to configure %s overlay on %s: %w", provider, node.Hostname, err)
+			}
+		}
+
+		log.Infow("✅ overlay network configured", "provider", provider)
+	}
+
+	return nil
+}
+
+// configureOverlayOnNode configures the overlay network on a single node idempotently.
+func configureOverlayOnNode(ctx context.Context, sshPool *ssh.Pool, node config.NodeConfig, provider string) error {
+	switch provider {
+	case "netbird":
+		return configureNetbirdOnNode(ctx, sshPool, node)
+	case "tailscale":
+		return configureTailscaleOnNode(ctx, sshPool, node)
+	case "wireguard":
+		return configureWireGuardOnNode(ctx, sshPool, node)
+	case "none", "":
+		return nil
+	default:
+		return fmt.Errorf("unknown overlay provider: %s", provider)
+	}
+}
+
+// configureNetbirdOnNode configures Netbird on a single node idempotently.
+func configureNetbirdOnNode(ctx context.Context, sshPool *ssh.Pool, node config.NodeConfig) error {
+	log := logging.L().With("node", node.Hostname, "provider", "netbird")
+
+	// Check if netbird is already running
+	checkCmd := "netbird status 2>/dev/null | grep -q 'Status: Connected' && echo 'CONNECTED' || echo 'NOT_CONNECTED'"
+	stdout, _, err := sshPool.Run(ctx, node.Hostname, checkCmd)
+	if err == nil && stdout == "CONNECTED\n" {
+		log.Infow("netbird already connected")
+		return nil
+	}
+
+	// Install netbird if not present
+	installCmd := `
+if ! command -v netbird &> /dev/null; then
+    echo "Installing Netbird..."
+    curl -fsSL https://pkgs.netbird.io/install.sh | sh
+fi
+`
+	if _, stderr, err := sshPool.Run(ctx, node.Hostname, installCmd); err != nil {
+		return fmt.Errorf("failed to install netbird: %w (stderr: %s)", err, stderr)
+	}
+
+	// Start netbird with setup key if provided
+	upCmd := "netbird up"
+	if node.OverlayConfig != "" {
+		upCmd = fmt.Sprintf("NB_SETUP_KEY='%s' netbird up", node.OverlayConfig)
+	}
+
+	if _, stderr, err := sshPool.Run(ctx, node.Hostname, upCmd); err != nil {
+		return fmt.Errorf("failed to start netbird: %w (stderr: %s)", err, stderr)
+	}
+
+	log.Infow("netbird configured successfully")
+	return nil
+}
+
+// configureTailscaleOnNode configures Tailscale on a single node idempotently.
+func configureTailscaleOnNode(ctx context.Context, sshPool *ssh.Pool, node config.NodeConfig) error {
+	log := logging.L().With("node", node.Hostname, "provider", "tailscale")
+
+	// Check if tailscale is already running
+	checkCmd := "tailscale status --json 2>/dev/null | grep -q '\"BackendState\":\"Running\"' && echo 'RUNNING' || echo 'NOT_RUNNING'"
+	stdout, _, err := sshPool.Run(ctx, node.Hostname, checkCmd)
+	if err == nil && stdout == "RUNNING\n" {
+		log.Infow("tailscale already running")
+		return nil
+	}
+
+	// Install tailscale if not present
+	installCmd := `
+if ! command -v tailscale &> /dev/null; then
+    echo "Installing Tailscale..."
+    curl -fsSL https://tailscale.com/install.sh | sh
+fi
+`
+	if _, stderr, err := sshPool.Run(ctx, node.Hostname, installCmd); err != nil {
+		return fmt.Errorf("failed to install tailscale: %w (stderr: %s)", err, stderr)
+	}
+
+	// Start tailscale with auth key if provided
+	upCmd := "tailscale up"
+	if node.OverlayConfig != "" {
+		upCmd = fmt.Sprintf("TS_AUTHKEY='%s' tailscale up", node.OverlayConfig)
+	}
+
+	if _, stderr, err := sshPool.Run(ctx, node.Hostname, upCmd); err != nil {
+		return fmt.Errorf("failed to start tailscale: %w (stderr: %s)", err, stderr)
+	}
+
+	log.Infow("tailscale configured successfully")
+	return nil
+}
+
+// configureWireGuardOnNode configures WireGuard on a single node idempotently.
+func configureWireGuardOnNode(ctx context.Context, sshPool *ssh.Pool, node config.NodeConfig) error {
+	log := logging.L().With("node", node.Hostname, "provider", "wireguard")
+
+	// WireGuard requires a config file path in overlayConfig
+	if node.OverlayConfig == "" {
+		return fmt.Errorf("wireguard requires overlayConfig to specify interface name or config path")
+	}
+
+	// Parse interface name from config (format: "wg0" or "/etc/wireguard/wg0.conf")
+	iface := node.OverlayConfig
+	if len(iface) > 5 && iface[len(iface)-5:] == ".conf" {
+		// Extract interface name from path
+		parts := iface[len(iface)-10:]
+		if idx := len(parts) - 5; idx > 0 {
+			iface = parts[:idx]
+		}
+	}
+
+	// Check if interface is already up
+	checkCmd := fmt.Sprintf("wg show %s 2>/dev/null && echo 'UP' || echo 'DOWN'", iface)
+	stdout, _, err := sshPool.Run(ctx, node.Hostname, checkCmd)
+	if err == nil && stdout == "UP\n" {
+		log.Infow("wireguard interface already up", "interface", iface)
+		return nil
+	}
+
+	// Install wireguard if not present
+	installCmd := `
+if ! command -v wg &> /dev/null; then
+    echo "Installing WireGuard..."
+    apt-get update && apt-get install -y wireguard wireguard-tools
+fi
+`
+	if _, stderr, err := sshPool.Run(ctx, node.Hostname, installCmd); err != nil {
+		return fmt.Errorf("failed to install wireguard: %w (stderr: %s)", err, stderr)
+	}
+
+	// Start wireguard interface
+	upCmd := fmt.Sprintf("wg-quick up %s", node.OverlayConfig)
+	if _, stderr, err := sshPool.Run(ctx, node.Hostname, upCmd); err != nil {
+		return fmt.Errorf("failed to start wireguard: %w (stderr: %s)", err, stderr)
+	}
+
+	log.Infow("wireguard configured successfully", "interface", iface)
 	return nil
 }
 

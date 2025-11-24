@@ -15,10 +15,8 @@ type Config struct {
 
 // GlobalSettings contains cluster-wide configuration.
 type GlobalSettings struct {
-	ClusterName       string `json:"clusterName"`
-	OverlayProvider   string `json:"overlayProvider"`   // "netbird", "tailscale", "wireguard"
-	OverlayConfig     string `json:"overlayConfig"`     // Provider-specific config
-	SSHUser           string `json:"sshUser"`           // Default SSH user (default: "root")
+	ClusterName       string `json:"clusterName"`       // Cluster name (required)
+	OverlayProvider   string `json:"overlayProvider"`   // "netbird", "tailscale", "wireguard", "none" (default: "none")
 	GlusterVolume     string `json:"glusterVolume"`     // GlusterFS volume name (default: "docker-swarm-0001")
 	GlusterMount      string `json:"glusterMount"`      // GlusterFS mount path (default: "/mnt/GlusterFS/Docker/Swarm/0001/data")
 	GlusterBrick      string `json:"glusterBrick"`      // GlusterFS brick path (default: "/mnt/GlusterFS/Docker/Swarm/0001/brick")
@@ -28,13 +26,28 @@ type GlobalSettings struct {
 
 // NodeConfig represents a single node's configuration.
 type NodeConfig struct {
+	// SSH Connection Settings
 	Hostname       string `json:"hostname"`       // Hostname or IP address (required)
-	Username       string `json:"username"`       // SSH username (overrides global sshUser if set)
+	Username       string `json:"username"`       // SSH username (required, default: "root")
 	Password       string `json:"password"`       // SSH password (optional, use privateKeyPath instead)
 	PrivateKeyPath string `json:"privateKeyPath"` // Path to SSH private key (optional, use password instead)
-	PrimaryMaster  bool   `json:"primaryMaster"`  // Is this the primary master? (exactly one required)
-	Role           string `json:"role"`           // "manager" or "worker" (required)
+	SSHPort        int    `json:"sshPort"`        // SSH port (default: 22)
+
+	// Node Role Settings
+	PrimaryMaster bool   `json:"primaryMaster"` // Is this the primary master? (exactly one required)
+	Role          string `json:"role"`          // "manager" or "worker" (required)
+
+	// Overlay Network Settings (per-node overrides)
+	OverlayProvider string `json:"overlayProvider"` // Override global overlayProvider for this node
+	OverlayConfig   string `json:"overlayConfig"`   // Provider-specific config (e.g., Netbird setup key, Tailscale auth key)
+
+	// GlusterFS Settings (per-node overrides)
 	GlusterEnabled bool   `json:"glusterEnabled"` // Enable GlusterFS on this node (workers only)
+	GlusterMount   string `json:"glusterMount"`   // Override global glusterMount for this node
+	GlusterBrick   string `json:"glusterBrick"`   // Override global glusterBrick for this node
+
+	// Docker Swarm Settings
+	AdvertiseAddr string `json:"advertiseAddr"` // Override auto-detected advertise address for Swarm
 }
 
 // Load loads the configuration from a JSON file.
@@ -117,8 +130,8 @@ func (c *Config) Validate() error {
 // ApplyDefaults applies default values to the configuration.
 func (c *Config) ApplyDefaults() {
 	// Global defaults
-	if c.GlobalSettings.SSHUser == "" {
-		c.GlobalSettings.SSHUser = "root"
+	if c.GlobalSettings.OverlayProvider == "" {
+		c.GlobalSettings.OverlayProvider = "none"
 	}
 	if c.GlobalSettings.GlusterVolume == "" {
 		c.GlobalSettings.GlusterVolume = "docker-swarm-0001"
@@ -132,9 +145,50 @@ func (c *Config) ApplyDefaults() {
 
 	// Node defaults
 	for i := range c.Nodes {
+		// SSH defaults
 		if c.Nodes[i].Username == "" {
-			c.Nodes[i].Username = c.GlobalSettings.SSHUser
+			c.Nodes[i].Username = "root"
+		}
+		if c.Nodes[i].SSHPort == 0 {
+			c.Nodes[i].SSHPort = 22
+		}
+
+		// Overlay defaults (inherit from global if not set)
+		if c.Nodes[i].OverlayProvider == "" {
+			c.Nodes[i].OverlayProvider = c.GlobalSettings.OverlayProvider
+		}
+
+		// GlusterFS defaults (inherit from global if not set)
+		if c.Nodes[i].GlusterMount == "" {
+			c.Nodes[i].GlusterMount = c.GlobalSettings.GlusterMount
+		}
+		if c.Nodes[i].GlusterBrick == "" {
+			c.Nodes[i].GlusterBrick = c.GlobalSettings.GlusterBrick
 		}
 	}
+}
+
+// GetEffectiveOverlayProvider returns the effective overlay provider for a node.
+func (n *NodeConfig) GetEffectiveOverlayProvider(globalProvider string) string {
+	if n.OverlayProvider != "" {
+		return n.OverlayProvider
+	}
+	return globalProvider
+}
+
+// GetEffectiveGlusterMount returns the effective GlusterFS mount path for a node.
+func (n *NodeConfig) GetEffectiveGlusterMount(globalMount string) string {
+	if n.GlusterMount != "" {
+		return n.GlusterMount
+	}
+	return globalMount
+}
+
+// GetEffectiveGlusterBrick returns the effective GlusterFS brick path for a node.
+func (n *NodeConfig) GetEffectiveGlusterBrick(globalBrick string) string {
+	if n.GlusterBrick != "" {
+		return n.GlusterBrick
+	}
+	return globalBrick
 }
 
