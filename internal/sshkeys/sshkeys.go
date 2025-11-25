@@ -1,6 +1,7 @@
 package sshkeys
 
 import (
+	"crypto"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
@@ -124,27 +125,28 @@ func EnsureKeyPair(keyDir string) (*KeyPair, error) {
 	publicKeyPath := filepath.Join(timestampedDir, PublicKeyFileName)
 
 	log.Infow("generating new SSH key pair", "path", privateKeyPath)
-	
+
 	// Generate ED25519 key pair
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate key pair: %w", err)
 	}
 
-	// Encode private key to PEM format
-	privateKeyPEM := &pem.Block{
-		Type:  "OPENSSH PRIVATE KEY",
-		Bytes: marshalED25519PrivateKey(privateKey),
-	}
-
-	// Write private key
-	privateKeyFile, err := os.OpenFile(privateKeyPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	// Marshal private key to OpenSSH format
+	// ssh.MarshalPrivateKey returns a *pem.Block with the private key in OpenSSH format
+	privateKeyPEM, err := ssh.MarshalPrivateKey(crypto.PrivateKey(privateKey), "")
 	if err != nil {
-		return nil, fmt.Errorf("failed to create private key file: %w", err)
+		return nil, fmt.Errorf("failed to marshal private key: %w", err)
 	}
-	defer privateKeyFile.Close()
 
-	if err := pem.Encode(privateKeyFile, privateKeyPEM); err != nil {
+	// Encode the PEM block to bytes
+	privateKeyBytes := pem.EncodeToMemory(privateKeyPEM)
+	if privateKeyBytes == nil {
+		return nil, fmt.Errorf("failed to encode private key to PEM format")
+	}
+
+	// Write private key in OpenSSH PEM format
+	if err := os.WriteFile(privateKeyPath, privateKeyBytes, 0600); err != nil {
 		return nil, fmt.Errorf("failed to write private key: %w", err)
 	}
 
