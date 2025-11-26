@@ -514,6 +514,16 @@ func installGlusterFS(ctx context.Context, sshPool *ssh.Pool, host string, serve
 		return nil
 	}
 
+	// Add GlusterFS PPA for latest stable version (Ubuntu/Debian)
+	// For other distros, this will fail gracefully and fall back to default repos
+	addPPACmd := `
+if command -v add-apt-repository &> /dev/null; then
+    add-apt-repository -y ppa:gluster/glusterfs-11 2>/dev/null || true
+fi
+`
+	logging.L().Infow("adding GlusterFS PPA", "node", host)
+	sshPool.Run(ctx, host, addPPACmd) // Ignore errors, PPA might not be available
+
 	var cmd string
 	if server {
 		cmd = "apt-get update && apt-get install -y glusterfs-server && systemctl enable glusterd && systemctl start glusterd"
