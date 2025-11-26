@@ -86,14 +86,21 @@ func Deploy(ctx context.Context, cfg *config.Config) error {
 	// Phase 6: Setup GlusterFS if enabled
 	glusterWorkers := getGlusterWorkers(cfg)
 	if len(glusterWorkers) > 0 {
-		log.Infow("Phase 6: Setting up GlusterFS", "workers", len(glusterWorkers))
-		if err := orchestrator.GlusterSetup(ctx, sshPool, glusterWorkers,
+		log.Infow("Phase 6: Setting up GlusterFS", "workers", len(glusterWorkers), "diskManagement", cfg.GlobalSettings.GlusterDiskManagement)
+		validWorkers, err := orchestrator.GlusterSetup(ctx, sshPool, glusterWorkers,
 			cfg.GlobalSettings.GlusterVolume,
 			cfg.GlobalSettings.GlusterMount,
-			cfg.GlobalSettings.GlusterBrick); err != nil {
+			cfg.GlobalSettings.GlusterBrick,
+			cfg.GlobalSettings.GlusterDiskManagement)
+		if err != nil {
 			return fmt.Errorf("failed to setup GlusterFS: %w", err)
 		}
-		log.Infow("✅ GlusterFS setup complete")
+
+		if validWorkers == nil || len(validWorkers) == 0 {
+			log.Warnw("⚠️ GlusterFS setup skipped - no workers with available disks")
+		} else {
+			log.Infow("✅ GlusterFS setup complete", "activeWorkers", len(validWorkers), "totalWorkers", len(glusterWorkers))
+		}
 	} else {
 		log.Infow("Phase 6: Skipping GlusterFS (no workers with glusterEnabled)")
 	}

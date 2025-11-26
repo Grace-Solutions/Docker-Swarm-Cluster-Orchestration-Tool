@@ -6,6 +6,7 @@
     "glusterVolume": "docker-swarm-0001",
     "glusterMount": "/mnt/GlusterFS/docker-swarm-0001/data",
     "glusterBrick": "/mnt/GlusterFS/docker-swarm-0001/brick",
+    "glusterDiskManagement": false,
     "servicesDir": "",
     "removeSSHPublicKeyOnCompletion": false,
     "preScripts": [

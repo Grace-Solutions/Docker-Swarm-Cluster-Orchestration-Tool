@@ -5,77 +5,104 @@ import (
 	"fmt"
 	"strings"
 
+	"clusterctl/internal/gluster"
 	"clusterctl/internal/logging"
 	"clusterctl/internal/ssh"
 )
 
 // GlusterSetup orchestrates GlusterFS setup across all worker nodes via SSH.
 // It creates the trusted storage pool, creates the volume, and mounts it on all nodes.
-func GlusterSetup(ctx context.Context, sshPool *ssh.Pool, workers []string, volume, mount, brick string) error {
+// If diskManagement is true, it will detect and format dedicated disks for GlusterFS.
+// Workers without available disks will be excluded from the GlusterFS cluster.
+// Returns the list of workers that were successfully included in the cluster.
+func GlusterSetup(ctx context.Context, sshPool *ssh.Pool, workers []string, volume, mount, brick string, diskManagement bool) ([]string, error) {
 	log := logging.L().With("component", "orchestrator", "phase", "gluster")
 
 	if len(workers) == 0 {
-		return fmt.Errorf("no workers available for GlusterFS setup")
+		return nil, fmt.Errorf("no workers available for GlusterFS setup")
 	}
 
-	log.Infow(fmt.Sprintf("starting GlusterFS setup: workers=%d volume=%s mount=%s brick=%s", len(workers), volume, mount, brick))
+	log.Infow(fmt.Sprintf("starting GlusterFS setup: workers=%d volume=%s mount=%s brick=%s diskManagement=%v", len(workers), volume, mount, brick, diskManagement))
 
-	// Phase 1: Create brick directories on all workers
-	log.Infow("phase 1: creating brick directories on all workers")
-	if err := createBrickDirectories(ctx, sshPool, workers, brick); err != nil {
-		return fmt.Errorf("failed to create brick directories: %w", err)
+	// Phase 0: Detect and prepare disks if disk management is enabled
+	validWorkers := workers
+	if diskManagement {
+		log.Infow("phase 0: detecting and preparing dedicated disks for GlusterFS")
+		var err error
+		validWorkers, err = detectAndPrepareDisk(ctx, sshPool, workers, brick)
+		if err != nil {
+			return nil, fmt.Errorf("failed to detect and prepare disks: %w", err)
+		}
+
+		if len(validWorkers) == 0 {
+			log.Warnw("⚠️ no workers have available disks for GlusterFS - skipping GlusterFS setup")
+			return nil, nil // Not an error, just no workers with disks
+		}
+
+		if len(validWorkers) < len(workers) {
+			excluded := len(workers) - len(validWorkers)
+			log.Warnw(fmt.Sprintf("⚠️ excluded %d workers without available disks", excluded), "validWorkers", len(validWorkers), "totalWorkers", len(workers))
+		}
+
+		log.Infow(fmt.Sprintf("✅ disk detection complete: %d workers have available disks", len(validWorkers)))
+	}
+
+	// Phase 1: Create brick directories on all valid workers
+	log.Infow(fmt.Sprintf("phase 1: creating brick directories on %d workers", len(validWorkers)))
+	if err := createBrickDirectories(ctx, sshPool, validWorkers, brick); err != nil {
+		return nil, fmt.Errorf("failed to create brick directories: %w", err)
 	}
 
 	// Phase 2: Create trusted storage pool
 	log.Infow("phase 2: creating trusted storage pool")
-	if err := createTrustedPool(ctx, sshPool, workers); err != nil {
-		return fmt.Errorf("failed to create trusted storage pool: %w", err)
+	if err := createTrustedPool(ctx, sshPool, validWorkers); err != nil {
+		return nil, fmt.Errorf("failed to create trusted storage pool: %w", err)
 	}
 
 	// Phase 3: Create GlusterFS volume
 	log.Infow("phase 3: creating GlusterFS volume")
-	if err := createVolume(ctx, sshPool, workers, volume, brick); err != nil {
-		return fmt.Errorf("failed to create volume: %w", err)
+	if err := createVolume(ctx, sshPool, validWorkers, volume, brick); err != nil {
+		return nil, fmt.Errorf("failed to create volume: %w", err)
 	}
 
 	// Phase 4: Start the volume
 	log.Infow("phase 4: starting GlusterFS volume")
-	if err := startVolume(ctx, sshPool, workers[0], volume); err != nil {
-		return fmt.Errorf("failed to start volume: %w", err)
+	if err := startVolume(ctx, sshPool, validWorkers[0], volume); err != nil {
+		return nil, fmt.Errorf("failed to start volume: %w", err)
 	}
 
 	// Phase 5: Mount the volume on all nodes
 	log.Infow("phase 5: mounting GlusterFS volume on all nodes")
-	if err := mountVolume(ctx, sshPool, workers, volume, mount); err != nil {
-		return fmt.Errorf("failed to mount volume: %w", err)
+	if err := mountVolume(ctx, sshPool, validWorkers, volume, mount); err != nil {
+		return nil, fmt.Errorf("failed to mount volume: %w", err)
 	}
 
 	// Phase 6: Verify mounts
 	log.Infow("phase 6: verifying GlusterFS mounts")
-	if err := verifyMounts(ctx, sshPool, workers, mount); err != nil {
-		return fmt.Errorf("failed to verify mounts: %w", err)
+	if err := verifyMounts(ctx, sshPool, validWorkers, mount); err != nil {
+		return nil, fmt.Errorf("failed to verify mounts: %w", err)
 	}
 
 	// Phase 7: Verify volume health
 	log.Infow("phase 7: verifying GlusterFS volume health")
-	if err := verifyVolumeHealth(ctx, sshPool, workers[0], volume, len(workers)); err != nil {
-		return fmt.Errorf("failed volume health verification: %w", err)
+	if err := verifyVolumeHealth(ctx, sshPool, validWorkers[0], volume, len(validWorkers)); err != nil {
+		return nil, fmt.Errorf("failed volume health verification: %w", err)
 	}
 
 	// Phase 8: Test replication
 	log.Infow("phase 8: testing GlusterFS replication")
-	if err := testReplication(ctx, sshPool, workers, mount); err != nil {
-		return fmt.Errorf("failed replication test: %w", err)
+	if err := testReplication(ctx, sshPool, validWorkers, mount); err != nil {
+		return nil, fmt.Errorf("failed replication test: %w", err)
 	}
 
 	// Phase 9: Create standard directory structure
 	log.Infow("phase 9: creating standard directory structure on GlusterFS volume")
-	if err := createStandardDirectories(ctx, sshPool, workers, mount); err != nil {
-		return fmt.Errorf("failed to create standard directories: %w", err)
+	if err := createStandardDirectories(ctx, sshPool, validWorkers, mount); err != nil {
+		return nil, fmt.Errorf("failed to create standard directories: %w", err)
 	}
 
-	log.Infow("✅ GlusterFS setup completed successfully")
-	return nil
+	log.Infow("✅ GlusterFS setup completed successfully", "workers", len(validWorkers))
+	return validWorkers, nil
 }
 
 func createBrickDirectories(ctx context.Context, sshPool *ssh.Pool, workers []string, brick string) error {
@@ -424,3 +451,42 @@ func createStandardDirectories(ctx context.Context, sshPool *ssh.Pool, workers [
 	return nil
 }
 
+// detectAndPrepareDisk detects available disks on workers and prepares them for GlusterFS.
+// Returns the list of workers that have available disks and were successfully prepared.
+// Workers without available disks are excluded from the returned list.
+func detectAndPrepareDisk(ctx context.Context, sshPool *ssh.Pool, workers []string, brickBasePath string) ([]string, error) {
+	log := logging.L().With("component", "orchestrator", "phase", "disk-detection")
+
+	var validWorkers []string
+
+	for _, worker := range workers {
+		log.Infow("detecting available disks", "host", worker)
+
+		// Detect available disks
+		disks, err := gluster.DetectAvailableDisks(ctx, sshPool, worker)
+		if err != nil {
+			log.Warnw("failed to detect disks, excluding worker", "host", worker, "err", err)
+			continue
+		}
+
+		if len(disks) == 0 {
+			log.Warnw("no available disks found, excluding worker", "host", worker)
+			continue
+		}
+
+		// Use the first available disk
+		disk := disks[0]
+		log.Infow("using disk for GlusterFS", "host", worker, "device", disk.Device, "size", disk.Size)
+
+		// Format and mount the disk at the brick path
+		if err := gluster.FormatAndMountDisk(ctx, sshPool, worker, disk.Device, brickBasePath); err != nil {
+			log.Warnw("failed to format and mount disk, excluding worker", "host", worker, "device", disk.Device, "err", err)
+			continue
+		}
+
+		log.Infow("✅ disk prepared successfully", "host", worker, "device", disk.Device, "mountPath", brickBasePath)
+		validWorkers = append(validWorkers, worker)
+	}
+
+	return validWorkers, nil
+}

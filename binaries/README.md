@@ -57,6 +57,41 @@ The tool will:
 5. Deploy Portainer (if enabled)
 6. Apply custom labels for service placement
 
+### GlusterFS Disk Management
+
+The `glusterDiskManagement` parameter controls how GlusterFS bricks are created:
+
+- **`false` (default)**: Uses OS disk folders (e.g., `/mnt/gluster-brick1`)
+  - ✅ Simple setup - no additional disks required
+  - ✅ Works on any system
+  - ⚠️ Not recommended for production (performance, capacity)
+  - ✅ Perfect for testing, development, home labs
+
+- **`true`**: Automatically detects, formats, and mounts dedicated disks
+  - ✅ Production-ready - dedicated storage for GlusterFS
+  - ✅ Formats disks with XFS (inode size 512 as recommended)
+  - ✅ Adds to /etc/fstab for persistence
+  - ✅ Automatically excludes nodes without available disks
+  - ⚠️ Requires at least one non-OS disk on worker nodes
+  - ℹ️ Workers without available disks are excluded from GlusterFS cluster
+
+**Example:**
+```json
+{
+  "globalSettings": {
+    "glusterBrick": "/mnt/gluster-brick1",
+    "glusterDiskManagement": true
+  }
+}
+```
+
+When `glusterDiskManagement: true`:
+- Tool detects available non-OS disks on each worker
+- Formats first available disk with XFS
+- Mounts at `glusterBrick` path
+- Adds to /etc/fstab for automatic mounting on reboot
+- Workers without disks are automatically excluded (no errors)
+
 ## SSH Key Management
 
 The tool automatically generates and manages ED25519 SSH keys:
