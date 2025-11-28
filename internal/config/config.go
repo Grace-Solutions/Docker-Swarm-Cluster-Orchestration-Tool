@@ -30,6 +30,7 @@ type GlobalSettings struct {
 	GlusterMount                   string         `json:"glusterMount"`                   // GlusterFS mount path (default: "/mnt/GlusterFS/Docker/Swarm/0001/data")
 	GlusterBrick                   string         `json:"glusterBrick"`                   // GlusterFS brick path (default: "/mnt/GlusterFS/Docker/Swarm/0001/brick")
 	GlusterDiskManagement          bool           `json:"glusterDiskManagement"`          // Enable automatic disk detection, formatting, and mounting (default: false, uses OS disk folders)
+	SetRootPassword                string         `json:"setRootPassword"`                // Set root password on all nodes (optional, empty = no change)
 	ServicesDir                    string         `json:"servicesDir"`                    // Directory containing service YAML files (default: "services" relative to binary)
 	PreScripts                     []ScriptConfig `json:"preScripts"`                     // Scripts to execute before deployment
 	PostScripts                    []ScriptConfig `json:"postScripts"`                    // Scripts to execute after deployment

@@ -92,6 +92,37 @@ When `glusterDiskManagement: true`:
 - Adds to /etc/fstab for automatic mounting on reboot
 - Workers without disks are automatically excluded (no errors)
 
+### Root Password Management
+
+The `setRootPassword` parameter allows you to set a consistent root password across all nodes:
+
+- **Empty string `""` (default)**: No password change
+  - ✅ Leaves existing root passwords unchanged
+  - ✅ Safe for nodes with existing password policies
+
+- **Non-empty string**: Sets root password on all nodes
+  - ✅ Ensures consistent root access across cluster
+  - ✅ Useful for standardizing credentials
+  - ✅ Applied early in deployment (Phase 2.5, after hostname setting)
+  - ⚠️ Password is stored in plain text in JSON config
+  - ⚠️ Ensure config file has appropriate permissions (chmod 600)
+
+**Example:**
+```json
+{
+  "globalSettings": {
+    "setRootPassword": "YourSecurePasswordHere"
+  }
+}
+```
+
+**Security recommendations:**
+- Use strong, unique passwords
+- Protect config file: `chmod 600 clusterctl.json`
+- Consider using SSH keys instead of passwords for authentication
+- Rotate passwords regularly
+- Use a password manager or secrets management system
+
 ## SSH Key Management
 
 The tool automatically generates and manages ED25519 SSH keys:

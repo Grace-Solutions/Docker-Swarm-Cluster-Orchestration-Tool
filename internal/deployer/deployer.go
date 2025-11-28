@@ -62,6 +62,17 @@ func Deploy(ctx context.Context, cfg *config.Config) error {
 	}
 	log.Infow("✅ Hostnames configured")
 
+	// Phase 2.5: Set root password if configured
+	if cfg.GlobalSettings.SetRootPassword != "" {
+		log.Infow("Phase 2.5: Setting root password on all nodes")
+		if err := setRootPassword(ctx, cfg, sshPool); err != nil {
+			return fmt.Errorf("failed to set root password: %w", err)
+		}
+		log.Infow("✅ Root password set on all nodes")
+	} else {
+		log.Infow("Phase 2.5: Skipping root password (not configured)")
+	}
+
 	// Phase 3: Execute pre-deployment scripts
 	log.Infow("Phase 3: Executing pre-deployment scripts")
 	if err := executeScripts(ctx, cfg, sshPool, cfg.GlobalSettings.PreScripts, "pre"); err != nil {
@@ -835,6 +846,44 @@ func setHostnames(ctx context.Context, cfg *config.Config, sshPool *ssh.Pool) er
 		}
 
 		nodeLog.Infow("✓ hostname set successfully")
+	}
+
+	return nil
+}
+
+// setRootPassword sets the root password on all enabled nodes.
+func setRootPassword(ctx context.Context, cfg *config.Config, sshPool *ssh.Pool) error {
+	log := logging.L().With("phase", "root-password")
+
+	enabledNodes := getEnabledNodes(cfg)
+	if len(enabledNodes) == 0 {
+		log.Infow("no nodes to update")
+		return nil
+	}
+
+	password := cfg.GlobalSettings.SetRootPassword
+	log.Infow("setting root password on all nodes", "totalNodes", len(enabledNodes))
+
+	for i, node := range enabledNodes {
+		nodeNum := i + 1
+		nodeLog := log.With(
+			"server", fmt.Sprintf("%d/%d", nodeNum, len(enabledNodes)),
+			"hostname", node.Hostname,
+			"user", node.Username,
+			"port", node.SSHPort,
+		)
+
+		nodeLog.Infow("→ setting root password")
+
+		// Use chpasswd to set password (works even if logged in as non-root with sudo)
+		// Format: username:password
+		setCmd := fmt.Sprintf("echo 'root:%s' | chpasswd", password)
+
+		if _, stderr, err := sshPool.Run(ctx, node.Hostname, setCmd); err != nil {
+			return fmt.Errorf("failed to set root password on %s: %w (stderr: %s)", node.Hostname, err, stderr)
+		}
+
+		nodeLog.Infow("✓ root password set successfully")
 	}
 
 	return nil
