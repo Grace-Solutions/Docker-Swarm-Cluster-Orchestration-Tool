@@ -906,14 +906,33 @@ func executeScripts(ctx context.Context, cfg *config.Config, sshPool *ssh.Pool, 
 
 		// Count enabled nodes that will execute this script
 		var targetNodes []config.NodeConfig
+		var skippedNodes int
 		enabledNodes := getEnabledNodes(cfg)
 		for _, node := range enabledNodes {
-			if node.ScriptsEnabled {
+			// Skip if scripts are disabled on this node
+			if !node.ScriptsEnabled {
+				skippedNodes++
+				continue
+			}
+
+			// Evaluate script conditions
+			matches, err := config.EvaluateScriptConditions(node, script.Conditions)
+			if err != nil {
+				return fmt.Errorf("failed to evaluate conditions for script %s on node %s: %w", script.Name, node.Hostname, err)
+			}
+
+			if matches {
 				targetNodes = append(targetNodes, node)
+			} else {
+				skippedNodes++
 			}
 		}
 
-		scriptLog.Infow("script will run on nodes", "targetNodes", len(targetNodes))
+		if len(script.Conditions) > 0 {
+			scriptLog.Infow("script will run on nodes", "targetNodes", len(targetNodes), "skippedNodes", skippedNodes, "conditions", len(script.Conditions))
+		} else {
+			scriptLog.Infow("script will run on nodes", "targetNodes", len(targetNodes))
+		}
 
 		// Execute script on all enabled nodes
 		for j, node := range targetNodes {

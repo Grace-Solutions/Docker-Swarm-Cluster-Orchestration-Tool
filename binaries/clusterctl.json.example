@@ -15,7 +15,60 @@
         "enabled": true,
         "name": "pre-deployment-check",
         "source": "https://example.com/scripts/pre-check.sh",
-        "parameters": "--verbose"
+        "parameters": "--verbose",
+        "conditions": []
+      },
+      {
+        "enabled": true,
+        "name": "worker-specific-setup",
+        "source": "https://example.com/scripts/worker-setup.sh",
+        "parameters": "",
+        "conditions": [
+          {
+            "property": "role",
+            "operator": "=",
+            "value": "worker"
+          }
+        ]
+      },
+      {
+        "enabled": true,
+        "name": "manager-specific-setup",
+        "source": "https://example.com/scripts/manager-setup.sh",
+        "parameters": "",
+        "conditions": [
+          {
+            "property": "role",
+            "operator": "=",
+            "value": "manager"
+          }
+        ]
+      },
+      {
+        "enabled": true,
+        "name": "production-nodes-only",
+        "source": "https://example.com/scripts/prod-setup.sh",
+        "parameters": "",
+        "conditions": [
+          {
+            "property": "label.environment",
+            "operator": "=",
+            "value": "production"
+          }
+        ]
+      },
+      {
+        "enabled": true,
+        "name": "vps-nodes-regex",
+        "source": "https://example.com/scripts/vps-setup.sh",
+        "parameters": "",
+        "conditions": [
+          {
+            "property": "hostname",
+            "operator": "regex",
+            "value": "^vps-.*"
+          }
+        ]
       }
     ],
     "postScripts": [
@@ -23,7 +76,26 @@
         "enabled": true,
         "name": "post-deployment-validation",
         "source": "https://example.com/scripts/post-validate.sh",
-        "parameters": "--verbose"
+        "parameters": "--verbose",
+        "conditions": []
+      },
+      {
+        "enabled": true,
+        "name": "worker-post-validation",
+        "source": "https://example.com/scripts/worker-validate.sh",
+        "parameters": "",
+        "conditions": [
+          {
+            "property": "role",
+            "operator": "=",
+            "value": "worker"
+          },
+          {
+            "property": "glusterEnabled",
+            "operator": "=",
+            "value": "true"
+          }
+        ]
       }
     ]
   },

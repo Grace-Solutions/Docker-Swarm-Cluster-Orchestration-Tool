@@ -15,10 +15,18 @@ type Config struct {
 
 // ScriptConfig represents a script to execute on nodes.
 type ScriptConfig struct {
-	Enabled    bool   `json:"enabled"`    // Enable this script (default: true)
-	Name       string `json:"name"`       // Script name/description
-	Source     string `json:"source"`     // Local path or http/https URL
-	Parameters string `json:"parameters"` // Script parameters/arguments
+	Enabled    bool              `json:"enabled"`    // Enable this script (default: true)
+	Name       string            `json:"name"`       // Script name/description
+	Source     string            `json:"source"`     // Local path or http/https URL
+	Parameters string            `json:"parameters"` // Script parameters/arguments
+	Conditions []ScriptCondition `json:"conditions"` // Conditions for script execution (all must match, empty = run on all nodes)
+}
+
+// ScriptCondition represents a condition for script execution.
+type ScriptCondition struct {
+	Property string `json:"property"` // Node property to check (e.g., "role", "hostname", "username", "newHostname", "glusterEnabled")
+	Operator string `json:"operator"` // Comparison operator: "=", "!=", "regex", "!regex"
+	Value    string `json:"value"`    // Value to compare against (case-insensitive for regex)
 }
 
 // GlobalSettings contains cluster-wide configuration.

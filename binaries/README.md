@@ -45,16 +45,16 @@ All binaries are:
 
 Create a JSON configuration file (see `clusterctl.json.example` in this directory) that defines:
 
-- **Global settings**: Cluster name, overlay provider, GlusterFS paths, Portainer settings
+- **Global settings**: Cluster name, overlay provider, GlusterFS paths, scripts
 - **Node definitions**: SSH connection details, roles (manager/worker), hostnames, labels
-- **Scripts**: Pre/post deployment scripts (optional)
+- **Scripts**: Pre/post deployment scripts with conditional execution (optional)
 
 The tool will:
 1. SSH into each node
 2. Install dependencies (Docker, overlay provider, GlusterFS)
 3. Configure Docker Swarm with managers and workers
 4. Set up GlusterFS distributed storage (if enabled)
-5. Deploy Portainer (if enabled)
+5. Execute pre/post deployment scripts (if configured)
 6. Apply custom labels for service placement
 
 ### GlusterFS Disk Management
@@ -91,6 +91,89 @@ When `glusterDiskManagement: true`:
 - Mounts at `glusterBrick` path
 - Adds to /etc/fstab for automatic mounting on reboot
 - Workers without disks are automatically excluded (no errors)
+
+### Script Conditional Execution
+
+Pre and post deployment scripts support conditional execution based on node properties. This allows you to run scripts only on specific nodes (e.g., workers only, managers only, specific hostnames, custom labels).
+
+**Supported Properties:**
+- `role` - Node role (manager/worker)
+- `hostname` - Node hostname
+- `username` - SSH username
+- `newHostname` - New hostname to set
+- `glusterEnabled` - GlusterFS enabled (true/false)
+- `rebootOnCompletion` - Reboot on completion (true/false)
+- `scriptsEnabled` - Scripts enabled (true/false)
+- `useSSHAutomaticKeyPair` - Use automatic key pair (true/false)
+- `enabled` - Node enabled (true/false)
+- `sshPort` - SSH port number
+- `advertiseAddr` - Advertise address
+- `glusterMount` - GlusterFS mount path
+- `glusterBrick` - GlusterFS brick path
+- `label.<key>` - Custom label value (e.g., `label.environment`)
+
+**Supported Operators:**
+- `=` or `==` or `equals` - Case-insensitive equality
+- `!=` or `notequals` - Case-insensitive inequality
+- `regex` or `matches` - Case-insensitive regex match
+- `!regex` or `notmatches` - Case-insensitive regex non-match
+
+**Condition Logic:**
+- Empty conditions array = run on all nodes
+- Multiple conditions = ALL must match (AND logic)
+
+**Examples:**
+
+```json
+{
+  "preScripts": [
+    {
+      "enabled": true,
+      "name": "worker-only-script",
+      "source": "https://example.com/worker-setup.sh",
+      "parameters": "",
+      "conditions": [
+        {
+          "property": "role",
+          "operator": "=",
+          "value": "worker"
+        }
+      ]
+    },
+    {
+      "enabled": true,
+      "name": "production-managers",
+      "source": "https://example.com/prod-manager-setup.sh",
+      "parameters": "",
+      "conditions": [
+        {
+          "property": "role",
+          "operator": "=",
+          "value": "manager"
+        },
+        {
+          "property": "label.environment",
+          "operator": "=",
+          "value": "production"
+        }
+      ]
+    },
+    {
+      "enabled": true,
+      "name": "vps-nodes-regex",
+      "source": "https://example.com/vps-setup.sh",
+      "parameters": "",
+      "conditions": [
+        {
+          "property": "hostname",
+          "operator": "regex",
+          "value": "^vps-.*"
+        }
+      ]
+    }
+  ]
+}
+```
 
 ### Root Password Management
 
