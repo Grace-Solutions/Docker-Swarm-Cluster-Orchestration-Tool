@@ -229,11 +229,22 @@ func createVolume(ctx context.Context, sshPool *ssh.Pool, sshWorkers, glusterWor
 	sshOrchestrator := sshWorkers[0]
 	glusterOrchestrator := glusterWorkers[0]
 
-	// Build brick list using Gluster addresses: 100.76.1.1:/path 100.76.1.2:/path ...
+	// Build brick list using Gluster addresses
+	// IMPORTANT: Use localhost for the orchestrator's brick so GlusterFS recognizes it as itself
+	// For other nodes, use their overlay IPs
 	var bricks []string
 	for i, glusterWorker := range glusterWorkers {
-		bricks = append(bricks, fmt.Sprintf("%s:%s", glusterWorker, brick))
-		logging.L().Infow("→ brick", "index", i, "sshHost", sshWorkers[i], "glusterAddress", glusterWorker, "brickPath", brick)
+		var brickAddress string
+		if i == 0 {
+			// Orchestrator uses localhost to refer to itself
+			brickAddress = "localhost"
+			logging.L().Infow("→ brick (orchestrator)", "index", i, "sshHost", sshWorkers[i], "glusterAddress", glusterWorker, "brickAddress", brickAddress, "brickPath", brick)
+		} else {
+			// Other nodes use their overlay IP
+			brickAddress = glusterWorker
+			logging.L().Infow("→ brick", "index", i, "sshHost", sshWorkers[i], "glusterAddress", glusterWorker, "brickAddress", brickAddress, "brickPath", brick)
+		}
+		bricks = append(bricks, fmt.Sprintf("%s:%s", brickAddress, brick))
 	}
 	brickList := strings.Join(bricks, " ")
 
