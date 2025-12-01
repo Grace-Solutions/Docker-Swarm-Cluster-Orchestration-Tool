@@ -12,6 +12,7 @@ import (
 
 // SwarmSetup orchestrates Docker Swarm setup across all nodes via SSH.
 // It initializes the swarm on the primary manager and joins all other nodes.
+// Note: managers array should include ALL managers (including primary), this function will filter out the primary.
 func SwarmSetup(ctx context.Context, sshPool *ssh.Pool, primaryManager string, managers, workers []string, advertiseAddr string) error {
 	log := logging.L().With("component", "orchestrator", "phase", "swarm")
 
@@ -24,22 +25,38 @@ func SwarmSetup(ctx context.Context, sshPool *ssh.Pool, primaryManager string, m
 		return fmt.Errorf("failed to initialize swarm: %w", err)
 	}
 
-	// Phase 2: Get join tokens
-	log.Infow("phase 2: retrieving join tokens")
+	// Verify primary manager is ready and is actually a manager
+	log.Infow("→ verifying primary manager is ready")
+	if err := verifyManagerReady(ctx, sshPool, primaryManager); err != nil {
+		return fmt.Errorf("primary manager not ready: %w", err)
+	}
+	log.Infow("✓ primary manager is ready and active")
+
+	// Phase 2: Get join tokens from the primary manager (which is now initialized)
+	log.Infow("phase 2: retrieving join tokens from primary manager")
 	managerToken, workerToken, err := getJoinTokens(ctx, sshPool, primaryManager)
 	if err != nil {
 		return fmt.Errorf("failed to get join tokens: %w", err)
 	}
 
-	log.Infow(fmt.Sprintf("manager join token: %s", managerToken))
-	log.Infow(fmt.Sprintf("worker join token: %s", workerToken))
+	log.Infow(fmt.Sprintf("✓ manager join token retrieved: %s", managerToken[:20]+"..."))
+	log.Infow(fmt.Sprintf("✓ worker join token retrieved: %s", workerToken[:20]+"..."))
 
-	// Phase 3: Join managers
-	if len(managers) > 0 {
-		log.Infow(fmt.Sprintf("phase 3: joining %d manager nodes", len(managers)))
-		if err := joinNodes(ctx, sshPool, managers, managerToken, advertiseAddr); err != nil {
+	// Phase 3: Join additional managers (exclude primary manager from the list)
+	additionalManagers := make([]string, 0)
+	for _, mgr := range managers {
+		if mgr != advertiseAddr {
+			additionalManagers = append(additionalManagers, mgr)
+		}
+	}
+
+	if len(additionalManagers) > 0 {
+		log.Infow(fmt.Sprintf("phase 3: joining %d additional manager nodes", len(additionalManagers)))
+		if err := joinNodes(ctx, sshPool, additionalManagers, managerToken, advertiseAddr); err != nil {
 			return fmt.Errorf("failed to join managers: %w", err)
 		}
+	} else {
+		log.Infow("phase 3: no additional managers to join")
 	}
 
 	// Phase 4: Join workers
@@ -48,15 +65,17 @@ func SwarmSetup(ctx context.Context, sshPool *ssh.Pool, primaryManager string, m
 		if err := joinNodes(ctx, sshPool, workers, workerToken, advertiseAddr); err != nil {
 			return fmt.Errorf("failed to join workers: %w", err)
 		}
+	} else {
+		log.Infow("phase 4: no workers to join")
 	}
 
 	// Phase 5: Verify swarm status
 	log.Infow("phase 5: verifying Docker Swarm status")
-	if err := verifySwarm(ctx, sshPool, primaryManager, len(managers)+1, len(workers)); err != nil {
+	if err := verifySwarm(ctx, sshPool, primaryManager, len(managers), len(workers)); err != nil {
 		return fmt.Errorf("failed to verify swarm: %w", err)
 	}
 
-	log.Infow("Docker Swarm setup completed successfully")
+	log.Infow("✅ Docker Swarm setup completed successfully")
 	return nil
 }
 
@@ -224,3 +243,29 @@ func verifySwarm(ctx context.Context, sshPool *ssh.Pool, primaryManager string, 
 	return nil
 }
 
+// verifyManagerReady verifies that a node is ready and is actually a manager.
+func verifyManagerReady(ctx context.Context, sshPool *ssh.Pool, manager string) error {
+	retryCfg := retry.DefaultConfig(fmt.Sprintf("verify-manager-%s", manager))
+
+	return retry.Do(ctx, retryCfg, func() error {
+		cmd := "docker info --format '{{.Swarm.LocalNodeState}} {{.Swarm.ControlAvailable}}'"
+		stdout, stderr, err := sshPool.Run(ctx, manager, cmd)
+		if err != nil {
+			return fmt.Errorf("failed to check swarm status: %w (stderr: %s)", err, stderr)
+		}
+
+		output := strings.TrimSpace(stdout)
+
+		// Check if node is active
+		if !strings.Contains(output, "active") {
+			return fmt.Errorf("node is not active in swarm: %s", output)
+		}
+
+		// Check if node has manager control
+		if !strings.Contains(output, "true") {
+			return fmt.Errorf("node is active but not a manager: %s", output)
+		}
+
+		return nil
+	})
+}
