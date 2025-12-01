@@ -12,16 +12,36 @@ import (
 
 // SwarmSetup orchestrates Docker Swarm setup across all nodes via SSH.
 // It initializes the swarm on the primary manager and joins all other nodes.
-// Note: managers array should include ALL managers (including primary), this function will filter out the primary.
-func SwarmSetup(ctx context.Context, sshPool *ssh.Pool, primaryManager string, managers, workers []string, advertiseAddr string) error {
+//
+// Parameters:
+//   sshManagers: SSH hostnames for all managers (including primary) - used for SSH operations
+//   sshWorkers: SSH hostnames for all workers - used for SSH operations
+//   managerAdvertiseAddrs: Advertise addresses (interface:port or IP:port) for all managers (including primary)
+//   workerAdvertiseAddrs: Advertise addresses (interface:port or IP:port) for all workers
+//   primaryAdvertiseAddr: Advertise address for the primary manager
+//
+// Note: sshManagers and managerAdvertiseAddrs must be parallel arrays (same length, same order)
+func SwarmSetup(ctx context.Context, sshPool *ssh.Pool, sshManagers, sshWorkers, managerAdvertiseAddrs, workerAdvertiseAddrs []string, primaryAdvertiseAddr string) error {
 	log := logging.L().With("component", "orchestrator", "phase", "swarm")
 
+	if len(sshManagers) == 0 {
+		return fmt.Errorf("no managers provided")
+	}
+	if len(sshManagers) != len(managerAdvertiseAddrs) {
+		return fmt.Errorf("sshManagers and managerAdvertiseAddrs must have same length: got %d and %d", len(sshManagers), len(managerAdvertiseAddrs))
+	}
+	if len(sshWorkers) != len(workerAdvertiseAddrs) {
+		return fmt.Errorf("sshWorkers and workerAdvertiseAddrs must have same length: got %d and %d", len(sshWorkers), len(workerAdvertiseAddrs))
+	}
+
+	primaryManager := sshManagers[0] // SSH hostname for primary manager
+
 	log.Infow(fmt.Sprintf("starting Docker Swarm setup: primaryManager=%s managers=%d workers=%d advertiseAddr=%s",
-		primaryManager, len(managers), len(workers), advertiseAddr))
+		primaryManager, len(sshManagers), len(sshWorkers), primaryAdvertiseAddr))
 
 	// Phase 1: Initialize swarm on primary manager
 	log.Infow("phase 1: initializing Docker Swarm on primary manager")
-	if err := initSwarm(ctx, sshPool, primaryManager, advertiseAddr); err != nil {
+	if err := initSwarm(ctx, sshPool, primaryManager, primaryAdvertiseAddr); err != nil {
 		return fmt.Errorf("failed to initialize swarm: %w", err)
 	}
 
@@ -43,16 +63,11 @@ func SwarmSetup(ctx context.Context, sshPool *ssh.Pool, primaryManager string, m
 	log.Infow(fmt.Sprintf("✓ worker join token retrieved: %s", workerToken[:20]+"..."))
 
 	// Phase 3: Join additional managers (exclude primary manager from the list)
-	additionalManagers := make([]string, 0)
-	for _, mgr := range managers {
-		if mgr != advertiseAddr {
-			additionalManagers = append(additionalManagers, mgr)
-		}
-	}
+	additionalSSHManagers := sshManagers[1:]
 
-	if len(additionalManagers) > 0 {
-		log.Infow(fmt.Sprintf("phase 3: joining %d additional manager nodes", len(additionalManagers)))
-		if err := joinNodes(ctx, sshPool, additionalManagers, managerToken, advertiseAddr); err != nil {
+	if len(additionalSSHManagers) > 0 {
+		log.Infow(fmt.Sprintf("phase 3: joining %d additional manager nodes", len(additionalSSHManagers)))
+		if err := joinNodes(ctx, sshPool, additionalSSHManagers, managerToken, primaryAdvertiseAddr); err != nil {
 			return fmt.Errorf("failed to join managers: %w", err)
 		}
 	} else {
@@ -60,9 +75,9 @@ func SwarmSetup(ctx context.Context, sshPool *ssh.Pool, primaryManager string, m
 	}
 
 	// Phase 4: Join workers
-	if len(workers) > 0 {
-		log.Infow(fmt.Sprintf("phase 4: joining %d worker nodes", len(workers)))
-		if err := joinNodes(ctx, sshPool, workers, workerToken, advertiseAddr); err != nil {
+	if len(sshWorkers) > 0 {
+		log.Infow(fmt.Sprintf("phase 4: joining %d worker nodes", len(sshWorkers)))
+		if err := joinNodes(ctx, sshPool, sshWorkers, workerToken, primaryAdvertiseAddr); err != nil {
 			return fmt.Errorf("failed to join workers: %w", err)
 		}
 	} else {
@@ -71,7 +86,7 @@ func SwarmSetup(ctx context.Context, sshPool *ssh.Pool, primaryManager string, m
 
 	// Phase 5: Verify swarm status
 	log.Infow("phase 5: verifying Docker Swarm status")
-	if err := verifySwarm(ctx, sshPool, primaryManager, len(managers), len(workers)); err != nil {
+	if err := verifySwarm(ctx, sshPool, primaryManager, len(sshManagers), len(sshWorkers)); err != nil {
 		return fmt.Errorf("failed to verify swarm: %w", err)
 	}
 

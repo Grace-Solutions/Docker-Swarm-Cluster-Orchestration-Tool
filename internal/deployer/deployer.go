@@ -156,7 +156,7 @@ func Deploy(ctx context.Context, cfg *config.Config) error {
 				overlayInfoMap[sshHost] = OverlayInfo{FQDN: sshHost, IP: sshHost}
 			} else {
 				overlayInfoMap[sshHost] = overlayInfo
-				log.Infow("→ overlay info", "sshHost", sshHost, "fqdn", overlayInfo.FQDN, "ip", overlayInfo.IP)
+				log.Infow("→ overlay info", "sshHost", sshHost, "fqdn", overlayInfo.FQDN, "ip", overlayInfo.IP, "interface", overlayInfo.Interface)
 			}
 		}
 	} else {
@@ -166,25 +166,36 @@ func Deploy(ctx context.Context, cfg *config.Config) error {
 		}
 	}
 
-	// Map SSH hostnames to overlay IPs (Docker requires IP addresses for advertise-addr)
-	managerIPs := make([]string, len(sshManagers))
+	// Build advertise addresses: prefer interface:port, fallback to IP:port
+	// This makes the cluster resilient to IP changes
+	managerAdvertiseAddrs := make([]string, len(sshManagers))
 	for i, sshHost := range sshManagers {
-		managerIPs[i] = overlayInfoMap[sshHost].IP
+		info := overlayInfoMap[sshHost]
+		if info.Interface != "" {
+			managerAdvertiseAddrs[i] = info.Interface + ":2377"
+		} else {
+			managerAdvertiseAddrs[i] = info.IP + ":2377"
+		}
 	}
-	workerIPs := make([]string, len(sshWorkers))
+	workerAdvertiseAddrs := make([]string, len(sshWorkers))
 	for i, sshHost := range sshWorkers {
-		workerIPs[i] = overlayInfoMap[sshHost].IP
+		info := overlayInfoMap[sshHost]
+		if info.Interface != "" {
+			workerAdvertiseAddrs[i] = info.Interface + ":2377"
+		} else {
+			workerAdvertiseAddrs[i] = info.IP + ":2377"
+		}
 	}
 
-	primaryMaster := sshManagers[0]                    // SSH hostname for SSH operations
-	primaryMasterOverlayIP := overlayInfoMap[sshManagers[0]].IP  // Overlay IP for Swarm advertise address
+	primaryMaster := sshManagers[0]                              // SSH hostname for SSH operations
+	primaryMasterAdvertiseAddr := managerAdvertiseAddrs[0]       // Interface:port or IP:port for Swarm advertise address
 
-	log.Infow("→ Using overlay IPs for Docker Swarm", "primaryMasterIP", primaryMasterOverlayIP, "managerIPs", managerIPs, "workerIPs", workerIPs, "overlayProvider", provider)
+	log.Infow("→ Using advertise addresses for Docker Swarm", "primaryMasterAddr", primaryMasterAdvertiseAddr, "managerAddrs", managerAdvertiseAddrs, "workerAddrs", workerAdvertiseAddrs, "overlayProvider", provider)
 
-	if err := orchestrator.SwarmSetup(ctx, sshPool, primaryMaster, managerIPs, workerIPs, primaryMasterOverlayIP); err != nil {
+	if err := orchestrator.SwarmSetup(ctx, sshPool, sshManagers, sshWorkers, managerAdvertiseAddrs, workerAdvertiseAddrs, primaryMasterAdvertiseAddr); err != nil {
 		return fmt.Errorf("failed to setup Docker Swarm: %w", err)
 	}
-	log.Infow("✅ Docker Swarm setup complete", "primaryMasterIP", primaryMasterOverlayIP)
+	log.Infow("✅ Docker Swarm setup complete", "primaryMasterAddr", primaryMasterAdvertiseAddr)
 
 	// Phase 8: Detect geolocation and apply node labels
 	log.Infow("Phase 8: Detecting geolocation and applying node labels")
@@ -1554,12 +1565,34 @@ func removeOverlayNetworks(ctx context.Context, sshPool *ssh.Pool, primaryManage
 
 // OverlayInfo contains overlay network information for a node
 type OverlayInfo struct {
-	FQDN string // Fully qualified domain name (e.g., node1.netbird.cloud)
-	IP   string // Overlay IP address without CIDR (e.g., 100.76.202.130)
+	FQDN      string // Fully qualified domain name (e.g., node1.netbird.cloud)
+	IP        string // Overlay IP address without CIDR (e.g., 100.76.202.130)
+	Interface string // Network interface name (e.g., wt0, tailscale0)
+}
+
+// getInterfaceForIP finds the network interface name for a given IP address on a remote host.
+// Uses the same precedence as IP detection: relay → local → public.
+// Returns the interface name or empty string if not found.
+func getInterfaceForIP(ctx context.Context, sshPool *ssh.Pool, sshHost, targetIP string) (string, error) {
+	// Use 'ip -j addr show' to get JSON output of all interfaces and their IPs
+	// Then filter for the interface that has the target IP
+	cmd := fmt.Sprintf("ip -j addr show | jq -r '.[] | select(.addr_info[]?.local == \"%s\") | .ifname' | head -n1 | tr -d '\\n'", targetIP)
+
+	stdout, stderr, err := sshPool.Run(ctx, sshHost, cmd)
+	if err != nil {
+		return "", fmt.Errorf("failed to find interface for IP %s: %w (stderr: %s)", targetIP, err, stderr)
+	}
+
+	ifname := strings.TrimSpace(stdout)
+	if ifname == "" {
+		return "", fmt.Errorf("no interface found for IP %s", targetIP)
+	}
+
+	return ifname, nil
 }
 
 // getOverlayInfoForNode retrieves the overlay network information for a single node.
-// Returns the overlay FQDN and IP, or falls back to SSH hostname for both.
+// Returns the overlay FQDN, IP, and network interface name, or falls back to SSH hostname.
 func getOverlayInfoForNode(ctx context.Context, sshPool *ssh.Pool, sshHost, provider string) (OverlayInfo, error) {
 	switch provider {
 	case "netbird":
@@ -1585,7 +1618,14 @@ func getOverlayInfoForNode(ctx context.Context, sshPool *ssh.Pool, sshHost, prov
 			return OverlayInfo{FQDN: sshHost, IP: sshHost}, fmt.Errorf("netbird fqdn or ip empty or null")
 		}
 
-		return OverlayInfo{FQDN: fqdn, IP: ip}, nil
+		// Find the network interface for this IP
+		ifname, err := getInterfaceForIP(ctx, sshPool, sshHost, ip)
+		if err != nil {
+			logging.L().Warnw("failed to detect interface for overlay IP, will use IP as fallback", "sshHost", sshHost, "ip", ip, "error", err)
+			ifname = "" // Will fallback to IP in advertise-addr
+		}
+
+		return OverlayInfo{FQDN: fqdn, IP: ip, Interface: ifname}, nil
 
 	case "tailscale":
 		// Get tailscale info via SSH using JSON output
@@ -1607,7 +1647,14 @@ func getOverlayInfoForNode(ctx context.Context, sshPool *ssh.Pool, sshHost, prov
 			return OverlayInfo{FQDN: sshHost, IP: sshHost}, fmt.Errorf("tailscale fqdn or ip empty or null")
 		}
 
-		return OverlayInfo{FQDN: fqdn, IP: ip}, nil
+		// Find the network interface for this IP
+		ifname, err := getInterfaceForIP(ctx, sshPool, sshHost, ip)
+		if err != nil {
+			logging.L().Warnw("failed to detect interface for overlay IP, will use IP as fallback", "sshHost", sshHost, "ip", ip, "error", err)
+			ifname = "" // Will fallback to IP in advertise-addr
+		}
+
+		return OverlayInfo{FQDN: fqdn, IP: ip, Interface: ifname}, nil
 
 	default:
 		return OverlayInfo{FQDN: sshHost, IP: sshHost}, fmt.Errorf("unknown overlay provider: %s", provider)
