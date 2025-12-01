@@ -2,6 +2,7 @@ package overlay
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -33,35 +34,47 @@ type Provider interface {
 	Teardown(ctx context.Context, config string) error
 }
 
+// NetbirdStatus represents the JSON output from `netbird status --json`
+type NetbirdStatus struct {
+	FQDN      string `json:"fqdn"`
+	NetbirdIP string `json:"netbirdIp"` // e.g., "100.76.202.130/16"
+}
+
 // NetbirdHostname returns the FQDN assigned to this node by Netbird, if
-// available, by parsing the output of `netbird status`.
+// available, by parsing the JSON output of `netbird status --json`.
 func NetbirdHostname(ctx context.Context) (string, error) {
 	if _, err := exec.LookPath("netbird"); err != nil {
 		return "", err
 	}
 
-	cmd := exec.CommandContext(ctx, "netbird", "status")
+	cmd := exec.CommandContext(ctx, "netbird", "status", "--json")
 	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("overlay: netbird status failed: %w (output: %s)", err, strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("overlay: netbird status --json failed: %w (output: %s)", err, strings.TrimSpace(string(out)))
 	}
 
-	lines := strings.Split(string(out), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "FQDN:") {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				fqdn := strings.TrimSpace(parts[1])
-				if fqdn != "" {
-					return fqdn, nil
-				}
-			}
-		}
+	var status NetbirdStatus
+	if err := json.Unmarshal(out, &status); err != nil {
+		return "", fmt.Errorf("overlay: failed to parse netbird status JSON: %w", err)
 	}
 
-	return "", fmt.Errorf("overlay: netbird FQDN not found in status output")
+	if status.FQDN == "" {
+		return "", fmt.Errorf("overlay: netbird FQDN is empty in status output")
+	}
+
+	return status.FQDN, nil
+}
+
+// TailscaleStatus represents the JSON output from `tailscale status --json`
+type TailscaleStatus struct {
+	Self TailscaleSelf `json:"Self"`
+}
+
+// TailscaleSelf represents the Self section of tailscale status JSON
+type TailscaleSelf struct {
+	DNSName      string   `json:"DNSName"`
+	TailscaleIPs []string `json:"TailscaleIPs"`
 }
 
 // TailscaleHostname returns the DNSName assigned to this node by Tailscale, if
@@ -78,47 +91,16 @@ func TailscaleHostname(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("overlay: tailscale status --json failed: %w (output: %s)", err, strings.TrimSpace(string(out)))
 	}
 
-	// We avoid a full JSON dependency and instead do a minimal search for
-	// '"Self"' then the first '"DNSName"' that follows.
-	text := string(out)
-	selfIdx := strings.Index(text, "\"Self\"")
-	if selfIdx == -1 {
-		return "", fmt.Errorf("overlay: tailscale Self section not found in status output")
+	var status TailscaleStatus
+	if err := json.Unmarshal(out, &status); err != nil {
+		return "", fmt.Errorf("overlay: failed to parse tailscale status JSON: %w", err)
 	}
 
-	sub := text[selfIdx:]
-	key := "\"DNSName\""
-	kidx := strings.Index(sub, key)
-	if kidx == -1 {
-		return "", fmt.Errorf("overlay: tailscale DNSName not found in Self section")
+	if status.Self.DNSName == "" {
+		return "", fmt.Errorf("overlay: tailscale DNSName is empty in status output")
 	}
 
-	rest := sub[kidx+len(key):]
-	// Expect something like: : "hostname.example.",
-	colIdx := strings.Index(rest, ":")
-	if colIdx == -1 {
-		return "", fmt.Errorf("overlay: malformed DNSName entry in tailscale status output")
-	}
-
-	rest = rest[colIdx+1:]
-	// Trim spaces and any leading quotes, then read until the next quote.
-	rest = strings.TrimSpace(rest)
-	if !strings.HasPrefix(rest, "\"") {
-		return "", fmt.Errorf("overlay: unexpected tailscale DNSName format")
-	}
-
-	rest = rest[1:]
-	endIdx := strings.Index(rest, "\"")
-	if endIdx == -1 {
-		return "", fmt.Errorf("overlay: unterminated tailscale DNSName value")
-	}
-
-	dnsName := strings.TrimSpace(rest[:endIdx])
-	if dnsName == "" {
-		return "", fmt.Errorf("overlay: empty tailscale DNSName value")
-	}
-
-	return dnsName, nil
+	return status.Self.DNSName, nil
 }
 
 // EnsureConnected selects the appropriate provider by name and ensures overlay

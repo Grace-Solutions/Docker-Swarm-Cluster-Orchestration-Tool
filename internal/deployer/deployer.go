@@ -2,6 +2,7 @@ package deployer
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -1570,25 +1571,55 @@ type OverlayInfo struct {
 	Interface string // Network interface name (e.g., wt0, tailscale0)
 }
 
+// IPAddrInfo represents address information from 'ip -j addr show'
+type IPAddrInfo struct {
+	IfName   string `json:"ifname"`
+	AddrInfo []struct {
+		Local string `json:"local"`
+	} `json:"addr_info"`
+}
+
 // getInterfaceForIP finds the network interface name for a given IP address on a remote host.
 // Uses the same precedence as IP detection: relay → local → public.
 // Returns the interface name or empty string if not found.
 func getInterfaceForIP(ctx context.Context, sshPool *ssh.Pool, sshHost, targetIP string) (string, error) {
 	// Use 'ip -j addr show' to get JSON output of all interfaces and their IPs
-	// Then filter for the interface that has the target IP
-	cmd := fmt.Sprintf("ip -j addr show | jq -r '.[] | select(.addr_info[]?.local == \"%s\") | .ifname' | head -n1 | tr -d '\\n'", targetIP)
+	cmd := "ip -j addr show"
 
 	stdout, stderr, err := sshPool.Run(ctx, sshHost, cmd)
 	if err != nil {
-		return "", fmt.Errorf("failed to find interface for IP %s: %w (stderr: %s)", targetIP, err, stderr)
+		return "", fmt.Errorf("failed to get interface info: %w (stderr: %s)", err, stderr)
 	}
 
-	ifname := strings.TrimSpace(stdout)
-	if ifname == "" {
-		return "", fmt.Errorf("no interface found for IP %s", targetIP)
+	var interfaces []IPAddrInfo
+	if err := json.Unmarshal([]byte(stdout), &interfaces); err != nil {
+		return "", fmt.Errorf("failed to parse ip addr JSON: %w", err)
 	}
 
-	return ifname, nil
+	// Find the interface that has the target IP
+	for _, iface := range interfaces {
+		for _, addr := range iface.AddrInfo {
+			if addr.Local == targetIP {
+				return iface.IfName, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("no interface found for IP %s", targetIP)
+}
+
+// NetbirdStatusJSON represents the JSON output from 'netbird status --json'
+type NetbirdStatusJSON struct {
+	FQDN      string `json:"fqdn"`
+	NetbirdIP string `json:"netbirdIp"` // e.g., "100.76.202.130/16"
+}
+
+// TailscaleStatusJSON represents the JSON output from 'tailscale status --json'
+type TailscaleStatusJSON struct {
+	Self struct {
+		DNSName      string   `json:"DNSName"`
+		TailscaleIPs []string `json:"TailscaleIPs"`
+	} `json:"Self"`
 }
 
 // getOverlayInfoForNode retrieves the overlay network information for a single node.
@@ -1597,26 +1628,23 @@ func getOverlayInfoForNode(ctx context.Context, sshPool *ssh.Pool, sshHost, prov
 	switch provider {
 	case "netbird":
 		// Get netbird info via SSH using JSON output
-		cmd := "netbird status --json | jq -r '.fqdn + \" \" + .netbirdIp' | tr -d '\\n'"
+		cmd := "netbird status --json"
 		stdout, stderr, cmdErr := sshPool.Run(ctx, sshHost, cmd)
 		if cmdErr != nil {
 			return OverlayInfo{FQDN: sshHost, IP: sshHost}, fmt.Errorf("netbird status failed: %w (stderr: %s)", cmdErr, stderr)
 		}
 
-		parts := strings.Fields(strings.TrimSpace(stdout))
-		if len(parts) != 2 {
-			return OverlayInfo{FQDN: sshHost, IP: sshHost}, fmt.Errorf("unexpected netbird output format: %s", stdout)
+		var status NetbirdStatusJSON
+		if err := json.Unmarshal([]byte(stdout), &status); err != nil {
+			return OverlayInfo{FQDN: sshHost, IP: sshHost}, fmt.Errorf("failed to parse netbird JSON: %w", err)
 		}
 
-		fqdn := parts[0]
-		ipWithCIDR := parts[1]
+		if status.FQDN == "" || status.NetbirdIP == "" {
+			return OverlayInfo{FQDN: sshHost, IP: sshHost}, fmt.Errorf("netbird fqdn or ip empty")
+		}
 
 		// Remove CIDR notation from IP (e.g., "100.76.202.130/16" -> "100.76.202.130")
-		ip := strings.Split(ipWithCIDR, "/")[0]
-
-		if fqdn == "" || fqdn == "null" || ip == "" || ip == "null" {
-			return OverlayInfo{FQDN: sshHost, IP: sshHost}, fmt.Errorf("netbird fqdn or ip empty or null")
-		}
+		ip := strings.Split(status.NetbirdIP, "/")[0]
 
 		// Find the network interface for this IP
 		ifname, err := getInterfaceForIP(ctx, sshPool, sshHost, ip)
@@ -1625,27 +1653,27 @@ func getOverlayInfoForNode(ctx context.Context, sshPool *ssh.Pool, sshHost, prov
 			ifname = "" // Will fallback to IP in advertise-addr
 		}
 
-		return OverlayInfo{FQDN: fqdn, IP: ip, Interface: ifname}, nil
+		return OverlayInfo{FQDN: status.FQDN, IP: ip, Interface: ifname}, nil
 
 	case "tailscale":
 		// Get tailscale info via SSH using JSON output
-		cmd := "tailscale status --json | jq -r '.Self.DNSName + \" \" + .Self.TailscaleIPs[0]' | tr -d '\\n'"
+		cmd := "tailscale status --json"
 		stdout, stderr, cmdErr := sshPool.Run(ctx, sshHost, cmd)
 		if cmdErr != nil {
 			return OverlayInfo{FQDN: sshHost, IP: sshHost}, fmt.Errorf("tailscale status failed: %w (stderr: %s)", cmdErr, stderr)
 		}
 
-		parts := strings.Fields(strings.TrimSpace(stdout))
-		if len(parts) != 2 {
-			return OverlayInfo{FQDN: sshHost, IP: sshHost}, fmt.Errorf("unexpected tailscale output format: %s", stdout)
+		var status TailscaleStatusJSON
+		if err := json.Unmarshal([]byte(stdout), &status); err != nil {
+			return OverlayInfo{FQDN: sshHost, IP: sshHost}, fmt.Errorf("failed to parse tailscale JSON: %w", err)
 		}
 
-		fqdn := parts[0]
-		ip := parts[1]
-
-		if fqdn == "" || fqdn == "null" || ip == "" || ip == "null" {
-			return OverlayInfo{FQDN: sshHost, IP: sshHost}, fmt.Errorf("tailscale fqdn or ip empty or null")
+		if status.Self.DNSName == "" || len(status.Self.TailscaleIPs) == 0 {
+			return OverlayInfo{FQDN: sshHost, IP: sshHost}, fmt.Errorf("tailscale DNSName or IPs empty")
 		}
+
+		fqdn := status.Self.DNSName
+		ip := status.Self.TailscaleIPs[0]
 
 		// Find the network interface for this IP
 		ifname, err := getInterfaceForIP(ctx, sshPool, sshHost, ip)
