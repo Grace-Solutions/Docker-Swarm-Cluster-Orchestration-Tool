@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"clusterctl/internal/gluster"
 	"clusterctl/internal/logging"
@@ -87,9 +88,9 @@ func GlusterSetup(ctx context.Context, sshPool *ssh.Pool, sshWorkers, glusterWor
 		return nil, fmt.Errorf("failed to create volume: %w", err)
 	}
 
-	// Phase 4: Start the volume (use SSH hostname)
-	log.Infow("phase 4: starting GlusterFS volume")
-	if err := startVolume(ctx, sshPool, validSSHWorkers[0], volume); err != nil {
+	// Phase 4: Start the volume and wait for bricks to come online
+	log.Infow("phase 4: starting GlusterFS volume and waiting for bricks")
+	if err := startVolume(ctx, sshPool, validSSHWorkers, validSSHWorkers[0], volume, len(validSSHWorkers)); err != nil {
 		return nil, fmt.Errorf("failed to start volume: %w", err)
 	}
 
@@ -323,21 +324,134 @@ func createVolume(ctx context.Context, sshPool *ssh.Pool, sshWorkers, glusterWor
 	return err
 }
 
-func startVolume(ctx context.Context, sshPool *ssh.Pool, orchestrator, volume string) error {
+func startVolume(ctx context.Context, sshPool *ssh.Pool, sshWorkers []string, orchestrator, volume string, expectedBricks int) error {
+	log := logging.L()
+
+	// Start the volume
 	cmd := fmt.Sprintf("gluster volume start %s", volume)
-	logging.L().Infow("starting GlusterFS volume", "host", orchestrator, "volume", volume, "command", cmd)
+	log.Infow("starting GlusterFS volume", "host", orchestrator, "volume", volume, "command", cmd)
 	stdout, stderr, err := sshPool.Run(ctx, orchestrator, cmd)
 	if err != nil {
 		// Check if volume is already started
 		if strings.Contains(stderr, "already started") || strings.Contains(stdout, "already started") {
-			logging.L().Infow(fmt.Sprintf("volume %s already started", volume))
-			return nil
+			log.Infow(fmt.Sprintf("volume %s already started", volume))
+		} else {
+			return fmt.Errorf("failed to start volume: %w (stderr: %s)", err, stderr)
 		}
-		return fmt.Errorf("failed to start volume: %w (stderr: %s)", err, stderr)
+	} else {
+		log.Infow(fmt.Sprintf("volume started: %s", strings.TrimSpace(stdout)))
 	}
 
-	logging.L().Infow(fmt.Sprintf("volume started: %s", strings.TrimSpace(stdout)))
-	return nil
+	// Wait for bricks to come online with retry
+	log.Infow("→ waiting for bricks to come online", "volume", volume, "expectedBricks", expectedBricks)
+
+	retryCfg := retry.Config{
+		Operation:       fmt.Sprintf("bricks-online-%s", volume),
+		MaxAttempts:    10,
+		InitialBackoff: 3 * time.Second,
+		MaxBackoff:     15 * time.Second,
+		BackoffMultiple: 1.5,
+	}
+
+	var lastOnline, lastOffline int
+	err = retry.Do(ctx, retryCfg, func() error {
+		statusCmd := fmt.Sprintf("gluster volume status %s", volume)
+		stdout, stderr, err := sshPool.Run(ctx, orchestrator, statusCmd)
+		if err != nil {
+			return fmt.Errorf("failed to get volume status: %w (stderr: %s)", err, stderr)
+		}
+
+		onlineBricks := 0
+		offlineBricks := 0
+		for _, line := range strings.Split(stdout, "\n") {
+			if strings.Contains(line, "Brick") && strings.Contains(line, ":/") {
+				// Look for the Online column - bricks show Y or N
+				// The line format is like: "Brick 100.76.87.219:/mnt/...  N/A  N/A  N  N/A"
+				fields := strings.Fields(line)
+				if len(fields) >= 5 {
+					// Online status is typically the 5th field (Y or N)
+					for _, field := range fields {
+						if field == "Y" {
+							onlineBricks++
+							break
+						} else if field == "N" {
+							offlineBricks++
+							break
+						}
+					}
+				}
+			}
+		}
+
+		lastOnline = onlineBricks
+		lastOffline = offlineBricks
+
+		if offlineBricks > 0 {
+			log.Warnw("bricks still coming online", "volume", volume, "online", onlineBricks, "offline", offlineBricks)
+			return fmt.Errorf("waiting for %d offline bricks", offlineBricks)
+		}
+
+		if onlineBricks < expectedBricks {
+			return fmt.Errorf("only %d/%d bricks detected", onlineBricks, expectedBricks)
+		}
+
+		log.Infow("✅ all bricks are online", "volume", volume, "bricks", onlineBricks)
+		return nil
+	})
+
+	// If bricks are still offline after retries, try force restart
+	if err != nil && lastOffline > 0 {
+		log.Warnw("bricks still offline after waiting, trying force restart", "online", lastOnline, "offline", lastOffline)
+
+		// Restart glusterd on all workers
+		log.Infow("→ restarting glusterd on all workers")
+		restartCmd := "systemctl restart glusterd"
+		results := sshPool.RunAll(ctx, sshWorkers, restartCmd)
+		for host, result := range results {
+			if result.Err != nil {
+				log.Warnw("failed to restart glusterd", "host", host, "error", result.Err)
+			}
+		}
+
+		// Wait a moment for glusterd to restart
+		time.Sleep(5 * time.Second)
+
+		// Force start the volume
+		forceCmd := fmt.Sprintf("gluster volume start %s force", volume)
+		log.Infow("→ force starting volume", "host", orchestrator, "volume", volume, "command", forceCmd)
+		stdout, stderr, err := sshPool.Run(ctx, orchestrator, forceCmd)
+		if err != nil && !strings.Contains(stderr, "already started") {
+			log.Warnw("force start had error", "error", err, "stderr", stderr, "stdout", stdout)
+		}
+
+		// Wait and check again
+		time.Sleep(5 * time.Second)
+
+		// Final check
+		statusCmd := fmt.Sprintf("gluster volume status %s", volume)
+		stdout, _, _ = sshPool.Run(ctx, orchestrator, statusCmd)
+
+		onlineBricks := 0
+		for _, line := range strings.Split(stdout, "\n") {
+			if strings.Contains(line, "Brick") && strings.Contains(line, ":/") {
+				for _, field := range strings.Fields(line) {
+					if field == "Y" {
+						onlineBricks++
+						break
+					}
+				}
+			}
+		}
+
+		if onlineBricks >= expectedBricks {
+			log.Infow("✅ all bricks are now online after force restart", "bricks", onlineBricks)
+			return nil
+		}
+
+		return fmt.Errorf("bricks still offline after force restart: %d/%d online", onlineBricks, expectedBricks)
+	}
+
+	return err
 }
 
 func mountVolume(ctx context.Context, sshPool *ssh.Pool, workers []string, volume, mount string) error {
