@@ -1557,15 +1557,15 @@ func removeOverlayNetworks(ctx context.Context, sshPool *ssh.Pool, primaryManage
 func getOverlayHostnameForNode(ctx context.Context, sshPool *ssh.Pool, sshHost, provider string) (string, error) {
 	switch provider {
 	case "netbird":
-		// Get netbird hostname via SSH
-		cmd := "netbird status | grep -i 'hostname:' | awk '{print $2}' | tr -d '\\n'"
+		// Get netbird hostname via SSH using JSON output
+		cmd := "netbird status --json | jq -r '.fqdn' | tr -d '\\n'"
 		stdout, stderr, cmdErr := sshPool.Run(ctx, sshHost, cmd)
 		if cmdErr != nil {
 			return sshHost, fmt.Errorf("netbird status failed: %w (stderr: %s)", cmdErr, stderr)
 		}
 		overlayHost := strings.TrimSpace(stdout)
-		if overlayHost == "" {
-			return sshHost, fmt.Errorf("netbird hostname empty")
+		if overlayHost == "" || overlayHost == "null" {
+			return sshHost, fmt.Errorf("netbird fqdn empty or null")
 		}
 		return overlayHost, nil
 
@@ -1577,8 +1577,8 @@ func getOverlayHostnameForNode(ctx context.Context, sshPool *ssh.Pool, sshHost, 
 			return sshHost, fmt.Errorf("tailscale status failed: %w (stderr: %s)", cmdErr, stderr)
 		}
 		overlayHost := strings.TrimSpace(stdout)
-		if overlayHost == "" {
-			return sshHost, fmt.Errorf("tailscale hostname empty")
+		if overlayHost == "" || overlayHost == "null" {
+			return sshHost, fmt.Errorf("tailscale hostname empty or null")
 		}
 		return overlayHost, nil
 

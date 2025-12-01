@@ -61,13 +61,25 @@ func SwarmSetup(ctx context.Context, sshPool *ssh.Pool, primaryManager string, m
 }
 
 func initSwarm(ctx context.Context, sshPool *ssh.Pool, primaryManager, advertiseAddr string) error {
-	// Check if swarm is already initialized
-	checkCmd := "docker info --format '{{.Swarm.LocalNodeState}}'"
+	// Check if swarm is already initialized AND this node is a manager
+	checkCmd := "docker info --format '{{.Swarm.LocalNodeState}} {{.Swarm.ControlAvailable}}'"
 	logging.L().Infow("checking swarm status", "host", primaryManager, "command", checkCmd)
 	stdout, _, err := sshPool.Run(ctx, primaryManager, checkCmd)
-	if err == nil && strings.Contains(stdout, "active") {
-		logging.L().Infow("swarm already initialized on primary manager")
+	if err == nil && strings.Contains(stdout, "active") && strings.Contains(stdout, "true") {
+		logging.L().Infow("swarm already initialized on primary manager (node is active manager)")
 		return nil
+	}
+
+	// If node is active but not a manager, it needs to leave first
+	if err == nil && strings.Contains(stdout, "active") && !strings.Contains(stdout, "true") {
+		logging.L().Warnw("node is active in swarm but not a manager, leaving swarm first", "host", primaryManager)
+		leaveCmd := "docker swarm leave --force"
+		_, stderr, leaveErr := sshPool.Run(ctx, primaryManager, leaveCmd)
+		if leaveErr != nil {
+			logging.L().Warnw("failed to leave swarm", "host", primaryManager, "error", leaveErr, "stderr", stderr)
+		} else {
+			logging.L().Infow("left swarm successfully", "host", primaryManager)
+		}
 	}
 
 	// Initialize swarm with retry logic
