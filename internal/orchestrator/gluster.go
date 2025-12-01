@@ -179,7 +179,10 @@ func createTrustedPool(ctx context.Context, sshPool *ssh.Pool, sshWorkers, glust
 	}
 
 	// Verify peer status with retry
-	logging.L().Infow("→ verifying GlusterFS peer status", "sshHost", sshOrchestrator)
+	// The orchestrator (glusterWorkers[0]) does NOT appear in its own peer status
+	// So we expect (total workers - 1) peers
+	expectedPeers := len(glusterWorkers) - 1
+	logging.L().Infow("→ verifying GlusterFS peer status", "sshHost", sshOrchestrator, "orchestrator", glusterOrchestrator, "expectedPeers", expectedPeers)
 
 	retryCfg := retry.NetworkConfig("verify-peer-status")
 	var peerStatusOutput string
@@ -193,22 +196,50 @@ func createTrustedPool(ctx context.Context, sshPool *ssh.Pool, sshWorkers, glust
 
 		peerStatusOutput = stdout
 
-		// Verify all peers are in "Peer in Cluster (Connected)" state
-		expectedPeers := len(glusterWorkers) - 1 // Orchestrator is not in its own peer list
+		// Verify peer count matches expected (workers - 1, excluding orchestrator)
 		if !strings.Contains(stdout, fmt.Sprintf("Number of Peers: %d", expectedPeers)) {
-			return fmt.Errorf("expected %d peers, but peer status shows different count", expectedPeers)
+			return fmt.Errorf("expected %d peers (excluding orchestrator %s), but peer status shows different count", expectedPeers, glusterOrchestrator)
 		}
 
-		// Check that all peers are connected
+		// Split peer status into individual peer blocks
+		// Each block starts with "Hostname:" and contains the peer's info
+		// Format:
+		//   Hostname: 100.76.15.41
+		//   Uuid: xxx
+		//   State: Peer in Cluster (Connected)
+		//   Other names:
+		//   ovhcloud-vps-42d2c09c.netbird.cloud
+		//   15.204.95.233
+		peerBlocks := strings.Split(stdout, "Hostname:")
+
+		// Check that all peers (except orchestrator at index 0) are connected
 		for i := 1; i < len(glusterWorkers); i++ {
 			glusterPeer := glusterWorkers[i]
-			if !strings.Contains(stdout, glusterPeer) {
+			found := false
+			connected := false
+
+			// Search each peer block for this peer
+			// The peer could appear as IP (in Hostname line) or FQDN (in Other names)
+			for _, block := range peerBlocks {
+				if block == "" {
+					continue
+				}
+				// Check if this block contains our peer
+				if strings.Contains(block, glusterPeer) {
+					found = true
+					// Check if this peer is connected (in the same block)
+					if strings.Contains(block, "Peer in Cluster (Connected)") {
+						connected = true
+					}
+					break
+				}
+			}
+
+			if !found {
 				return fmt.Errorf("peer %s not found in peer status", glusterPeer)
 			}
-			// Look for the peer's section and check if it's connected
-			peerSection := stdout[strings.Index(stdout, glusterPeer):]
-			if !strings.Contains(peerSection, "Peer in Cluster (Connected)") {
-				return fmt.Errorf("peer %s is not in 'Peer in Cluster (Connected)' state", glusterPeer)
+			if !connected {
+				return fmt.Errorf("peer %s found but not in 'Peer in Cluster (Connected)' state", glusterPeer)
 			}
 		}
 
@@ -220,7 +251,7 @@ func createTrustedPool(ctx context.Context, sshPool *ssh.Pool, sshWorkers, glust
 		return err
 	}
 
-	logging.L().Infow(fmt.Sprintf("✅ peer status verified:\n%s", peerStatusOutput))
+	logging.L().Infow(fmt.Sprintf("✅ peer status verified: %d peers connected (orchestrator %s excluded)", expectedPeers, glusterOrchestrator))
 
 	return nil
 }
