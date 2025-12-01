@@ -133,12 +133,12 @@ func Deploy(ctx context.Context, cfg *config.Config) error {
 			}
 		}
 
-		// Get overlay IPs for GlusterFS if overlay provider is configured
+		// Get overlay FQDNs for GlusterFS if overlay provider is configured
 		glusterAddresses, err := getGlusterHostnames(ctx, sshPool, cfg, sshGlusterWorkers)
 		if err != nil {
 			return fmt.Errorf("failed to get GlusterFS addresses: %w", err)
 		}
-		log.Infow("→ Using overlay IPs for GlusterFS", "addresses", glusterAddresses, "overlayProvider", cfg.GlobalSettings.OverlayProvider)
+		log.Infow("→ Using overlay FQDNs for GlusterFS", "addresses", glusterAddresses, "overlayProvider", cfg.GlobalSettings.OverlayProvider)
 
 		validWorkers, err := orchestrator.GlusterSetup(ctx, sshPool, sshGlusterWorkers, glusterAddresses,
 			cfg.GlobalSettings.GlusterVolume,
@@ -1746,9 +1746,10 @@ func getGlusterHostnames(ctx context.Context, sshPool *ssh.Pool, cfg *config.Con
 			overlayHostnames = append(overlayHostnames, sshHost)
 		} else {
 			log.Infow("→ overlay info for GlusterFS", "sshHost", sshHost, "fqdn", overlayInfo.FQDN, "ip", overlayInfo.IP, "interface", overlayInfo.Interface)
-			// Use overlay IP instead of FQDN for GlusterFS to avoid DNS resolution issues
-			// GlusterFS will show this IP in "Other names" field
-			overlayHostnames = append(overlayHostnames, overlayInfo.IP)
+			// Use overlay FQDN for GlusterFS
+			// The FQDN resolves to the overlay IP on the overlay network
+			// GlusterFS will show the overlay IP in "Other names" field
+			overlayHostnames = append(overlayHostnames, overlayInfo.FQDN)
 		}
 	}
 
