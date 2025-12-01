@@ -387,17 +387,21 @@ func mountVolume(ctx context.Context, sshPool *ssh.Pool, workers []string, volum
 }
 
 func verifyMounts(ctx context.Context, sshPool *ssh.Pool, workers []string, mount string) error {
-	cmd := fmt.Sprintf("df -T %s | tail -n 1", mount)
+	// Use mount command to check if the path is actually mounted, not df
+	// df falls back to showing root filesystem if path doesn't exist as a mount
+	cmd := fmt.Sprintf("mount | grep '%s' | grep glusterfs", mount)
+	logging.L().Infow("→ verifying GlusterFS mounts", "mount", mount, "command", cmd)
 	results := sshPool.RunAll(ctx, workers, cmd)
 
 	for host, result := range results {
 		if result.Err != nil {
-			return fmt.Errorf("failed to verify mount on %s: %w (stderr: %s)", host, result.Err, result.Stderr)
+			// If grep finds nothing, it returns exit code 1 - check if it's actually not mounted
+			return fmt.Errorf("mount on %s is not GlusterFS or not mounted at %s (stderr: %s)", host, mount, result.Stderr)
 		}
 
 		// Check if it's a GlusterFS mount
-		if !strings.Contains(result.Stdout, "fuse.glusterfs") {
-			return fmt.Errorf("mount on %s is not GlusterFS: %s", host, result.Stdout)
+		if !strings.Contains(result.Stdout, "glusterfs") || !strings.Contains(result.Stdout, mount) {
+			return fmt.Errorf("mount on %s is not GlusterFS at %s: %s", host, mount, result.Stdout)
 		}
 
 		logging.L().Infow(fmt.Sprintf("%s: mount verified: %s", host, strings.TrimSpace(result.Stdout)))
