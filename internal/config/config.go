@@ -14,26 +14,32 @@ type Config struct {
 	ConfigPath     string         `json:"-"` // Path to the config file (not serialized)
 }
 
-// DistributedStorageType represents the type of distributed storage backend.
-type DistributedStorageType string
+// StorageProviderType represents the type of distributed storage backend.
+type StorageProviderType string
 
 const (
-	StorageTypeNone      DistributedStorageType = "none"
-	StorageTypeMicroCeph DistributedStorageType = "microceph"
+	StorageProviderNone      StorageProviderType = "none"
+	StorageProviderMicroCeph StorageProviderType = "microceph"
 )
 
 // MicroCephProviderConfig contains MicroCeph-specific configuration.
+// MicroCeph uses Docker Swarm managers as MON nodes (cluster brain/quorum)
+// and workers as OSD nodes (data storage).
 type MicroCephProviderConfig struct {
 	// SnapChannel is the snap channel to install MicroCeph from.
 	// Default: "latest/stable"
 	SnapChannel string `json:"snapChannel"`
 
+	// MountPath is where CephFS will be mounted on nodes.
+	// Default: "/mnt/cephfs"
+	MountPath string `json:"mountPath"`
+
 	// UseLoopDevices uses loop file-backed OSDs instead of physical disks.
-	// Useful for testing and development. Each loop device is 4GB.
+	// Useful for testing and development.
 	// Default: false (use physical disks)
 	UseLoopDevices bool `json:"useLoopDevices"`
 
-	// LoopDeviceCount is the number of loop devices to create per node when UseLoopDevices is true.
+	// LoopDeviceCount is the number of loop devices to create per OSD node when UseLoopDevices is true.
 	// Default: 3
 	LoopDeviceCount int `json:"loopDeviceCount"`
 
@@ -62,26 +68,19 @@ type DistributedStorage struct {
 	// Default: false
 	Enabled bool `json:"enabled"`
 
-	// Type specifies the distributed storage backend: "none", "microceph"
+	// Provider specifies the distributed storage backend: "none", "microceph"
+	// The value must match a key under "providers" for provider-specific settings.
 	// Default: "microceph"
-	Type DistributedStorageType `json:"type"`
+	Provider StorageProviderType `json:"provider"`
 
 	// ForceRecreation forces teardown and recreation of the storage cluster during deployment.
 	// WARNING: This will delete all data in the storage cluster.
 	// Default: false
 	ForceRecreation bool `json:"forceRecreation"`
 
-	// MountPath is where the distributed storage will be mounted on nodes.
-	// Default: "/mnt/distributed-storage"
-	MountPath string `json:"mountPath"`
-
 	// PoolName is the name of the storage pool to create.
 	// Default: "docker-swarm"
 	PoolName string `json:"poolName"`
-
-	// PoolSize is the replication factor for the storage pool.
-	// Default: 3 (for 3-way replication)
-	PoolSize int `json:"poolSize"`
 
 	// Providers contains provider-specific configurations.
 	Providers StorageProviders `json:"providers"`
@@ -242,23 +241,20 @@ func (c *Config) ApplyDefaults() {
 
 	// DistributedStorage defaults (now under GlobalSettings)
 	ds := &c.GlobalSettings.DistributedStorage
-	if ds.Type == "" {
-		ds.Type = StorageTypeMicroCeph
-	}
-	if ds.MountPath == "" {
-		ds.MountPath = "/mnt/distributed-storage"
+	if ds.Provider == "" {
+		ds.Provider = StorageProviderMicroCeph
 	}
 	if ds.PoolName == "" {
 		ds.PoolName = "docker-swarm"
-	}
-	if ds.PoolSize == 0 {
-		ds.PoolSize = 3
 	}
 
 	// MicroCeph provider defaults
 	mc := &ds.Providers.MicroCeph
 	if mc.SnapChannel == "" {
 		mc.SnapChannel = "latest/stable"
+	}
+	if mc.MountPath == "" {
+		mc.MountPath = "/mnt/cephfs"
 	}
 	if mc.LoopDeviceCount == 0 {
 		mc.LoopDeviceCount = 3

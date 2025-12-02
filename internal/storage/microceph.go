@@ -26,6 +26,11 @@ func (p *MicroCephProvider) Name() string {
 	return "microceph"
 }
 
+// GetMountPath returns the CephFS mount path from configuration.
+func (p *MicroCephProvider) GetMountPath() string {
+	return p.cfg.GetDistributedStorage().Providers.MicroCeph.MountPath
+}
+
 // Install installs MicroCeph on a node via snap.
 func (p *MicroCephProvider) Install(ctx context.Context, sshPool *ssh.Pool, node string) error {
 	log := logging.L().With("component", "microceph", "node", node)
@@ -148,8 +153,9 @@ func (p *MicroCephProvider) AddStorage(ctx context.Context, sshPool *ssh.Pool, n
 	return nil
 }
 
-// CreatePool creates a CephFS pool for use by containers.
-func (p *MicroCephProvider) CreatePool(ctx context.Context, sshPool *ssh.Pool, primaryNode, poolName string, poolSize int) error {
+// CreatePool creates a CephFS filesystem for use by containers.
+// The replication factor is determined automatically by Ceph based on OSD count.
+func (p *MicroCephProvider) CreatePool(ctx context.Context, sshPool *ssh.Pool, primaryNode, poolName string) error {
 	log := logging.L().With("component", "microceph", "node", primaryNode, "poolName", poolName)
 
 	// Enable MDS (Metadata Server) for CephFS
@@ -165,39 +171,27 @@ func (p *MicroCephProvider) CreatePool(ctx context.Context, sshPool *ssh.Pool, p
 	// Wait for MDS to be ready
 	time.Sleep(5 * time.Second)
 
-	// Create CephFS filesystem
-	// First create the data and metadata pools
-	dataPoolCmd := fmt.Sprintf("ceph osd pool create %s_data %d", poolName, poolSize)
-	log.Infow("creating data pool", "command", dataPoolCmd)
-	if _, stderr, err := sshPool.Run(ctx, primaryNode, dataPoolCmd); err != nil {
-		if !strings.Contains(stderr, "already exists") {
-			return fmt.Errorf("failed to create data pool: %w (stderr: %s)", err, stderr)
-		}
-	}
-
-	metaPoolCmd := fmt.Sprintf("ceph osd pool create %s_metadata %d", poolName, poolSize)
-	log.Infow("creating metadata pool", "command", metaPoolCmd)
-	if _, stderr, err := sshPool.Run(ctx, primaryNode, metaPoolCmd); err != nil {
-		if !strings.Contains(stderr, "already exists") {
-			return fmt.Errorf("failed to create metadata pool: %w (stderr: %s)", err, stderr)
-		}
-	}
-
-	// Create the CephFS filesystem
-	createFsCmd := fmt.Sprintf("ceph fs new %s %s_metadata %s_data", poolName, poolName, poolName)
+	// Create CephFS filesystem using ceph fs volume command (simpler approach)
+	// This automatically creates the data and metadata pools with proper defaults
+	createFsCmd := fmt.Sprintf("ceph fs volume create %s", poolName)
 	log.Infow("creating CephFS filesystem", "command", createFsCmd)
 	if _, stderr, err := sshPool.Run(ctx, primaryNode, createFsCmd); err != nil {
-		if !strings.Contains(stderr, "already exists") {
+		if !strings.Contains(stderr, "already exists") && !strings.Contains(stderr, "already") {
 			return fmt.Errorf("failed to create CephFS: %w (stderr: %s)", err, stderr)
 		}
+		log.Infow("CephFS filesystem already exists")
 	}
 
-	log.Infow("✓ CephFS pool created", "poolName", poolName)
+	// Wait for filesystem to be ready
+	time.Sleep(3 * time.Second)
+
+	log.Infow("✓ CephFS filesystem created", "poolName", poolName)
 	return nil
 }
 
-// Mount mounts the CephFS pool on a node.
-func (p *MicroCephProvider) Mount(ctx context.Context, sshPool *ssh.Pool, node, poolName, mountPath string) error {
+// Mount mounts the CephFS filesystem on a node.
+func (p *MicroCephProvider) Mount(ctx context.Context, sshPool *ssh.Pool, node, poolName string) error {
+	mountPath := p.GetMountPath()
 	log := logging.L().With("component", "microceph", "node", node, "mountPath", mountPath)
 
 	// Create mount directory
@@ -246,8 +240,9 @@ func (p *MicroCephProvider) Mount(ctx context.Context, sshPool *ssh.Pool, node, 
 	return nil
 }
 
-// Unmount unmounts the storage pool from a node.
-func (p *MicroCephProvider) Unmount(ctx context.Context, sshPool *ssh.Pool, node, mountPath string) error {
+// Unmount unmounts the CephFS filesystem from a node.
+func (p *MicroCephProvider) Unmount(ctx context.Context, sshPool *ssh.Pool, node string) error {
+	mountPath := p.GetMountPath()
 	log := logging.L().With("component", "microceph", "node", node, "mountPath", mountPath)
 
 	// Unmount

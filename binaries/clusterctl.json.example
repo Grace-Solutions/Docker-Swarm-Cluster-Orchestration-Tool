@@ -8,14 +8,13 @@
     "removeSSHPublicKeyOnCompletion": false,
     "distributedStorage": {
       "enabled": true,
-      "type": "microceph",
+      "provider": "microceph",
       "forceRecreation": false,
-      "mountPath": "/mnt/distributed-storage",
       "poolName": "docker-swarm",
-      "poolSize": 3,
       "providers": {
         "microceph": {
           "snapChannel": "latest/stable",
+          "mountPath": "/mnt/cephfs",
           "useLoopDevices": true,
           "loopDeviceCount": 3,
           "loopDeviceSizeGB": 10,

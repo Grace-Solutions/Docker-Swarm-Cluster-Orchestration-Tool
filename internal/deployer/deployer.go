@@ -120,12 +120,15 @@ func Deploy(ctx context.Context, cfg *config.Config) error {
 	log.Infow("✅ Overlay network configured")
 
 	// Phase 6: Setup distributed storage if enabled
-	storageNodes := getStorageNodes(cfg)
+	// Storage uses Swarm roles: managers become MON nodes, workers become OSD nodes
+	storageManagers, storageWorkers := getStorageNodesByRole(cfg)
+	storageNodes := append(storageManagers, storageWorkers...)
 	ds := cfg.GetDistributedStorage()
 	if ds.Enabled && len(storageNodes) > 0 {
 		log.Infow("Phase 6: Setting up distributed storage",
-			"type", ds.Type,
-			"nodes", len(storageNodes),
+			"provider", ds.Provider,
+			"managers", len(storageManagers),
+			"workers", len(storageWorkers),
 			"forceRecreation", ds.ForceRecreation)
 
 		// If force recreation is enabled, teardown existing storage cluster first
@@ -138,19 +141,15 @@ func Deploy(ctx context.Context, cfg *config.Config) error {
 			}
 		}
 
-		// Get overlay addresses for storage if overlay provider is configured
-		storageAddresses, err := getStorageHostnames(ctx, sshPool, cfg, storageNodes)
-		if err != nil {
-			return fmt.Errorf("failed to get storage node addresses: %w", err)
-		}
-		log.Infow("→ Using addresses for distributed storage", "addresses", storageAddresses, "overlayProvider", cfg.GlobalSettings.OverlayProvider)
-
-		// Setup distributed storage (MicroCeph)
-		if err := setupDistributedStorage(ctx, sshPool, storageNodes, storageAddresses, cfg); err != nil {
+		// Setup distributed storage (MicroCeph: managers=MON, workers=OSD)
+		if err := setupDistributedStorage(ctx, sshPool, storageManagers, storageWorkers, cfg); err != nil {
 			return fmt.Errorf("failed to setup distributed storage: %w", err)
 		}
 
-		log.Infow("✅ Distributed storage setup complete", "nodes", len(storageNodes), "type", ds.Type)
+		log.Infow("✅ Distributed storage setup complete",
+			"managers", len(storageManagers),
+			"workers", len(storageWorkers),
+			"provider", ds.Provider)
 	} else if !ds.Enabled {
 		log.Infow("Phase 6: Skipping distributed storage (disabled in config)")
 	} else {
@@ -243,7 +242,7 @@ func Deploy(ctx context.Context, cfg *config.Config) error {
 	log.Infow("Phase 9: Deploying services")
 	storageMountPath := ""
 	if ds.Enabled {
-		storageMountPath = ds.MountPath
+		storageMountPath = ds.Providers.MicroCeph.MountPath
 	}
 	metrics, err := services.DeployServices(ctx, sshPool, primaryMaster, cfg.GlobalSettings.ServicesDir, storageMountPath)
 	if err != nil {
@@ -1013,6 +1012,23 @@ func getStorageNodes(cfg *config.Config) []string {
 	return nodes
 }
 
+// getStorageNodesByRole returns storage-enabled nodes categorized by role.
+// For MicroCeph: managers become MON nodes, workers become OSD nodes.
+func getStorageNodesByRole(cfg *config.Config) (managers []string, workers []string) {
+	enabledNodes := getEnabledNodes(cfg)
+	for _, node := range enabledNodes {
+		if !node.StorageEnabled {
+			continue
+		}
+		if node.Role == "manager" {
+			managers = append(managers, node.Hostname)
+		} else if node.Role == "worker" {
+			workers = append(workers, node.Hostname)
+		}
+	}
+	return
+}
+
 // categorizeNodes returns enabled managers and workers.
 func categorizeNodes(cfg *config.Config) (managers []string, workers []string) {
 	enabledNodes := getEnabledNodes(cfg)
@@ -1346,11 +1362,12 @@ func applyNodeLabels(ctx context.Context, cfg *config.Config, sshPool *ssh.Pool,
 		// Distributed storage labels
 		if ds.Enabled && node.StorageEnabled {
 			labels["storage.enabled"] = "true"
-			labels["storage.type"] = string(ds.Type)
+			labels["storage.provider"] = string(ds.Provider)
 
 			// Add mount path label
-			if ds.MountPath != "" {
-				labels["storage.mount-path"] = ds.MountPath
+			mountPath := ds.Providers.MicroCeph.MountPath
+			if mountPath != "" {
+				labels["storage.mount-path"] = mountPath
 			}
 		} else {
 			labels["storage.enabled"] = "false"
@@ -1481,13 +1498,15 @@ func unmountDistributedStorage(ctx context.Context, sshPool *ssh.Pool, nodes []s
 	log := logging.L().With("component", "teardown-storage-unmount")
 	ds := cfg.GetDistributedStorage()
 
-	if ds.MountPath == "" {
-		return nil
+	// Get mount path from provider config
+	mountPath := ds.Providers.MicroCeph.MountPath
+	if mountPath == "" {
+		mountPath = "/mnt/cephfs"
 	}
 
 	for _, node := range nodes {
-		unmountCmd := fmt.Sprintf("umount %s 2>/dev/null || true", ds.MountPath)
-		log.Infow("unmounting distributed storage", "host", node, "mountPoint", ds.MountPath, "command", unmountCmd)
+		unmountCmd := fmt.Sprintf("umount %s 2>/dev/null || true", mountPath)
+		log.Infow("unmounting distributed storage", "host", node, "mountPoint", mountPath, "command", unmountCmd)
 		if _, stderr, err := sshPool.Run(ctx, node, unmountCmd); err != nil {
 			log.Warnw("failed to unmount storage", "host", node, "error", err, "stderr", stderr)
 		} else {
@@ -1495,7 +1514,7 @@ func unmountDistributedStorage(ctx context.Context, sshPool *ssh.Pool, nodes []s
 		}
 
 		// Remove from fstab
-		removeFstabCmd := fmt.Sprintf("sed -i '\\|%s|d' /etc/fstab", ds.MountPath)
+		removeFstabCmd := fmt.Sprintf("sed -i '\\|%s|d' /etc/fstab", mountPath)
 		log.Infow("removing from fstab", "host", node, "command", removeFstabCmd)
 		if _, stderr, err := sshPool.Run(ctx, node, removeFstabCmd); err != nil {
 			log.Warnw("failed to remove from fstab", "host", node, "error", err, "stderr", stderr)
@@ -1692,11 +1711,13 @@ func getStorageHostnames(ctx context.Context, sshPool *ssh.Pool, cfg *config.Con
 }
 
 // setupDistributedStorage sets up the distributed storage cluster using the provider framework.
-func setupDistributedStorage(ctx context.Context, sshPool *ssh.Pool, nodes []string, addresses []string, cfg *config.Config) error {
+// managers become MON nodes (cluster brain/quorum), workers become OSD nodes (data storage).
+func setupDistributedStorage(ctx context.Context, sshPool *ssh.Pool, managers []string, workers []string, cfg *config.Config) error {
 	ds := cfg.GetDistributedStorage()
-	log := logging.L().With("component", "storage-setup", "type", ds.Type)
+	log := logging.L().With("component", "storage-setup", "provider", ds.Provider)
 
-	if len(nodes) == 0 {
+	allNodes := append(managers, workers...)
+	if len(allNodes) == 0 {
 		return nil
 	}
 
@@ -1708,12 +1729,13 @@ func setupDistributedStorage(ctx context.Context, sshPool *ssh.Pool, nodes []str
 
 	log.Infow("setting up distributed storage cluster",
 		"provider", provider.Name(),
-		"nodes", len(nodes),
+		"managers", len(managers),
+		"workers", len(workers),
 		"poolName", ds.PoolName,
-		"mountPath", ds.MountPath)
+		"mountPath", provider.GetMountPath())
 
 	// Use the storage framework to set up the cluster
-	if err := storage.SetupCluster(ctx, sshPool, provider, nodes, addresses, cfg); err != nil {
+	if err := storage.SetupCluster(ctx, sshPool, provider, managers, workers, cfg); err != nil {
 		return fmt.Errorf("storage cluster setup failed: %w", err)
 	}
 
@@ -1723,7 +1745,7 @@ func setupDistributedStorage(ctx context.Context, sshPool *ssh.Pool, nodes []str
 // teardownDistributedStorage tears down an existing distributed storage cluster using the provider framework.
 func teardownDistributedStorage(ctx context.Context, sshPool *ssh.Pool, nodes []string, cfg *config.Config) error {
 	ds := cfg.GetDistributedStorage()
-	log := logging.L().With("component", "storage-teardown", "type", ds.Type)
+	log := logging.L().With("component", "storage-teardown", "provider", ds.Provider)
 
 	if len(nodes) == 0 {
 		return nil
@@ -1746,11 +1768,9 @@ func teardownDistributedStorage(ctx context.Context, sshPool *ssh.Pool, nodes []
 		log.Infow("→ cleaning up storage on node", "node", node)
 
 		// Unmount storage
-		if ds.MountPath != "" {
-			if err := provider.Unmount(ctx, sshPool, node, ds.MountPath); err != nil {
-				log.Warnw("failed to unmount storage", "node", node, "error", err)
-				lastErr = err
-			}
+		if err := provider.Unmount(ctx, sshPool, node); err != nil {
+			log.Warnw("failed to unmount storage", "node", node, "error", err)
+			lastErr = err
 		}
 
 		// Teardown the provider
@@ -1771,19 +1791,23 @@ func basicStorageTeardown(ctx context.Context, sshPool *ssh.Pool, nodes []string
 	ds := cfg.GetDistributedStorage()
 	log := logging.L().With("component", "storage-teardown-basic")
 
+	// Get mount path from provider config
+	mountPath := ds.Providers.MicroCeph.MountPath
+	if mountPath == "" {
+		mountPath = "/mnt/cephfs"
+	}
+
 	for _, node := range nodes {
 		log.Infow("→ basic cleanup on node", "node", node)
 
 		// Unmount storage
-		if ds.MountPath != "" {
-			unmountCmd := fmt.Sprintf("umount -f %s 2>/dev/null || umount -l %s 2>/dev/null || true",
-				ds.MountPath, ds.MountPath)
-			_, _, _ = sshPool.Run(ctx, node, unmountCmd)
+		unmountCmd := fmt.Sprintf("umount -f %s 2>/dev/null || umount -l %s 2>/dev/null || true",
+			mountPath, mountPath)
+		_, _, _ = sshPool.Run(ctx, node, unmountCmd)
 
-			// Remove mount directory
-			removeMountCmd := fmt.Sprintf("rm -rf %s 2>/dev/null || true", ds.MountPath)
-			_, _, _ = sshPool.Run(ctx, node, removeMountCmd)
-		}
+		// Remove mount directory
+		removeMountCmd := fmt.Sprintf("rm -rf %s 2>/dev/null || true", mountPath)
+		_, _, _ = sshPool.Run(ctx, node, removeMountCmd)
 
 		// Remove MicroCeph if installed
 		removeCmds := []string{

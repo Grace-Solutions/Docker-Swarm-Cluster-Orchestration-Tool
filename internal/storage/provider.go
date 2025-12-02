@@ -11,14 +11,20 @@ import (
 )
 
 // Provider defines the interface for distributed storage backends.
+// Storage providers map Docker Swarm roles to storage roles:
+// - Managers → MON nodes (cluster brain/quorum)
+// - Workers → OSD nodes (data storage)
 type Provider interface {
 	// Name returns the provider name (e.g., "microceph").
 	Name() string
 
+	// GetMountPath returns the mount path for the storage filesystem.
+	GetMountPath() string
+
 	// Install installs the storage software on a node.
 	Install(ctx context.Context, sshPool *ssh.Pool, node string) error
 
-	// Bootstrap initializes the storage cluster on the primary node.
+	// Bootstrap initializes the storage cluster on the primary manager node.
 	Bootstrap(ctx context.Context, sshPool *ssh.Pool, primaryNode string) error
 
 	// GenerateJoinToken generates a token for a node to join the cluster.
@@ -27,17 +33,18 @@ type Provider interface {
 	// Join joins a node to an existing storage cluster.
 	Join(ctx context.Context, sshPool *ssh.Pool, node, token string) error
 
-	// AddStorage adds storage (disks or loop devices) to a node.
+	// AddStorage adds storage (disks or loop devices) to an OSD node (worker).
+	// This should only be called on worker nodes.
 	AddStorage(ctx context.Context, sshPool *ssh.Pool, node string) error
 
-	// CreatePool creates a storage pool for use by containers.
-	CreatePool(ctx context.Context, sshPool *ssh.Pool, primaryNode, poolName string, poolSize int) error
+	// CreatePool creates a storage pool/filesystem for use by containers.
+	CreatePool(ctx context.Context, sshPool *ssh.Pool, primaryNode, poolName string) error
 
-	// Mount mounts the storage pool on a node.
-	Mount(ctx context.Context, sshPool *ssh.Pool, node, poolName, mountPath string) error
+	// Mount mounts the storage filesystem on a node.
+	Mount(ctx context.Context, sshPool *ssh.Pool, node, poolName string) error
 
-	// Unmount unmounts the storage pool from a node.
-	Unmount(ctx context.Context, sshPool *ssh.Pool, node, mountPath string) error
+	// Unmount unmounts the storage filesystem from a node.
+	Unmount(ctx context.Context, sshPool *ssh.Pool, node string) error
 
 	// Teardown removes the storage cluster from a node.
 	Teardown(ctx context.Context, sshPool *ssh.Pool, node string) error
@@ -67,38 +74,49 @@ func NewProvider(cfg *config.Config) (Provider, error) {
 	ds := cfg.GetDistributedStorage()
 	log := logging.L().With("component", "storage-provider")
 
-	switch ds.Type {
-	case config.StorageTypeMicroCeph:
+	switch ds.Provider {
+	case config.StorageProviderMicroCeph:
 		log.Infow("creating MicroCeph storage provider",
 			"snapChannel", ds.Providers.MicroCeph.SnapChannel,
+			"mountPath", ds.Providers.MicroCeph.MountPath,
 			"useLoopDevices", ds.Providers.MicroCeph.UseLoopDevices)
 		return NewMicroCephProvider(cfg), nil
-	case config.StorageTypeNone:
-		return nil, fmt.Errorf("storage type 'none' does not require a provider")
+	case config.StorageProviderNone:
+		return nil, fmt.Errorf("storage provider 'none' does not require a provider")
 	default:
-		return nil, fmt.Errorf("unsupported storage type: %s", ds.Type)
+		return nil, fmt.Errorf("unsupported storage provider: %s", ds.Provider)
 	}
 }
 
 // SetupCluster orchestrates the complete storage cluster setup.
-func SetupCluster(ctx context.Context, sshPool *ssh.Pool, provider Provider, nodes []string, addresses []string, cfg *config.Config) error {
+// managers are MON nodes (cluster brain/quorum), workers are OSD nodes (data storage).
+// All nodes participate in the cluster, but only workers get OSDs added.
+func SetupCluster(ctx context.Context, sshPool *ssh.Pool, provider Provider, managers []string, workers []string, cfg *config.Config) error {
 	log := logging.L().With("component", "storage-setup", "provider", provider.Name())
 	ds := cfg.GetDistributedStorage()
+	mountPath := provider.GetMountPath()
 
-	if len(nodes) == 0 {
+	allNodes := append(managers, workers...)
+	if len(allNodes) == 0 {
 		return fmt.Errorf("no storage nodes provided")
 	}
 
-	log.Infow("setting up distributed storage cluster",
-		"nodes", len(nodes),
-		"poolName", ds.PoolName,
-		"mountPath", ds.MountPath)
+	if len(managers) == 0 {
+		return fmt.Errorf("at least one manager (MON) node is required")
+	}
 
-	primaryNode := nodes[0]
+	log.Infow("setting up distributed storage cluster",
+		"managers", len(managers),
+		"workers", len(workers),
+		"totalNodes", len(allNodes),
+		"poolName", ds.PoolName,
+		"mountPath", mountPath)
+
+	primaryNode := managers[0]
 
 	// Step 1: Install storage software on all nodes
-	log.Infow("→ installing storage software on all nodes")
-	for _, node := range nodes {
+	log.Infow("→ Step 1: Installing storage software on all nodes")
+	for _, node := range allNodes {
 		log.Infow("→ installing on node", "node", node)
 		if err := provider.Install(ctx, sshPool, node); err != nil {
 			return fmt.Errorf("failed to install storage on %s: %w", node, err)
@@ -106,57 +124,85 @@ func SetupCluster(ctx context.Context, sshPool *ssh.Pool, provider Provider, nod
 		log.Infow("✓ storage software installed", "node", node)
 	}
 
-	// Step 2: Bootstrap the primary node
-	log.Infow("→ bootstrapping primary node", "node", primaryNode)
+	// Step 2: Bootstrap the primary manager node (first MON)
+	log.Infow("→ Step 2: Bootstrapping primary MON node", "node", primaryNode)
 	if err := provider.Bootstrap(ctx, sshPool, primaryNode); err != nil {
 		return fmt.Errorf("failed to bootstrap primary node %s: %w", primaryNode, err)
 	}
-	log.Infow("✓ primary node bootstrapped", "node", primaryNode)
+	log.Infow("✓ primary MON node bootstrapped", "node", primaryNode)
 
-	// Step 3: Join additional nodes
-	for i := 1; i < len(nodes); i++ {
-		node := nodes[i]
-		log.Infow("→ joining node to cluster", "node", node, "index", i+1, "total", len(nodes))
+	// Step 3: Join additional manager nodes (MONs for quorum)
+	if len(managers) > 1 {
+		log.Infow("→ Step 3: Joining additional MON nodes", "count", len(managers)-1)
+		for i := 1; i < len(managers); i++ {
+			node := managers[i]
+			log.Infow("→ joining MON node to cluster", "node", node, "index", i+1, "total", len(managers))
 
-		// Generate join token
-		token, err := provider.GenerateJoinToken(ctx, sshPool, primaryNode, node)
-		if err != nil {
-			return fmt.Errorf("failed to generate join token for %s: %w", node, err)
+			token, err := provider.GenerateJoinToken(ctx, sshPool, primaryNode, node)
+			if err != nil {
+				return fmt.Errorf("failed to generate join token for %s: %w", node, err)
+			}
+
+			if err := provider.Join(ctx, sshPool, node, token); err != nil {
+				return fmt.Errorf("failed to join MON node %s to cluster: %w", node, err)
+			}
+			log.Infow("✓ MON node joined cluster", "node", node)
 		}
-
-		// Join the cluster
-		if err := provider.Join(ctx, sshPool, node, token); err != nil {
-			return fmt.Errorf("failed to join node %s to cluster: %w", node, err)
-		}
-		log.Infow("✓ node joined cluster", "node", node)
 	}
 
-	// Step 4: Add storage to all nodes
-	for _, node := range nodes {
-		log.Infow("→ adding storage to node", "node", node)
-		if err := provider.AddStorage(ctx, sshPool, node); err != nil {
-			return fmt.Errorf("failed to add storage on %s: %w", node, err)
+	// Step 4: Join worker nodes (OSDs)
+	if len(workers) > 0 {
+		log.Infow("→ Step 4: Joining OSD nodes", "count", len(workers))
+		for i, node := range workers {
+			log.Infow("→ joining OSD node to cluster", "node", node, "index", i+1, "total", len(workers))
+
+			token, err := provider.GenerateJoinToken(ctx, sshPool, primaryNode, node)
+			if err != nil {
+				return fmt.Errorf("failed to generate join token for %s: %w", node, err)
+			}
+
+			if err := provider.Join(ctx, sshPool, node, token); err != nil {
+				return fmt.Errorf("failed to join OSD node %s to cluster: %w", node, err)
+			}
+			log.Infow("✓ OSD node joined cluster", "node", node)
 		}
-		log.Infow("✓ storage added", "node", node)
 	}
 
-	// Step 5: Create storage pool
-	log.Infow("→ creating storage pool", "poolName", ds.PoolName, "poolSize", ds.PoolSize)
-	if err := provider.CreatePool(ctx, sshPool, primaryNode, ds.PoolName, ds.PoolSize); err != nil {
+	// Step 5: Add storage (OSDs) only on worker nodes
+	if len(workers) > 0 {
+		log.Infow("→ Step 5: Adding storage to OSD nodes", "count", len(workers))
+		for _, node := range workers {
+			log.Infow("→ adding storage to OSD node", "node", node)
+			if err := provider.AddStorage(ctx, sshPool, node); err != nil {
+				return fmt.Errorf("failed to add storage on %s: %w", node, err)
+			}
+			log.Infow("✓ storage added", "node", node)
+		}
+	} else {
+		log.Warnw("no worker nodes configured for OSD storage")
+	}
+
+	// Step 6: Create storage pool/filesystem
+	log.Infow("→ Step 6: Creating storage pool/filesystem", "poolName", ds.PoolName)
+	if err := provider.CreatePool(ctx, sshPool, primaryNode, ds.PoolName); err != nil {
 		return fmt.Errorf("failed to create storage pool: %w", err)
 	}
 	log.Infow("✓ storage pool created", "poolName", ds.PoolName)
 
-	// Step 6: Mount storage on all nodes
-	for _, node := range nodes {
-		log.Infow("→ mounting storage on node", "node", node, "mountPath", ds.MountPath)
-		if err := provider.Mount(ctx, sshPool, node, ds.PoolName, ds.MountPath); err != nil {
+	// Step 7: Mount storage on all nodes
+	log.Infow("→ Step 7: Mounting storage on all nodes", "mountPath", mountPath)
+	for _, node := range allNodes {
+		log.Infow("→ mounting storage on node", "node", node)
+		if err := provider.Mount(ctx, sshPool, node, ds.PoolName); err != nil {
 			return fmt.Errorf("failed to mount storage on %s: %w", node, err)
 		}
 		log.Infow("✓ storage mounted", "node", node)
 	}
 
-	log.Infow("✅ distributed storage cluster setup complete", "nodes", len(nodes))
+	log.Infow("✅ distributed storage cluster setup complete",
+		"managers", len(managers),
+		"workers", len(workers),
+		"mountPath", mountPath)
 	return nil
 }
 
