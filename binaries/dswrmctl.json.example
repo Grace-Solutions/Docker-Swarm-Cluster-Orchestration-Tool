@@ -1,0 +1,250 @@
+{
+  "globalSettings": {
+    "clusterName": "docker-swarm-0001",
+    "overlayProvider": "netbird",
+    "overlayConfig": "--setup-key 'your-netbird-setup-key-here' --allow-server-ssh --enable-ssh-remote-port-forwarding --enable-ssh-sftp --enable-ssh-root",
+    "setRootPassword": "",
+    "servicesDir": "",
+    "removeSSHPublicKeyOnCompletion": false,
+    "distributedStorage": {
+      "enabled": true,
+      "provider": "microceph",
+      "forceRecreation": true,
+      "poolName": "docker-swarm-0001",
+      "eligibleDisks": {
+        "inclusionExpression": ["^/dev/sd[b-z]$", "^/dev/nvme[0-9]n1$"],
+        "exclusionExpression": ["^/dev/sda$", "^/dev/vda$"]
+      },
+      "providers": {
+        "microceph": {
+          "snapChannel": "squid/stable",
+          "enableUpdates": false,
+          "mountPath": "/mnt/MicroCephFS/docker-swarm-0001",
+          "allowLoopDevices": true,
+          "loopDeviceDirectory": "/var/snap/microceph/common",
+          "loopDeviceSizeGB": 16,
+          "loopDeviceThinProvision": true,
+          "enableRadosGateway": false,
+          "radosGatewayPort": 8080
+        }
+      }
+    },
+    "preScripts": [
+      {
+        "enabled": false,
+        "continueOnError": false,
+        "name": "pre-deployment-example",
+        "source": "https://example.com/scripts/pre-check.sh",
+        "parameters": "--verbose",
+        "conditions": [
+          { "property": "role", "operator": "=", "value": "manager", "negate": false }
+        ]
+      }
+    ],
+    "postScripts": [
+      {
+        "enabled": false,
+        "continueOnError": false,
+        "name": "post-deployment-example",
+        "source": "https://example.com/scripts/post-validate.sh",
+        "parameters": "--verbose",
+        "conditions": [
+          { "property": "label.environment", "operator": "=", "value": "production", "negate": false }
+        ]
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "enabled": true,
+      "hostname": "manager1.example.com",
+      "newHostname": "swarm-manager-01",
+      "username": "root",
+      "password": "",
+      "privateKeyPath": "",
+      "useSSHAutomaticKeyPair": true,
+      "sshPort": 22,
+      "role": "manager",
+      "rebootOnCompletion": false,
+      "storageEnabled": true,
+      "advertiseAddr": "",
+      "scriptsEnabled": true,
+      "labels": {
+        "environment": "production",
+        "customer": "acme-corp",
+        "isVPS": "true",
+        "vpsProvider": "LiquidWeb"
+      }
+    },
+    {
+      "enabled": true,
+      "hostname": "manager2.example.com",
+      "newHostname": "swarm-manager-02",
+      "username": "root",
+      "password": "",
+      "privateKeyPath": "",
+      "useSSHAutomaticKeyPair": true,
+      "sshPort": 22,
+      "role": "manager",
+      "rebootOnCompletion": false,
+      "storageEnabled": true,
+      "advertiseAddr": "",
+      "scriptsEnabled": true,
+      "labels": {
+        "environment": "production",
+        "customer": "acme-corp",
+        "isVPS": "true",
+        "vpsProvider": "LiquidWeb"
+      }
+    },
+    {
+      "enabled": true,
+      "hostname": "manager3.example.com",
+      "newHostname": "swarm-manager-03",
+      "username": "root",
+      "password": "",
+      "privateKeyPath": "",
+      "useSSHAutomaticKeyPair": true,
+      "sshPort": 22,
+      "role": "manager",
+      "rebootOnCompletion": false,
+      "storageEnabled": true,
+      "advertiseAddr": "",
+      "scriptsEnabled": true,
+      "labels": {
+        "environment": "production",
+        "customer": "acme-corp",
+        "isVPS": "true",
+        "vpsProvider": "IONOS"
+      }
+    },
+    {
+      "enabled": true,
+      "hostname": "worker1.example.com",
+      "newHostname": "swarm-worker-01",
+      "username": "root",
+      "password": "your-password-here",
+      "privateKeyPath": "",
+      "useSSHAutomaticKeyPair": false,
+      "sshPort": 22,
+      "role": "worker",
+      "rebootOnCompletion": false,
+      "storageEnabled": true,
+      "advertiseAddr": "",
+      "scriptsEnabled": true,
+      "labels": {
+        "environment": "production",
+        "customer": "acme-corp",
+        "isVPS": "true",
+        "vpsProvider": "LiquidWeb"
+      }
+    },
+    {
+      "enabled": true,
+      "hostname": "worker2.example.com",
+      "newHostname": "swarm-worker-02",
+      "username": "root",
+      "password": "",
+      "privateKeyPath": "",
+      "useSSHAutomaticKeyPair": true,
+      "sshPort": 22,
+      "role": "worker",
+      "rebootOnCompletion": false,
+      "storageEnabled": true,
+      "advertiseAddr": "",
+      "scriptsEnabled": true,
+      "labels": {
+        "environment": "production",
+        "customer": "acme-corp",
+        "isVPS": "true",
+        "vpsProvider": "LiquidWeb"
+      }
+    },
+    {
+      "enabled": true,
+      "hostname": "worker3.example.com",
+      "newHostname": "swarm-worker-03",
+      "username": "root",
+      "password": "",
+      "privateKeyPath": "",
+      "useSSHAutomaticKeyPair": true,
+      "sshPort": 22,
+      "role": "worker",
+      "rebootOnCompletion": false,
+      "storageEnabled": true,
+      "advertiseAddr": "",
+      "scriptsEnabled": true,
+      "labels": {
+        "environment": "production",
+        "customer": "acme-corp",
+        "isVPS": "true",
+        "vpsProvider": "RackNerd"
+      }
+    },
+    {
+      "enabled": true,
+      "hostname": "worker4.example.com",
+      "newHostname": "swarm-worker-04",
+      "username": "admin",
+      "password": "",
+      "privateKeyPath": "",
+      "useSSHAutomaticKeyPair": true,
+      "sshPort": 2222,
+      "role": "worker",
+      "rebootOnCompletion": false,
+      "storageEnabled": true,
+      "advertiseAddr": "",
+      "scriptsEnabled": true,
+      "labels": {
+        "environment": "production",
+        "customer": "acme-corp",
+        "isVPS": "true",
+        "vpsProvider": "LiquidWeb"
+      }
+    },
+    {
+      "enabled": true,
+      "hostname": "worker5.example.com",
+      "newHostname": "swarm-worker-05",
+      "username": "root",
+      "password": "",
+      "privateKeyPath": "",
+      "useSSHAutomaticKeyPair": true,
+      "sshPort": 22,
+      "role": "worker",
+      "rebootOnCompletion": false,
+      "storageEnabled": true,
+      "advertiseAddr": "",
+      "scriptsEnabled": true,
+      "labels": {
+        "environment": "production",
+        "customer": "acme-corp",
+        "isVPS": "true",
+        "vpsProvider": "LiquidWeb",
+        "gpu": "nvidia-a100"
+      }
+    },
+    {
+      "enabled": true,
+      "hostname": "worker6.example.com",
+      "newHostname": "swarm-worker-06",
+      "username": "root",
+      "password": "",
+      "privateKeyPath": "",
+      "useSSHAutomaticKeyPair": true,
+      "sshPort": 22,
+      "role": "worker",
+      "rebootOnCompletion": true,
+      "storageEnabled": true,
+      "advertiseAddr": "",
+      "scriptsEnabled": true,
+      "labels": {
+        "environment": "production",
+        "customer": "acme-corp",
+        "isVPS": "true",
+        "vpsProvider": "IONOS",
+        "backup-node": "true"
+      }
+    }
+  ]
+}
