@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"regexp"
@@ -281,19 +282,26 @@ func (p *MicroCephProvider) getEligibleDisks(ctx context.Context, sshPool *ssh.P
 	}
 
 	allDisks := strings.Split(strings.TrimSpace(stdout), "\n")
-	var eligibleDisks []string
-
 	inclusions := ds.EligibleDisks.InclusionExpression
 	exclusions := ds.EligibleDisks.ExclusionExpression
 
+	log.Infow("filtering disks", "totalDisks", len(allDisks), "inclusionPatterns", inclusions, "exclusionPatterns", exclusions)
+
+	// Step 1: Apply inclusion filter (OR logic - "can match this OR this")
+	var includedDisks []string
 	for _, disk := range allDisks {
 		disk = strings.TrimSpace(disk)
 		if disk == "" {
 			continue
 		}
 
-		// Check inclusion patterns (OR logic - any match includes)
-		included := len(inclusions) == 0 // If no inclusions, include all
+		// If no inclusions specified, include all disks
+		if len(inclusions) == 0 {
+			includedDisks = append(includedDisks, disk)
+			continue
+		}
+
+		// Check if disk matches ANY inclusion pattern
 		for _, pattern := range inclusions {
 			matched, err := regexp.MatchString(pattern, disk)
 			if err != nil {
@@ -301,18 +309,18 @@ func (p *MicroCephProvider) getEligibleDisks(ctx context.Context, sshPool *ssh.P
 				continue
 			}
 			if matched {
-				included = true
+				includedDisks = append(includedDisks, disk)
+				log.Debugw("disk passed inclusion filter", "disk", disk, "pattern", pattern)
 				break
 			}
 		}
+	}
 
-		if !included {
-			log.Debugw("disk excluded by inclusion patterns", "disk", disk)
-			continue
-		}
+	log.Infow("after inclusion filter", "includedCount", len(includedDisks), "disks", includedDisks)
 
-		// Check exclusion patterns (OR logic - any match excludes)
-		// "Must not match this or this" - if disk matches ANY exclusion, it's excluded
+	// Step 2: Apply exclusion filter to included disks (OR logic - "must NOT match this OR this")
+	var eligibleDisks []string
+	for _, disk := range includedDisks {
 		excluded := false
 		for _, pattern := range exclusions {
 			matched, err := regexp.MatchString(pattern, disk)
@@ -322,19 +330,16 @@ func (p *MicroCephProvider) getEligibleDisks(ctx context.Context, sshPool *ssh.P
 			}
 			if matched {
 				excluded = true
-				log.Debugw("disk excluded by pattern", "disk", disk, "pattern", pattern)
+				log.Debugw("disk dropped by exclusion filter", "disk", disk, "pattern", pattern)
 				break
 			}
 		}
-
-		if excluded {
-			continue
+		if !excluded {
+			eligibleDisks = append(eligibleDisks, disk)
 		}
-
-		eligibleDisks = append(eligibleDisks, disk)
 	}
 
-	log.Infow("eligible disks found", "count", len(eligibleDisks), "disks", eligibleDisks)
+	log.Infow("after exclusion filter (final eligible)", "eligibleCount", len(eligibleDisks), "disks", eligibleDisks)
 	return eligibleDisks, nil
 }
 
@@ -492,3 +497,100 @@ func (p *MicroCephProvider) Status(ctx context.Context, sshPool *ssh.Pool, node 
 	return status, nil
 }
 
+// EnableRadosGateway enables RADOS Gateway (S3-compatible) on the specified OSD nodes.
+// RGW is enabled on workers (OSD nodes) only, with placement for HA across multiple nodes.
+func (p *MicroCephProvider) EnableRadosGateway(ctx context.Context, sshPool *ssh.Pool, osdNodes []string, port int) (*RadosGatewayInfo, error) {
+	log := logging.L().With("component", "microceph-rgw", "port", port, "nodes", len(osdNodes))
+
+	if len(osdNodes) == 0 {
+		return nil, fmt.Errorf("no OSD nodes provided for RGW")
+	}
+	if port == 0 {
+		port = 7480 // Default RGW port
+	}
+
+	// Use first OSD node as primary for commands
+	primaryOSD := osdNodes[0]
+
+	// Build placement string with all OSD hostnames for HA
+	// Format: --target node1 --target node2 --target node3
+	var placementArgs []string
+	for _, node := range osdNodes {
+		placementArgs = append(placementArgs, "--target", node)
+	}
+
+	// Enable RGW with placement on all OSD nodes
+	// microceph enable rgw --target node1 --target node2 ...
+	enableCmd := fmt.Sprintf("microceph enable rgw --port %d %s", port, strings.Join(placementArgs, " "))
+	log.Infow("enabling RADOS Gateway on OSD nodes", "command", enableCmd)
+	if _, stderr, err := sshPool.Run(ctx, primaryOSD, enableCmd); err != nil {
+		// Check if already enabled
+		if strings.Contains(stderr, "already") || strings.Contains(stderr, "enabled") {
+			log.Infow("RGW already enabled, continuing")
+		} else {
+			return nil, fmt.Errorf("failed to enable RGW: %w (stderr: %s)", err, stderr)
+		}
+	}
+
+	// Wait for RGW to start
+	time.Sleep(5 * time.Second)
+
+	// Create S3 user for cluster access
+	userID := "clusterctl-s3-user"
+	displayName := "Clusterctl S3 User"
+	createUserCmd := fmt.Sprintf("radosgw-admin user create --uid=%s --display-name=\"%s\" 2>/dev/null || radosgw-admin user info --uid=%s", userID, displayName, userID)
+	log.Infow("creating/retrieving S3 user", "userId", userID)
+	stdout, stderr, err := sshPool.Run(ctx, primaryOSD, createUserCmd)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create/get S3 user: %w (stderr: %s)", err, stderr)
+	}
+
+	// Parse the user info JSON to extract access_key and secret_key
+	accessKey, secretKey, err := parseRadosGWUserKeys(stdout)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse S3 user credentials: %w", err)
+	}
+
+	// Build endpoint list using hostnames (with precedence)
+	var endpoints []string
+	for _, node := range osdNodes {
+		endpoint := fmt.Sprintf("http://%s:%d", node, port)
+		endpoints = append(endpoints, endpoint)
+	}
+
+	log.Infow("✓ RADOS Gateway enabled",
+		"endpoints", endpoints,
+		"userId", userID,
+		"accessKey", accessKey)
+
+	return &RadosGatewayInfo{
+		Endpoints: endpoints,
+		AccessKey: accessKey,
+		SecretKey: secretKey,
+		UserID:    userID,
+	}, nil
+}
+
+// parseRadosGWUserKeys extracts access_key and secret_key from radosgw-admin user JSON output.
+func parseRadosGWUserKeys(jsonOutput string) (accessKey, secretKey string, err error) {
+	// Simple JSON parsing for keys array
+	// Expected format: { "keys": [ { "access_key": "...", "secret_key": "..." } ] }
+	type rgwKey struct {
+		AccessKey string `json:"access_key"`
+		SecretKey string `json:"secret_key"`
+	}
+	type rgwUser struct {
+		Keys []rgwKey `json:"keys"`
+	}
+
+	var user rgwUser
+	if err := json.Unmarshal([]byte(jsonOutput), &user); err != nil {
+		return "", "", fmt.Errorf("failed to parse user JSON: %w", err)
+	}
+
+	if len(user.Keys) == 0 {
+		return "", "", fmt.Errorf("no keys found in user info")
+	}
+
+	return user.Keys[0].AccessKey, user.Keys[0].SecretKey, nil
+}

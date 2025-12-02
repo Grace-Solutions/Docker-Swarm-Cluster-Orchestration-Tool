@@ -51,6 +51,18 @@ type Provider interface {
 
 	// Status returns the status of the storage cluster.
 	Status(ctx context.Context, sshPool *ssh.Pool, node string) (*ClusterStatus, error)
+
+	// EnableRadosGateway enables the RADOS Gateway (S3-compatible) on specified OSD nodes.
+	// Returns the S3 endpoint URL and credentials.
+	EnableRadosGateway(ctx context.Context, sshPool *ssh.Pool, osdNodes []string, port int) (*RadosGatewayInfo, error)
+}
+
+// RadosGatewayInfo contains the S3 endpoint and credentials for RADOS Gateway.
+type RadosGatewayInfo struct {
+	Endpoints  []string // List of S3 endpoint URLs (one per RGW node)
+	AccessKey  string
+	SecretKey  string
+	UserID     string
 }
 
 // ClusterStatus represents the status of a storage cluster.
@@ -197,6 +209,22 @@ func SetupCluster(ctx context.Context, sshPool *ssh.Pool, provider Provider, man
 			return fmt.Errorf("failed to mount storage on %s: %w", node, err)
 		}
 		log.Infow("✓ storage mounted", "node", node)
+	}
+
+	// Step 8: Enable RADOS Gateway (S3) on OSD nodes if configured
+	mcCfg := ds.Providers.MicroCeph
+	if mcCfg.EnableRadosGateway && len(workers) > 0 {
+		log.Infow("→ Step 8: Enabling RADOS Gateway (S3) on OSD nodes", "port", mcCfg.RadosGatewayPort, "nodes", len(workers))
+		rgwInfo, err := provider.EnableRadosGateway(ctx, sshPool, workers, mcCfg.RadosGatewayPort)
+		if err != nil {
+			return fmt.Errorf("failed to enable RADOS Gateway: %w", err)
+		}
+		log.Infow("✓ RADOS Gateway (S3) enabled",
+			"endpoints", rgwInfo.Endpoints,
+			"userId", rgwInfo.UserID,
+			"accessKey", rgwInfo.AccessKey)
+	} else if mcCfg.EnableRadosGateway && len(workers) == 0 {
+		log.Warnw("RADOS Gateway enabled but no OSD workers available - skipping")
 	}
 
 	log.Infow("✅ distributed storage cluster setup complete",
