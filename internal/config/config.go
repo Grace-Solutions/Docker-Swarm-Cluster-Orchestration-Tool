@@ -50,14 +50,14 @@ type MicroCephProviderConfig struct {
 	// Default: true
 	LoopDeviceThinProvision bool `json:"loopDeviceThinProvision"`
 
-	// EnableRGW enables the Ceph Object Gateway (S3-compatible) service.
-	// RGW provides RESTful API compatible with Amazon S3 and OpenStack Swift.
+	// EnableRadosGateway enables the Ceph Object Gateway (S3-compatible) service.
+	// RADOS Gateway provides RESTful API compatible with Amazon S3 and OpenStack Swift.
 	// Default: false
-	EnableRGW bool `json:"enableRGW"`
+	EnableRadosGateway bool `json:"enableRadosGateway"`
 
-	// RGWPort is the port for the RGW service when EnableRGW is true.
+	// RadosGatewayPort is the port for the RADOS Gateway service when EnableRadosGateway is true.
 	// Default: 8080
-	RGWPort int `json:"rgwPort"`
+	RadosGatewayPort int `json:"radosGatewayPort"`
 }
 
 // StorageProviders contains provider-specific configurations.
@@ -284,8 +284,8 @@ func (c *Config) ApplyDefaults() {
 	}
 	// LoopDeviceThinProvision defaults to true (set explicitly since zero value is false)
 	// This is handled by checking if the struct was unmarshaled with the field set
-	if mc.RGWPort == 0 {
-		mc.RGWPort = 8080
+	if mc.RadosGatewayPort == 0 {
+		mc.RadosGatewayPort = 8080
 	}
 
 	// Node defaults

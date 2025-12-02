@@ -22,8 +22,8 @@
           "allowLoopDevices": true,
           "loopDeviceSizeGB": 10,
           "loopDeviceThinProvision": true,
-          "enableRGW": false,
-          "rgwPort": 8080
+          "enableRadosGateway": false,
+          "radosGatewayPort": 8080
         }
       }
     },
@@ -35,10 +35,7 @@
         "source": "https://example.com/scripts/pre-check.sh",
         "parameters": "--verbose",
         "conditions": [
-          {
-            "type": "role",
-            "value": "manager"
-          }
+          { "type": "role", "value": "manager", "negate": false }
         ]
       }
     ],
@@ -50,11 +47,7 @@
         "source": "https://example.com/scripts/post-validate.sh",
         "parameters": "--verbose",
         "conditions": [
-          {
-            "type": "label",
-            "key": "environment",
-            "value": "production"
-          }
+          { "type": "label", "key": "environment", "value": "production", "negate": false }
         ]
       }
     ]
