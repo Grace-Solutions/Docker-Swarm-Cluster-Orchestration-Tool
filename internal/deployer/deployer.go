@@ -1811,58 +1811,85 @@ func teardownGlusterFS(ctx context.Context, sshPool *ssh.Pool, workers []string,
 		}
 	}
 
-	// Unmount and clean up on all workers
+	// Clean up on all workers - ORDER MATTERS:
+	// 1. Stop glusterd and kill all gluster processes FIRST
+	// 2. Then unmount and clean up directories
+	// 3. Finally clear glusterd state and restart
 	for _, worker := range workers {
 		log.Infow("→ cleaning up GlusterFS on worker", "worker", worker)
 
-		// Unmount the GlusterFS volume mount (e.g., /mnt/GlusterFS/docker-swarm-0001/mount)
-		unmountVolumeCmd := fmt.Sprintf("umount %s 2>/dev/null || true", mount)
+		// STEP 1: Stop glusterd and kill ALL gluster processes FIRST
+		// This must happen before we can unmount or clean up files
+		log.Infow("→ stopping glusterd and killing gluster processes", "worker", worker)
+		stopCmds := []string{
+			// Stop glusterd service
+			"systemctl stop glusterd 2>/dev/null || true",
+			// Kill ALL gluster-related processes that might be orphaned
+			// These can survive service stop and cause "brick already in use" errors
+			"pkill -9 glusterfsd 2>/dev/null || true",
+			"pkill -9 glusterfs 2>/dev/null || true",
+			"pkill -9 glustershd 2>/dev/null || true",
+			// Wait for processes to die
+			"sleep 2",
+			// Double-check with killall in case pkill missed any
+			"killall -9 glusterfsd 2>/dev/null || true",
+			"killall -9 glusterfs 2>/dev/null || true",
+		}
+		for _, cmd := range stopCmds {
+			_, _, _ = sshPool.Run(ctx, worker, cmd)
+		}
+
+		// STEP 2: Unmount volumes and brick (processes are dead, so this should work)
+		// Force unmount in case of stale handles
 		log.Infow("→ unmounting GlusterFS volume", "worker", worker, "mount", mount)
+		unmountVolumeCmd := fmt.Sprintf("umount -f %s 2>/dev/null || umount -l %s 2>/dev/null || true", mount, mount)
 		_, _, _ = sshPool.Run(ctx, worker, unmountVolumeCmd)
 
-		// Unmount the brick disk if it's mounted (e.g., /mnt/GlusterFS/docker-swarm-0001/brick)
-		unmountBrickCmd := fmt.Sprintf("umount %s 2>/dev/null || true", brick)
-		log.Infow("→ unmounting brick disk", "worker", worker, "brick", brick)
-		_, _, _ = sshPool.Run(ctx, worker, unmountBrickCmd)
+		// Don't unmount the brick if it's an XFS disk - we want to keep the disk mounted
+		// Just clean the brick directory contents, not unmount the disk
+		// The brick path is like /mnt/GlusterFS/docker-swarm-0001/brick which is an XFS mount
 
-		// Remove volume mount from fstab
-		fstabVolumeCmd := fmt.Sprintf("sed -i '\\|%s|d' /etc/fstab 2>/dev/null || true", volume)
+		// STEP 3: Remove fstab entries for GlusterFS (not the brick XFS mount)
+		fstabVolumeCmd := fmt.Sprintf("sed -i '\\|glusterfs.*%s|d' /etc/fstab 2>/dev/null || true", mount)
 		_, _, _ = sshPool.Run(ctx, worker, fstabVolumeCmd)
 
-		// Remove brick disk from fstab (match any line containing the brick path)
-		fstabBrickCmd := fmt.Sprintf("sed -i '\\|%s|d' /etc/fstab 2>/dev/null || true", brick)
-		log.Infow("→ removing brick from fstab", "worker", worker, "brick", brick)
-		_, _, _ = sshPool.Run(ctx, worker, fstabBrickCmd)
+		// STEP 4: Clean brick directory contents (but keep the mount)
+		// This removes the .glusterfs directory and any data
+		log.Infow("→ cleaning brick contents", "worker", worker, "brick", brick)
+		cleanBrickCmd := fmt.Sprintf("rm -rf %s/.glusterfs %s/* 2>/dev/null || true", brick, brick)
+		_, _, _ = sshPool.Run(ctx, worker, cleanBrickCmd)
 
-		// Remove brick directory contents
-		cleanCmd := fmt.Sprintf("rm -rf %s/* 2>/dev/null || true", brick)
-		_, _, _ = sshPool.Run(ctx, worker, cleanCmd)
-
-		// Remove brick directory itself
-		removeBrickDirCmd := fmt.Sprintf("rm -rf %s 2>/dev/null || true", brick)
-		log.Infow("→ removing brick directory", "worker", worker, "brick", brick)
-		_, _, _ = sshPool.Run(ctx, worker, removeBrickDirCmd)
-
-		// Remove mount directory if it exists
+		// STEP 5: Remove mount directory if it exists
 		removeMountCmd := fmt.Sprintf("rm -rf %s 2>/dev/null || true", mount)
 		log.Infow("→ removing mount directory", "worker", worker, "mount", mount)
 		_, _, _ = sshPool.Run(ctx, worker, removeMountCmd)
 
-		// Reset glusterd state completely by removing all peer info
-		// This ensures a clean slate when re-creating the cluster
-		log.Infow("→ resetting glusterd peer state", "worker", worker)
-		resetCmds := []string{
-			"systemctl stop glusterd 2>/dev/null || true",
+		// STEP 6: Clear all glusterd state
+		log.Infow("→ clearing glusterd state", "worker", worker)
+		clearCmds := []string{
 			"rm -rf /var/lib/glusterd/peers/* 2>/dev/null || true",
 			"rm -rf /var/lib/glusterd/vols/* 2>/dev/null || true",
-			"systemctl start glusterd 2>/dev/null || true",
+			"rm -rf /var/lib/glusterd/bitd/* 2>/dev/null || true",
+			"rm -rf /var/lib/glusterd/scrub/* 2>/dev/null || true",
+			"rm -rf /var/lib/glusterd/snaps/* 2>/dev/null || true",
+			"rm -rf /var/lib/glusterd/quotad/* 2>/dev/null || true",
+			"rm -rf /var/lib/glusterd/nfs/* 2>/dev/null || true",
+			"rm -rf /var/lib/glusterd/glustershd/* 2>/dev/null || true",
 		}
-		for _, cmd := range resetCmds {
+		for _, cmd := range clearCmds {
 			_, _, _ = sshPool.Run(ctx, worker, cmd)
 		}
 
+		// STEP 7: Restart glusterd with clean state
+		log.Infow("→ restarting glusterd", "worker", worker)
+		_, _, _ = sshPool.Run(ctx, worker, "systemctl start glusterd 2>/dev/null || true")
+
 		log.Infow("✓ worker cleanup complete", "worker", worker)
 	}
+
+	// Wait for glusterd to stabilize on all nodes before returning
+	log.Infow("→ waiting for glusterd to stabilize")
+	time.Sleep(3 * time.Second)
 
 	log.Infow("✓ GlusterFS teardown complete")
 	return nil
