@@ -94,9 +94,9 @@ func GlusterSetup(ctx context.Context, sshPool *ssh.Pool, sshWorkers, glusterWor
 		return nil, fmt.Errorf("failed to start volume: %w", err)
 	}
 
-	// Phase 5: Mount the volume on all nodes (use SSH hostnames)
+	// Phase 5: Mount the volume on all nodes (SSH to connect, Gluster FQDNs for mount)
 	log.Infow("phase 5: mounting GlusterFS volume on all nodes")
-	if err := mountVolume(ctx, sshPool, validSSHWorkers, volume, mount); err != nil {
+	if err := mountVolume(ctx, sshPool, validSSHWorkers, validGlusterWorkers, volume, mount); err != nil {
 		return nil, fmt.Errorf("failed to mount volume: %w", err)
 	}
 
@@ -361,16 +361,63 @@ func startVolume(ctx context.Context, sshPool *ssh.Pool, sshWorkers []string, or
 			return fmt.Errorf("failed to get volume status: %w (stderr: %s)", err, stderr)
 		}
 
+		// Parse brick status - handles wrapped output where FQDN spans multiple lines
+		// Example wrapped output:
+		//   Brick ovhcloud-vps-6ffdf9c8.netbird.cloud:/
+		//   mnt/GlusterFS/docker-swarm-0001/brick       59634     0          Y       2406
+		//
+		// The "Y" or "N" appears on the continuation line with the port number
 		onlineBricks := 0
 		offlineBricks := 0
-		for _, line := range strings.Split(stdout, "\n") {
-			if strings.Contains(line, "Brick") && strings.Contains(line, ":/") {
-				// Look for the Online column - bricks show Y or N
-				// The line format is like: "Brick 100.76.87.219:/mnt/...  N/A  N/A  N  N/A"
-				fields := strings.Fields(line)
-				if len(fields) >= 5 {
-					// Online status is typically the 5th field (Y or N)
-					for _, field := range fields {
+
+		lines := strings.Split(stdout, "\n")
+		for i := 0; i < len(lines); i++ {
+			line := lines[i]
+
+			// Check if this is a Brick line (may be split across lines)
+			if strings.HasPrefix(strings.TrimSpace(line), "Brick ") {
+				// The status (Y/N) might be on this line or the next line
+				// Look for a line that has the port number and Online status
+				statusLine := line
+				if i+1 < len(lines) && !strings.HasPrefix(strings.TrimSpace(lines[i+1]), "Brick ") &&
+					!strings.HasPrefix(strings.TrimSpace(lines[i+1]), "Self-heal") &&
+					!strings.Contains(lines[i+1], "Task Status") &&
+					!strings.Contains(lines[i+1], "---") &&
+					strings.TrimSpace(lines[i+1]) != "" {
+					// This could be a continuation line - check if it has port/status info
+					nextLine := strings.TrimSpace(lines[i+1])
+					fields := strings.Fields(nextLine)
+					// Continuation lines typically start with the path continuation and have port numbers
+					if len(fields) >= 4 {
+						// Check if one of the fields is Y or N (online status)
+						for _, f := range fields {
+							if f == "Y" || f == "N" {
+								statusLine = nextLine
+								i++ // Skip the continuation line
+								break
+							}
+						}
+					}
+				}
+
+				// Now parse the status from statusLine
+				fields := strings.Fields(statusLine)
+				foundStatus := false
+				for _, field := range fields {
+					if field == "Y" {
+						onlineBricks++
+						foundStatus = true
+						break
+					} else if field == "N" {
+						offlineBricks++
+						foundStatus = true
+						break
+					}
+				}
+
+				// If we didn't find Y/N on the status line, it might be on original line
+				if !foundStatus {
+					for _, field := range strings.Fields(line) {
 						if field == "Y" {
 							onlineBricks++
 							break
@@ -427,14 +474,34 @@ func startVolume(ctx context.Context, sshPool *ssh.Pool, sshWorkers []string, or
 		// Wait and check again
 		time.Sleep(5 * time.Second)
 
-		// Final check
+		// Final check - use same wrapped-output-aware parsing
 		statusCmd := fmt.Sprintf("gluster volume status %s", volume)
 		stdout, _, _ = sshPool.Run(ctx, orchestrator, statusCmd)
 
 		onlineBricks := 0
-		for _, line := range strings.Split(stdout, "\n") {
-			if strings.Contains(line, "Brick") && strings.Contains(line, ":/") {
-				for _, field := range strings.Fields(line) {
+		lines := strings.Split(stdout, "\n")
+		for i := 0; i < len(lines); i++ {
+			line := lines[i]
+			if strings.HasPrefix(strings.TrimSpace(line), "Brick ") {
+				statusLine := line
+				if i+1 < len(lines) && !strings.HasPrefix(strings.TrimSpace(lines[i+1]), "Brick ") &&
+					!strings.HasPrefix(strings.TrimSpace(lines[i+1]), "Self-heal") &&
+					!strings.Contains(lines[i+1], "Task Status") &&
+					!strings.Contains(lines[i+1], "---") &&
+					strings.TrimSpace(lines[i+1]) != "" {
+					nextLine := strings.TrimSpace(lines[i+1])
+					fields := strings.Fields(nextLine)
+					if len(fields) >= 4 {
+						for _, f := range fields {
+							if f == "Y" || f == "N" {
+								statusLine = nextLine
+								i++
+								break
+							}
+						}
+					}
+				}
+				for _, field := range strings.Fields(statusLine) {
 					if field == "Y" {
 						onlineBricks++
 						break
@@ -454,46 +521,56 @@ func startVolume(ctx context.Context, sshPool *ssh.Pool, sshWorkers []string, or
 	return err
 }
 
-func mountVolume(ctx context.Context, sshPool *ssh.Pool, workers []string, volume, mount string) error {
-	// Build backup volfile servers list (all workers except the first one)
+func mountVolume(ctx context.Context, sshPool *ssh.Pool, sshWorkers, glusterWorkers []string, volume, mount string) error {
+	if len(sshWorkers) != len(glusterWorkers) {
+		return fmt.Errorf("sshWorkers and glusterWorkers must have same length")
+	}
+
+	// Build backup volfile servers list using Gluster FQDNs (all except the first one)
 	var backupServers []string
-	for _, worker := range workers[1:] {
-		backupServers = append(backupServers, worker)
+	for _, glusterWorker := range glusterWorkers[1:] {
+		backupServers = append(backupServers, glusterWorker)
 	}
 	backupOpt := ""
 	if len(backupServers) > 0 {
 		backupOpt = fmt.Sprintf(",backupvolfile-server=%s", strings.Join(backupServers, ":"))
 	}
 
-	// Mount on all workers
-	for _, worker := range workers {
+	// Primary server is the first Gluster FQDN
+	primaryServer := glusterWorkers[0]
+
+	// Mount on all workers using SSH to connect, but Gluster FQDN for mount
+	for i, sshWorker := range sshWorkers {
+		glusterWorker := glusterWorkers[i]
+
 		// Create mount point
 		cmd := fmt.Sprintf("mkdir -p %s", mount)
-		if _, stderr, err := sshPool.Run(ctx, worker, cmd); err != nil {
-			return fmt.Errorf("failed to create mount point on %s: %w (stderr: %s)", worker, err, stderr)
+		if _, stderr, err := sshPool.Run(ctx, sshWorker, cmd); err != nil {
+			return fmt.Errorf("failed to create mount point on %s: %w (stderr: %s)", sshWorker, err, stderr)
 		}
 
 		// Check if already mounted as GlusterFS (must be both the mount point AND glusterfs type)
 		checkCmd := fmt.Sprintf("mount | grep '%s' | grep -q glusterfs && echo 'mounted' || echo 'not-mounted'", mount)
-		stdout, _, err := sshPool.Run(ctx, worker, checkCmd)
+		stdout, _, err := sshPool.Run(ctx, sshWorker, checkCmd)
 		if err == nil && strings.Contains(stdout, "mounted") && !strings.Contains(stdout, "not-mounted") {
-			logging.L().Infow(fmt.Sprintf("%s: already mounted", worker))
+			logging.L().Infow(fmt.Sprintf("%s (%s): already mounted", sshWorker, glusterWorker))
 			continue
 		}
 
-		// Mount the volume
-		mountCmd := fmt.Sprintf("mount -t glusterfs -o defaults%s %s:/%s %s", backupOpt, workers[0], volume, mount)
-		stdout, stderr, err := sshPool.Run(ctx, worker, mountCmd)
+		// Mount the volume using Gluster FQDN as the server
+		mountCmd := fmt.Sprintf("mount -t glusterfs -o defaults%s %s:/%s %s", backupOpt, primaryServer, volume, mount)
+		logging.L().Infow("mounting GlusterFS volume", "sshHost", sshWorker, "glusterServer", primaryServer, "volume", volume, "mount", mount)
+		stdout, stderr, err := sshPool.Run(ctx, sshWorker, mountCmd)
 		if err != nil {
-			return fmt.Errorf("failed to mount on %s: %w (stderr: %s)", worker, err, stderr)
+			return fmt.Errorf("failed to mount on %s: %w (stderr: %s)", sshWorker, err, stderr)
 		}
-		logging.L().Infow(fmt.Sprintf("%s: mounted successfully", worker))
+		logging.L().Infow(fmt.Sprintf("%s (%s): mounted successfully", sshWorker, glusterWorker))
 
-		// Add to /etc/fstab for persistence
-		fstabEntry := fmt.Sprintf("%s:/%s %s glusterfs defaults%s 0 0", workers[0], volume, mount, backupOpt)
+		// Add to /etc/fstab for persistence using Gluster FQDN
+		fstabEntry := fmt.Sprintf("%s:/%s %s glusterfs defaults%s 0 0", primaryServer, volume, mount, backupOpt)
 		fstabCmd := fmt.Sprintf("grep -q '%s' /etc/fstab || echo '%s' >> /etc/fstab", mount, fstabEntry)
-		if _, stderr, err := sshPool.Run(ctx, worker, fstabCmd); err != nil {
-			logging.L().Warnw(fmt.Sprintf("failed to add fstab entry on %s (non-fatal): %v (stderr: %s)", worker, err, stderr))
+		if _, stderr, err := sshPool.Run(ctx, sshWorker, fstabCmd); err != nil {
+			logging.L().Warnw(fmt.Sprintf("failed to add fstab entry on %s (non-fatal): %v (stderr: %s)", sshWorker, err, stderr))
 		}
 	}
 
