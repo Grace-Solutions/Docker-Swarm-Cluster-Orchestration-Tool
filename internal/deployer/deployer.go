@@ -139,6 +139,21 @@ func Deploy(ctx context.Context, cfg *config.Config) error {
 			} else {
 				log.Infow("✓ Storage teardown complete")
 			}
+
+			// Verify teardown was successful on all nodes
+			log.Infow("→ Verifying storage teardown...")
+			allClean := true
+			for _, node := range storageNodes {
+				if !verifyStorageTeardown(ctx, sshPool, node, cfg) {
+					log.Warnw("⚠️ Storage not fully cleaned on node", "node", node)
+					allClean = false
+				}
+			}
+			if allClean {
+				log.Infow("✓ All nodes verified clean")
+			} else {
+				log.Warnw("⚠️ Some nodes may have residual storage data (continuing anyway)")
+			}
 		}
 
 		// Setup distributed storage (MicroCeph: managers=MON, workers=OSD)
@@ -1824,4 +1839,61 @@ func basicStorageTeardown(ctx context.Context, sshPool *ssh.Pool, nodes []string
 	}
 
 	return nil
+}
+
+// verifyStorageTeardown checks if storage has been fully removed from a node.
+func verifyStorageTeardown(ctx context.Context, sshPool *ssh.Pool, node string, cfg *config.Config) bool {
+	log := logging.L().With("component", "storage-verify", "node", node)
+	ds := cfg.GetDistributedStorage()
+	allClean := true
+
+	// Check 1: MicroCeph snap should not be installed
+	snapCheck := "snap list microceph 2>/dev/null"
+	stdout, _, _ := sshPool.Run(ctx, node, snapCheck)
+	if strings.Contains(stdout, "microceph") {
+		log.Warnw("MicroCeph snap still installed", "output", strings.TrimSpace(stdout))
+		allClean = false
+	}
+
+	// Check 2: No ceph processes should be running
+	procCheck := "pgrep -la ceph 2>/dev/null || true"
+	stdout, _, _ = sshPool.Run(ctx, node, procCheck)
+	if strings.TrimSpace(stdout) != "" {
+		log.Warnw("Ceph processes still running", "output", strings.TrimSpace(stdout))
+		allClean = false
+	}
+
+	// Check 3: Mount path should not exist or be empty
+	mountPath := ds.Providers.MicroCeph.MountPath
+	if mountPath == "" {
+		mountPath = "/mnt/cephfs"
+	}
+	mountCheck := fmt.Sprintf("mountpoint -q %s 2>/dev/null && echo 'mounted' || echo 'not mounted'", mountPath)
+	stdout, _, _ = sshPool.Run(ctx, node, mountCheck)
+	if strings.Contains(stdout, "mounted") && !strings.Contains(stdout, "not mounted") {
+		log.Warnw("Mount path still mounted", "path", mountPath)
+		allClean = false
+	}
+
+	// Check 4: /var/snap/microceph should not exist
+	dirCheck := "test -d /var/snap/microceph && echo 'exists' || echo 'clean'"
+	stdout, _, _ = sshPool.Run(ctx, node, dirCheck)
+	if strings.Contains(stdout, "exists") {
+		log.Warnw("/var/snap/microceph directory still exists")
+		allClean = false
+	}
+
+	// Check 5: GlusterFS should not be installed (detect legacy)
+	glusterCheck := "which gluster 2>/dev/null || dpkg -l | grep -q glusterfs && echo 'installed' || echo 'clean'"
+	stdout, _, _ = sshPool.Run(ctx, node, glusterCheck)
+	if strings.Contains(stdout, "installed") || strings.Contains(stdout, "/gluster") {
+		log.Warnw("GlusterFS detected on node - run scripts/teardown-glusterfs.sh first")
+		allClean = false
+	}
+
+	if allClean {
+		log.Infow("✓ Node verified clean")
+	}
+
+	return allClean
 }
