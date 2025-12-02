@@ -175,7 +175,9 @@ func createTrustedPool(ctx context.Context, sshPool *ssh.Pool, sshWorkers, glust
 		})
 
 		if err != nil {
-			return err
+			// Fetch detailed logs to help diagnose the failure
+			glusterLogs := fetchGlusterLogs(ctx, sshPool, sshOrchestrator, "")
+			return fmt.Errorf("%w\n\n--- GlusterFS Logs from %s ---\n%s", err, sshOrchestrator, glusterLogs)
 		}
 	}
 
@@ -200,7 +202,9 @@ func createTrustedPool(ctx context.Context, sshPool *ssh.Pool, sshWorkers, glust
 	})
 
 	if err != nil {
-		return err
+		// Fetch detailed logs to help diagnose the failure
+		glusterLogs := fetchGlusterLogs(ctx, sshPool, sshFirstPeer, "")
+		return fmt.Errorf("%w\n\n--- GlusterFS Logs from %s ---\n%s", err, sshFirstPeer, glusterLogs)
 	}
 
 	// Verify peer status with retry
@@ -321,7 +325,13 @@ func createVolume(ctx context.Context, sshPool *ssh.Pool, sshWorkers, glusterWor
 		return nil
 	})
 
-	return err
+	if err != nil {
+		// Fetch detailed logs from orchestrator to help diagnose the failure
+		glusterLogs := fetchGlusterLogs(ctx, sshPool, sshOrchestrator, volume)
+		return fmt.Errorf("%w\n\n--- GlusterFS Logs from %s ---\n%s", err, sshOrchestrator, glusterLogs)
+	}
+
+	return nil
 }
 
 func startVolume(ctx context.Context, sshPool *ssh.Pool, sshWorkers []string, orchestrator, volume string, expectedBricks int) error {
@@ -559,7 +569,10 @@ func mountVolume(ctx context.Context, sshPool *ssh.Pool, sshWorkers, glusterWork
 		logging.L().Infow("mounting GlusterFS volume", "sshHost", sshWorker, "glusterServer", primaryServer, "volume", volume, "mount", mount)
 		stdout, stderr, err := sshPool.Run(ctx, sshWorker, mountCmd)
 		if err != nil {
-			return fmt.Errorf("failed to mount on %s: %w (stderr: %s)", sshWorker, err, stderr)
+			// Fetch detailed logs from the node to help diagnose the failure
+			glusterLogs := fetchGlusterLogs(ctx, sshPool, sshWorker, volume)
+			logging.L().Errorw("GlusterFS mount failed - fetching logs", "host", sshWorker)
+			return fmt.Errorf("failed to mount on %s: %w (stderr: %s)\n\n--- GlusterFS Logs from %s ---\n%s", sshWorker, err, stderr, sshWorker, glusterLogs)
 		}
 		logging.L().Infow(fmt.Sprintf("%s (%s): mounted successfully", sshWorker, glusterWorker))
 
@@ -823,4 +836,42 @@ func detectAndPrepareDisk(ctx context.Context, sshPool *ssh.Pool, workers []stri
 	}
 
 	return validWorkers, nil
+}
+
+// fetchGlusterLogs fetches relevant GlusterFS logs from a node to help diagnose failures.
+// It attempts to get logs from multiple sources and returns a combined log snippet.
+func fetchGlusterLogs(ctx context.Context, sshPool *ssh.Pool, sshHost, volume string) string {
+	var logs []string
+
+	// Try to get mount-specific log
+	mountLog := fmt.Sprintf("/var/log/glusterfs/mnt-GlusterFS-%s-data.log", volume)
+	if stdout, _, err := sshPool.Run(ctx, sshHost, fmt.Sprintf("tail -50 %s 2>/dev/null || true", mountLog)); err == nil && strings.TrimSpace(stdout) != "" {
+		logs = append(logs, fmt.Sprintf("=== Mount log (%s) ===\n%s", mountLog, strings.TrimSpace(stdout)))
+	}
+
+	// Try generic mount log
+	if stdout, _, err := sshPool.Run(ctx, sshHost, "tail -50 /var/log/glusterfs/mount.log 2>/dev/null || true"); err == nil && strings.TrimSpace(stdout) != "" {
+		logs = append(logs, fmt.Sprintf("=== Mount log (/var/log/glusterfs/mount.log) ===\n%s", strings.TrimSpace(stdout)))
+	}
+
+	// Try glusterd.log for peer/volume issues
+	if stdout, _, err := sshPool.Run(ctx, sshHost, "tail -30 /var/log/glusterfs/glusterd.log 2>/dev/null || true"); err == nil && strings.TrimSpace(stdout) != "" {
+		logs = append(logs, fmt.Sprintf("=== Glusterd log ===\n%s", strings.TrimSpace(stdout)))
+	}
+
+	// Try journalctl for recent gluster messages
+	if stdout, _, err := sshPool.Run(ctx, sshHost, "journalctl -u glusterd -n 20 --no-pager 2>/dev/null || true"); err == nil && strings.TrimSpace(stdout) != "" {
+		logs = append(logs, fmt.Sprintf("=== Journalctl glusterd ===\n%s", strings.TrimSpace(stdout)))
+	}
+
+	// List all gluster log files for reference
+	if stdout, _, err := sshPool.Run(ctx, sshHost, "ls -la /var/log/glusterfs/ 2>/dev/null || true"); err == nil && strings.TrimSpace(stdout) != "" {
+		logs = append(logs, fmt.Sprintf("=== Available log files ===\n%s", strings.TrimSpace(stdout)))
+	}
+
+	if len(logs) == 0 {
+		return "(no GlusterFS logs found)"
+	}
+
+	return strings.Join(logs, "\n\n")
 }
