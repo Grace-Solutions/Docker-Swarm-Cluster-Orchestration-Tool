@@ -35,7 +35,7 @@
         "source": "https://example.com/scripts/pre-check.sh",
         "parameters": "--verbose",
         "conditions": [
-          { "type": "role", "value": "manager", "negate": false }
+          { "property": "role", "operator": "=", "value": "manager", "negate": false }
         ]
       }
     ],
@@ -47,7 +47,7 @@
         "source": "https://example.com/scripts/post-validate.sh",
         "parameters": "--verbose",
         "conditions": [
-          { "type": "label", "key": "environment", "value": "production", "negate": false }
+          { "property": "label.environment", "operator": "=", "value": "production", "negate": false }
         ]
       }
     ]
