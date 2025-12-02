@@ -42,7 +42,7 @@ type NodeRegistration struct {
 	CPU             int       `json:"cpu"`
 	MemoryMB        int       `json:"memoryMb"`
 	DockerVersion   string    `json:"dockerVersion"`
-	GlusterCapable  bool      `json:"glusterCapable"`  // Deprecated: use StorageEnabled
+	GlusterCapable  bool      `json:"glusterCapable,omitempty"`  // Deprecated: kept for backward compatibility, use StorageEnabled
 	StorageEnabled  bool      `json:"storageEnabled"`  // Node participates in distributed storage
 	DeployPortainer bool      `json:"deployPortainer,omitempty"`
 	Timestamp       time.Time `json:"timestamp"`

@@ -163,163 +163,69 @@ func EnsureWireGuard(ctx context.Context) error {
 	return nil
 }
 
-// EnsureGluster ensures the GlusterFS server and client components are
-// installed and the glusterd daemon is running. This is for worker nodes that will host bricks.
-// A best-effort installation is attempted using the system's package manager.
-func EnsureGluster(ctx context.Context) error {
-	// Check if gluster CLI is available.
-	needsInstall := false
-	if _, err := exec.LookPath("gluster"); err != nil {
-		needsInstall = true
+// EnsureMicroCeph ensures MicroCeph is installed via snap.
+// This is the preferred distributed storage solution.
+func EnsureMicroCeph(ctx context.Context, channel string) error {
+	if channel == "" {
+		channel = "latest/stable"
 	}
 
-	if needsInstall {
-		var (
-			script  string
-			manager string
-		)
-
-		if _, err := exec.LookPath("apt-get"); err == nil {
-			manager = "apt-get"
-			script = "apt-get update && apt-get install -y glusterfs-server glusterfs-client"
-		} else if _, err := exec.LookPath("dnf"); err == nil {
-			manager = "dnf"
-			script = "dnf install -y glusterfs glusterfs-fuse glusterfs-server"
-		} else if _, err := exec.LookPath("yum"); err == nil {
-			manager = "yum"
-			script = "yum install -y glusterfs glusterfs-fuse glusterfs-server"
-		} else if _, err := exec.LookPath("zypper"); err == nil {
-			manager = "zypper"
-			script = "zypper --non-interactive install glusterfs glusterfs-fuse"
-		} else if _, err := exec.LookPath("pacman"); err == nil {
-			manager = "pacman"
-			script = "pacman -Sy --noconfirm glusterfs"
-		} else if _, err := exec.LookPath("apk"); err == nil {
-			manager = "apk"
-			script = "apk add --no-cache glusterfs"
-		} else {
-			return fmt.Errorf("deps: gluster CLI not found and automatic installation is not implemented for this OS; install the GlusterFS server manually")
-		}
-
-		logging.L().Infow("gluster CLI not found; attempting installation via package manager", "manager", manager)
-		if err := runInstallScript(ctx, "gluster", script); err != nil {
-			return err
-		}
-
-		if _, err := exec.LookPath("gluster"); err != nil {
-			// On some systems the Gluster CLI lives in sbin directories that are not
-			// always present in PATH for non-login shells. As a best-effort, search
-			// a few common locations and, if found, append them to PATH so subsequent
-			// commands can locate `gluster`.
-			fallbackDirs := []string{"/usr/sbin", "/usr/local/sbin", "/sbin"}
-			for _, dir := range fallbackDirs {
-				candidate := dir + string(os.PathSeparator) + "gluster"
-				if st, statErr := os.Stat(candidate); statErr == nil && !st.IsDir() {
-					pathEnv := os.Getenv("PATH")
-					if !strings.Contains(pathEnv, dir) {
-						_ = os.Setenv("PATH", pathEnv+string(os.PathListSeparator)+dir)
-					}
-					// Re-check with the updated PATH.
-					if _, lookErr := exec.LookPath("gluster"); lookErr == nil {
-						logging.L().Infow(fmt.Sprintf("gluster CLI found at %s after PATH adjustment", candidate))
-						break
-					}
-				}
-			}
-			if _, err := exec.LookPath("gluster"); err != nil {
-				return fmt.Errorf("deps: gluster installation did not make 'gluster' available on PATH: %w", err)
-			}
-		}
-	}
-
-	// Ensure glusterd daemon is running (idempotent).
-	// Try systemctl first, then fall back to service command.
-	daemonStarted := false
-	if err := exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", "glusterd").Run(); err != nil {
-		// Daemon is not active; try to start it.
-		logging.L().Infow("glusterd daemon not active; attempting to start")
-
-		// Try systemctl enable and start.
-		if err := exec.CommandContext(ctx, "systemctl", "enable", "glusterd").Run(); err == nil {
-			if err := exec.CommandContext(ctx, "systemctl", "start", "glusterd").Run(); err != nil {
-				logging.L().Warnw("systemctl start glusterd failed", "err", err)
-			} else {
-				logging.L().Infow("glusterd daemon started via systemctl")
-				daemonStarted = true
-			}
-		}
-
-		// Fall back to service command if systemctl didn't work.
-		if !daemonStarted {
-			if err := exec.CommandContext(ctx, "service", "glusterd", "start").Run(); err != nil {
-				logging.L().Warnw("service glusterd start failed", "err", err)
-				// Non-fatal; the daemon might already be running or will be started by another mechanism.
-			} else {
-				logging.L().Infow("glusterd daemon started via service command")
-				daemonStarted = true
-			}
-		}
-
-		// If we just started the daemon, give it a moment to initialize before returning.
-		// This helps avoid "Transport endpoint is not connected" errors when peer probing immediately after.
-		if daemonStarted {
-			logging.L().Infow("waiting for glusterd daemon to initialize")
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(3 * time.Second):
-			}
-		}
-	}
-
-	return nil
-}
-
-// EnsureGlusterClient ensures only the GlusterFS client components are installed.
-// This is for manager nodes that will mount volumes but not host bricks.
-// A best-effort installation is attempted using the system's package manager.
-func EnsureGlusterClient(ctx context.Context) error {
-	// Check if mount.glusterfs is available (the actual client binary).
-	if _, err := exec.LookPath("mount.glusterfs"); err == nil {
+	// Check if microceph is already installed
+	if _, err := exec.LookPath("microceph"); err == nil {
+		logging.L().Infow("MicroCeph already installed")
 		return nil
 	}
 
-	var (
-		script  string
-		manager string
-	)
-
-	if _, err := exec.LookPath("apt-get"); err == nil {
-		manager = "apt-get"
-		script = "apt-get update && apt-get install -y glusterfs-client"
-	} else if _, err := exec.LookPath("dnf"); err == nil {
-		manager = "dnf"
-		script = "dnf install -y glusterfs-fuse"
-	} else if _, err := exec.LookPath("yum"); err == nil {
-		manager = "yum"
-		script = "yum install -y glusterfs-fuse"
-	} else if _, err := exec.LookPath("zypper"); err == nil {
-		manager = "zypper"
-		script = "zypper --non-interactive install glusterfs-fuse"
-	} else if _, err := exec.LookPath("pacman"); err == nil {
-		manager = "pacman"
-		script = "pacman -Sy --noconfirm glusterfs"
-	} else if _, err := exec.LookPath("apk"); err == nil {
-		manager = "apk"
-		script = "apk add --no-cache glusterfs"
-	} else {
-		return fmt.Errorf("deps: glusterfs client not found and automatic installation is not implemented for this OS; install the GlusterFS client manually")
+	// Ensure snapd is installed first
+	if _, err := exec.LookPath("snap"); err != nil {
+		logging.L().Infow("snap not found; attempting to install snapd")
+		var script string
+		if _, err := exec.LookPath("apt-get"); err == nil {
+			script = "apt-get update && apt-get install -y snapd"
+		} else if _, err := exec.LookPath("dnf"); err == nil {
+			script = "dnf install -y snapd && systemctl enable --now snapd.socket"
+		} else if _, err := exec.LookPath("yum"); err == nil {
+			script = "yum install -y snapd && systemctl enable --now snapd.socket"
+		} else {
+			return fmt.Errorf("deps: snap not found and automatic installation is not implemented for this OS; install snapd manually")
+		}
+		if err := runInstallScript(ctx, "snapd", script); err != nil {
+			return err
+		}
+		// Wait for snapd to be ready
+		time.Sleep(3 * time.Second)
 	}
 
-	logging.L().Infow("glusterfs client not found; attempting installation via package manager", "manager", manager)
-	if err := runInstallScript(ctx, "glusterfs-client", script); err != nil {
+	// Install microceph via snap
+	installCmd := fmt.Sprintf("snap install microceph --channel=%s", channel)
+	logging.L().Infow("installing MicroCeph via snap", "channel", channel)
+	if err := runInstallScript(ctx, "microceph", installCmd); err != nil {
 		return err
 	}
 
-	if _, err := exec.LookPath("mount.glusterfs"); err != nil {
-		return fmt.Errorf("deps: glusterfs client installation did not make 'mount.glusterfs' available on PATH: %w", err)
+	// Verify installation
+	if _, err := exec.LookPath("microceph"); err != nil {
+		// Try common snap paths
+		snapPaths := []string{"/snap/bin", "/var/lib/snapd/snap/bin"}
+		for _, dir := range snapPaths {
+			candidate := dir + string(os.PathSeparator) + "microceph"
+			if st, statErr := os.Stat(candidate); statErr == nil && !st.IsDir() {
+				pathEnv := os.Getenv("PATH")
+				if !strings.Contains(pathEnv, dir) {
+					_ = os.Setenv("PATH", pathEnv+string(os.PathListSeparator)+dir)
+				}
+				if _, lookErr := exec.LookPath("microceph"); lookErr == nil {
+					logging.L().Infow(fmt.Sprintf("microceph CLI found at %s after PATH adjustment", candidate))
+					break
+				}
+			}
+		}
+		if _, err := exec.LookPath("microceph"); err != nil {
+			return fmt.Errorf("deps: microceph installation did not make 'microceph' available on PATH: %w", err)
+		}
 	}
 
+	logging.L().Infow("MicroCeph installed successfully")
 	return nil
 }
 

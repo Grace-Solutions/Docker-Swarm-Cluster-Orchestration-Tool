@@ -144,8 +144,9 @@ func parseServiceMetadata(filePath, fileName string) (ServiceMetadata, error) {
 	return metadata, nil
 }
 
-// DeployServices deploys all enabled services to the Docker Swarm cluster
-func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string, servicesDir string, glusterMount string) (*DeploymentMetrics, error) {
+// DeployServices deploys all enabled services to the Docker Swarm cluster.
+// storageMountPath is the distributed storage mount path for path replacement in service YAMLs.
+func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string, servicesDir string, storageMountPath string) (*DeploymentMetrics, error) {
 	log := logging.L().With("component", "services")
 	metrics := &DeploymentMetrics{
 		StartTime: time.Now(),
@@ -203,7 +204,7 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 			"file", svc.FileName,
 		)
 
-		if err := deployService(ctx, sshPool, primaryMaster, svc, glusterMount); err != nil {
+		if err := deployService(ctx, sshPool, primaryMaster, svc, storageMountPath); err != nil {
 			log.Errorw(fmt.Sprintf("failed to deploy service %d/%d", i+1, metrics.TotalFound),
 				"name", svc.Name,
 				"error", err,
@@ -235,7 +236,7 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 }
 
 // deployService deploys a single service to the Docker Swarm cluster
-func deployService(ctx context.Context, sshPool *ssh.Pool, primaryMaster string, svc ServiceMetadata, glusterMount string) error {
+func deployService(ctx context.Context, sshPool *ssh.Pool, primaryMaster string, svc ServiceMetadata, storageMountPath string) error {
 	log := logging.L().With("component", "services", "service", svc.Name)
 
 	// Read service file
@@ -244,11 +245,11 @@ func deployService(ctx context.Context, sshPool *ssh.Pool, primaryMaster string,
 		return fmt.Errorf("failed to read service file: %w", err)
 	}
 
-	// Replace GlusterFS mount paths if glusterMount is specified
+	// Replace storage mount paths if storageMountPath is specified
 	processedContent := string(content)
-	if glusterMount != "" {
-		processedContent = replaceGlusterPaths(processedContent, glusterMount)
-		log.Infow("replaced GlusterFS mount paths", "glusterMount", glusterMount)
+	if storageMountPath != "" {
+		processedContent = replaceStoragePaths(processedContent, storageMountPath)
+		log.Infow("replaced storage mount paths", "storageMountPath", storageMountPath)
 	}
 
 	// Create temporary file on remote host
@@ -284,20 +285,31 @@ func deployService(ctx context.Context, sshPool *ssh.Pool, primaryMaster string,
 	return nil
 }
 
-// replaceGlusterPaths replaces GlusterFS mount paths in YAML content with the configured path.
-// It uses regex to match common GlusterFS path patterns and replaces them with the configured glusterMount.
-func replaceGlusterPaths(content string, glusterMount string) string {
-	// Common GlusterFS path patterns to replace:
-	// - /mnt/GlusterFS/...
-	// - /mnt/glusterfs/...
-	// - /data/gluster/...
-	// Match pattern: /mnt/GlusterFS/<anything>/data or /mnt/glusterfs/<anything>/data
-	// Replace with: <glusterMount>
+// replaceStoragePaths replaces distributed storage mount paths in YAML content with the configured path.
+// It uses regex to match common storage path patterns and replaces them with the configured storageMountPath.
+// Supports both legacy GlusterFS paths and new CephFS paths.
+func replaceStoragePaths(content string, storageMountPath string) string {
+	// Common storage path patterns to replace:
+	// - /mnt/GlusterFS/... (legacy)
+	// - /mnt/glusterfs/... (legacy)
+	// - /mnt/cephfs/...
+	// - /mnt/storage/...
+	// Match pattern: /mnt/<storage-type>/<anything>/data
+	// Replace with: <storageMountPath>
 
-	// Use regex to find and replace GlusterFS paths
-	// Pattern matches: /mnt/GlusterFS/[cluster-name]/data or /mnt/glusterfs/[cluster-name]/data
-	re := regexp.MustCompile(`/mnt/[Gg]luster[Ff][Ss]/[^/]+/data`)
-	replaced := re.ReplaceAllString(content, glusterMount)
+	// Use regex to find and replace storage paths
+	// Pattern matches common distributed storage mount patterns
+	patterns := []string{
+		`/mnt/[Gg]luster[Ff][Ss]/[^/]+/data`,  // Legacy GlusterFS
+		`/mnt/cephfs/[^/]+/data`,               // CephFS
+		`/mnt/storage/[^/]+/data`,              // Generic storage
+	}
+
+	replaced := content
+	for _, pattern := range patterns {
+		re := regexp.MustCompile(pattern)
+		replaced = re.ReplaceAllString(replaced, storageMountPath)
+	}
 
 	return replaced
 }
