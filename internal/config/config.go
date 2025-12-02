@@ -14,6 +14,79 @@ type Config struct {
 	ConfigPath     string         `json:"-"` // Path to the config file (not serialized)
 }
 
+// DistributedStorageType represents the type of distributed storage backend.
+type DistributedStorageType string
+
+const (
+	StorageTypeNone      DistributedStorageType = "none"
+	StorageTypeMicroCeph DistributedStorageType = "microceph"
+)
+
+// MicroCephProviderConfig contains MicroCeph-specific configuration.
+type MicroCephProviderConfig struct {
+	// SnapChannel is the snap channel to install MicroCeph from.
+	// Default: "latest/stable"
+	SnapChannel string `json:"snapChannel"`
+
+	// UseLoopDevices uses loop file-backed OSDs instead of physical disks.
+	// Useful for testing and development. Each loop device is 4GB.
+	// Default: false (use physical disks)
+	UseLoopDevices bool `json:"useLoopDevices"`
+
+	// LoopDeviceCount is the number of loop devices to create per node when UseLoopDevices is true.
+	// Default: 3
+	LoopDeviceCount int `json:"loopDeviceCount"`
+
+	// LoopDeviceSizeGB is the size of each loop device in GB when UseLoopDevices is true.
+	// Default: 4
+	LoopDeviceSizeGB int `json:"loopDeviceSizeGB"`
+
+	// EnableRGW enables the Ceph Object Gateway (S3-compatible) service.
+	// Default: false
+	EnableRGW bool `json:"enableRGW"`
+
+	// RGWPort is the port for the RGW service when EnableRGW is true.
+	// Default: 8080
+	RGWPort int `json:"rgwPort"`
+}
+
+// StorageProviders contains provider-specific configurations.
+type StorageProviders struct {
+	MicroCeph MicroCephProviderConfig `json:"microceph"`
+}
+
+// DistributedStorage contains distributed storage configuration.
+// This is under GlobalSettings to keep all cluster-wide settings together.
+type DistributedStorage struct {
+	// Enabled controls whether distributed storage is configured.
+	// Default: false
+	Enabled bool `json:"enabled"`
+
+	// Type specifies the distributed storage backend: "none", "microceph"
+	// Default: "microceph"
+	Type DistributedStorageType `json:"type"`
+
+	// ForceRecreation forces teardown and recreation of the storage cluster during deployment.
+	// WARNING: This will delete all data in the storage cluster.
+	// Default: false
+	ForceRecreation bool `json:"forceRecreation"`
+
+	// MountPath is where the distributed storage will be mounted on nodes.
+	// Default: "/mnt/distributed-storage"
+	MountPath string `json:"mountPath"`
+
+	// PoolName is the name of the storage pool to create.
+	// Default: "docker-swarm"
+	PoolName string `json:"poolName"`
+
+	// PoolSize is the replication factor for the storage pool.
+	// Default: 3 (for 3-way replication)
+	PoolSize int `json:"poolSize"`
+
+	// Providers contains provider-specific configurations.
+	Providers StorageProviders `json:"providers"`
+}
+
 // ScriptConfig represents a script to execute on nodes.
 type ScriptConfig struct {
 	Enabled         bool              `json:"enabled"`         // Enable this script (must be true to execute)
@@ -26,7 +99,7 @@ type ScriptConfig struct {
 
 // ScriptCondition represents a condition for script execution.
 type ScriptCondition struct {
-	Property string `json:"property"`       // Node property to check (e.g., "role", "hostname", "username", "newHostname", "glusterEnabled")
+	Property string `json:"property"`       // Node property to check (e.g., "role", "hostname", "username", "newHostname", "storageEnabled")
 	Operator string `json:"operator"`       // Comparison operator: "=", "!=", "regex", "!regex"
 	Value    string `json:"value"`          // Value to compare against (case-insensitive for regex)
 	Negate   bool   `json:"negate"`         // Negate the result of this condition (default: false)
@@ -34,19 +107,15 @@ type ScriptCondition struct {
 
 // GlobalSettings contains cluster-wide configuration.
 type GlobalSettings struct {
-	ClusterName              string         `json:"clusterName"`              // Cluster name (required)
-	OverlayProvider          string         `json:"overlayProvider"`          // "netbird", "tailscale", "wireguard", "none" (default: "none")
-	OverlayConfig            string         `json:"overlayConfig"`            // Provider-specific config (e.g., Netbird setup key, Tailscale auth key)
-	GlusterVolume                  string         `json:"glusterVolume"`                  // GlusterFS volume name (default: "docker-swarm-0001")
-	GlusterMount                   string         `json:"glusterMount"`                   // GlusterFS mount path (default: "/mnt/GlusterFS/Docker/Swarm/0001/data")
-	GlusterBrick                   string         `json:"glusterBrick"`                   // GlusterFS brick path (default: "/mnt/GlusterFS/Docker/Swarm/0001/brick")
-	GlusterDiskManagement          bool           `json:"glusterDiskManagement"`          // Enable automatic disk detection, formatting, and mounting (default: false, uses OS disk folders)
-	GlusterForceRecreate           bool           `json:"glusterForceRecreate"`           // Force teardown and recreation of GlusterFS cluster (default: false)
-	SetRootPassword                string         `json:"setRootPassword"`                // Set root password on all nodes (optional, empty = no change)
-	ServicesDir                    string         `json:"servicesDir"`                    // Directory containing service YAML files (default: "services" relative to binary)
-	PreScripts                     []ScriptConfig `json:"preScripts"`                     // Scripts to execute before deployment
-	PostScripts                    []ScriptConfig `json:"postScripts"`                    // Scripts to execute after deployment
-	RemoveSSHPublicKeyOnCompletion bool           `json:"removeSSHPublicKeyOnCompletion"` // Remove SSH public key from nodes on completion (default: false)
+	ClusterName                    string             `json:"clusterName"`                    // Cluster name (required)
+	OverlayProvider                string             `json:"overlayProvider"`                // "netbird", "tailscale", "wireguard", "none" (default: "none")
+	OverlayConfig                  string             `json:"overlayConfig"`                  // Provider-specific config (e.g., Netbird setup key, Tailscale auth key)
+	SetRootPassword                string             `json:"setRootPassword"`                // Set root password on all nodes (optional, empty = no change)
+	ServicesDir                    string             `json:"servicesDir"`                    // Directory containing service YAML files (default: "services" relative to binary)
+	DistributedStorage             DistributedStorage `json:"distributedStorage"`             // Distributed storage configuration
+	PreScripts                     []ScriptConfig     `json:"preScripts"`                     // Scripts to execute before deployment
+	PostScripts                    []ScriptConfig     `json:"postScripts"`                    // Scripts to execute after deployment
+	RemoveSSHPublicKeyOnCompletion bool               `json:"removeSSHPublicKeyOnCompletion"` // Remove SSH public key from nodes on completion (default: false)
 }
 
 // NodeConfig represents a single node's configuration.
@@ -69,10 +138,8 @@ type NodeConfig struct {
 	NewHostname        string `json:"newHostname"`        // New hostname to set (optional, idempotent)
 	RebootOnCompletion bool   `json:"rebootOnCompletion"` // Reboot node after deployment (default: false)
 
-	// GlusterFS Settings (per-node overrides)
-	GlusterEnabled bool   `json:"glusterEnabled"` // Enable GlusterFS on this node (workers only)
-	GlusterMount   string `json:"glusterMount"`   // Override global glusterMount for this node
-	GlusterBrick   string `json:"glusterBrick"`   // Override global glusterBrick for this node
+	// Distributed Storage Settings (per-node)
+	StorageEnabled bool `json:"storageEnabled"` // Enable distributed storage on this node (default: false)
 
 	// Docker Swarm Settings
 	AdvertiseAddr string `json:"advertiseAddr"` // Override auto-detected advertise address for Swarm
@@ -152,9 +219,7 @@ func (c *Config) Validate() error {
 		if node.Role == "manager" {
 			managerCount++
 		}
-		if node.GlusterEnabled && node.Role != "worker" {
-			return fmt.Errorf("node %d (%s): glusterEnabled can only be set on workers", i, node.Hostname)
-		}
+
 		// If not using automatic key pair, require password or privateKeyPath
 		if !node.UseSSHAutomaticKeyPair && node.Password == "" && node.PrivateKeyPath == "" {
 			return fmt.Errorf("node %d (%s): either password, privateKeyPath, or useSSHAutomaticKeyPair must be specified", i, node.Hostname)
@@ -174,26 +239,35 @@ func (c *Config) ApplyDefaults() {
 	if c.GlobalSettings.OverlayProvider == "" {
 		c.GlobalSettings.OverlayProvider = "none"
 	}
-	if c.GlobalSettings.GlusterVolume == "" {
-		c.GlobalSettings.GlusterVolume = "docker-swarm-0001"
+
+	// DistributedStorage defaults (now under GlobalSettings)
+	ds := &c.GlobalSettings.DistributedStorage
+	if ds.Type == "" {
+		ds.Type = StorageTypeMicroCeph
 	}
-	if c.GlobalSettings.GlusterMount == "" {
-		c.GlobalSettings.GlusterMount = "/mnt/GlusterFS/Docker/Swarm/0001/data"
+	if ds.MountPath == "" {
+		ds.MountPath = "/mnt/distributed-storage"
 	}
-	if c.GlobalSettings.GlusterBrick == "" {
-		c.GlobalSettings.GlusterBrick = "/mnt/GlusterFS/Docker/Swarm/0001/brick"
+	if ds.PoolName == "" {
+		ds.PoolName = "docker-swarm"
+	}
+	if ds.PoolSize == 0 {
+		ds.PoolSize = 3
 	}
 
-	// Script defaults
-	for i := range c.GlobalSettings.PreScripts {
-		if !c.GlobalSettings.PreScripts[i].Enabled {
-			c.GlobalSettings.PreScripts[i].Enabled = true
-		}
+	// MicroCeph provider defaults
+	mc := &ds.Providers.MicroCeph
+	if mc.SnapChannel == "" {
+		mc.SnapChannel = "latest/stable"
 	}
-	for i := range c.GlobalSettings.PostScripts {
-		if !c.GlobalSettings.PostScripts[i].Enabled {
-			c.GlobalSettings.PostScripts[i].Enabled = true
-		}
+	if mc.LoopDeviceCount == 0 {
+		mc.LoopDeviceCount = 3
+	}
+	if mc.LoopDeviceSizeGB == 0 {
+		mc.LoopDeviceSizeGB = 4
+	}
+	if mc.RGWPort == 0 {
+		mc.RGWPort = 8080
 	}
 
 	// Node defaults
@@ -211,14 +285,6 @@ func (c *Config) ApplyDefaults() {
 		if c.Nodes[i].SSHPort == 0 {
 			c.Nodes[i].SSHPort = 22
 		}
-
-		// GlusterFS defaults (inherit from global if not set)
-		if c.Nodes[i].GlusterMount == "" {
-			c.Nodes[i].GlusterMount = c.GlobalSettings.GlusterMount
-		}
-		if c.Nodes[i].GlusterBrick == "" {
-			c.Nodes[i].GlusterBrick = c.GlobalSettings.GlusterBrick
-		}
 	}
 }
 
@@ -230,19 +296,23 @@ func (n *NodeConfig) IsEnabled() bool {
 	return *n.Enabled
 }
 
-// GetEffectiveGlusterMount returns the effective GlusterFS mount path for a node.
-func (n *NodeConfig) GetEffectiveGlusterMount(globalMount string) string {
-	if n.GlusterMount != "" {
-		return n.GlusterMount
+// GetStorageNodes returns all nodes that have distributed storage enabled.
+func (c *Config) GetStorageNodes() []NodeConfig {
+	var storageNodes []NodeConfig
+	for _, node := range c.Nodes {
+		if node.IsEnabled() && node.StorageEnabled {
+			storageNodes = append(storageNodes, node)
+		}
 	}
-	return globalMount
+	return storageNodes
 }
 
-// GetEffectiveGlusterBrick returns the effective GlusterFS brick path for a node.
-func (n *NodeConfig) GetEffectiveGlusterBrick(globalBrick string) string {
-	if n.GlusterBrick != "" {
-		return n.GlusterBrick
-	}
-	return globalBrick
+// GetDistributedStorage returns the distributed storage configuration.
+func (c *Config) GetDistributedStorage() *DistributedStorage {
+	return &c.GlobalSettings.DistributedStorage
 }
 
+// IsStorageEnabled returns true if distributed storage is enabled globally.
+func (c *Config) IsStorageEnabled() bool {
+	return c.GlobalSettings.DistributedStorage.Enabled
+}

@@ -30,7 +30,6 @@ func main() {
 	dryRun := fs.Bool("dry-run", false, "Validate configuration without deploying")
 	teardown := fs.Bool("teardown", false, "Teardown/reset the cluster")
 	removeOverlays := fs.Bool("remove-overlays", false, "Remove overlay networks during teardown (may break connectivity)")
-	removeGlusterData := fs.Bool("remove-gluster-data", false, "Remove GlusterFS data during teardown")
 	showHelp := fs.Bool("help", false, "Show help message")
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
@@ -44,7 +43,7 @@ func main() {
 	}
 
 	if *teardown {
-		runTeardown(ctx, *configPath, *removeOverlays, *removeGlusterData)
+		runTeardown(ctx, *configPath, *removeOverlays)
 	} else {
 		runDeploy(ctx, *configPath, *dryRun)
 	}
@@ -99,7 +98,7 @@ func formatError(err error) string {
 func usage() {
 	fmt.Fprint(os.Stderr, `clusterctl - Docker Swarm Cluster Orchestrator
 
-Deploy and manage Docker Swarm clusters with GlusterFS storage via SSH.
+Deploy and manage Docker Swarm clusters with distributed storage (MicroCeph) via SSH.
 
 Usage:
   clusterctl [flags]
@@ -110,13 +109,15 @@ Flags:
   -dry-run
         Validate configuration without deploying
   -teardown
-        Teardown/reset the cluster (removes services, swarm, optionally networks and data)
+        Teardown/reset the cluster (removes services, swarm, optionally networks and storage)
   -remove-overlays
         Remove overlay networks during teardown (may break connectivity, use with caution)
-  -remove-gluster-data
-        Remove GlusterFS data during teardown (WARNING: deletes all data)
   -help
         Show this help message
+
+Notes:
+  Distributed storage teardown is controlled by the "globalSettings.distributedStorage.forceRecreation"
+  setting in the configuration file. Set it to true to allow storage removal during teardown.
 
 Examples:
   # Deploy cluster
@@ -125,11 +126,11 @@ Examples:
   # Validate configuration
   clusterctl -config cluster.json -dry-run
 
-  # Teardown cluster (keeps networks and data)
+  # Teardown cluster (honors distributedStorage.forceRecreation setting)
   clusterctl -config cluster.json -teardown
 
-  # Full teardown (removes everything including data)
-  clusterctl -config cluster.json -teardown -remove-overlays -remove-gluster-data
+  # Full teardown (removes overlay networks as well)
+  clusterctl -config cluster.json -teardown -remove-overlays
 
 For configuration examples, see clusterctl.json.example
 
@@ -172,7 +173,7 @@ func runDeploy(ctx context.Context, configPath string, dryRun bool) {
 	log.Infow("✅ Deployment completed successfully!")
 }
 
-func runTeardown(ctx context.Context, configPath string, removeOverlays, removeGlusterData bool) {
+func runTeardown(ctx context.Context, configPath string, removeOverlays bool) {
 	log := logging.L().With("command", "teardown")
 
 	// Load configuration
@@ -184,15 +185,17 @@ func runTeardown(ctx context.Context, configPath string, removeOverlays, removeG
 		os.Exit(1)
 	}
 
+	ds := cfg.GetDistributedStorage()
 	log.Infow("configuration loaded successfully",
 		"clusterName", cfg.GlobalSettings.ClusterName,
 		"nodes", len(cfg.Nodes),
 		"removeOverlays", removeOverlays,
-		"removeGlusterData", removeGlusterData,
+		"storageEnabled", ds.Enabled,
+		"storageForceRecreation", ds.ForceRecreation,
 	)
 
 	// Run teardown
-	if err := deployer.Teardown(ctx, cfg, removeOverlays, removeGlusterData); err != nil {
+	if err := deployer.Teardown(ctx, cfg, removeOverlays); err != nil {
 		log.Errorw("teardown failed")
 		fmt.Fprintf(os.Stderr, "\nError:\n  %s\n\n", formatError(err))
 		os.Exit(1)

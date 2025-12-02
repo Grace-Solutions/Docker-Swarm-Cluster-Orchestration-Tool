@@ -89,14 +89,10 @@ func getNodeProperty(node NodeConfig, property string) (string, error) {
 		return node.NewHostname, nil
 	case "advertiseaddr":
 		return node.AdvertiseAddr, nil
-	case "glustermount":
-		return node.GlusterMount, nil
-	case "glusterbrick":
-		return node.GlusterBrick, nil
 	case "sshport":
 		return fmt.Sprintf("%d", node.SSHPort), nil
-	case "glusterenabled":
-		if node.GlusterEnabled {
+	case "storageenabled":
+		if node.StorageEnabled {
 			return "true", nil
 		}
 		return "false", nil

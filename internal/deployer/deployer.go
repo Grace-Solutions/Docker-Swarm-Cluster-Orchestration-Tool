@@ -118,51 +118,42 @@ func Deploy(ctx context.Context, cfg *config.Config) error {
 	}
 	log.Infow("✅ Overlay network configured")
 
-	// Phase 6: Setup GlusterFS if enabled
-	sshGlusterWorkers := getGlusterWorkers(cfg)
-	if len(sshGlusterWorkers) > 0 {
-		log.Infow("Phase 6: Setting up GlusterFS", "workers", len(sshGlusterWorkers), "diskManagement", cfg.GlobalSettings.GlusterDiskManagement, "forceRecreate", cfg.GlobalSettings.GlusterForceRecreate)
+	// Phase 6: Setup distributed storage if enabled
+	storageNodes := getStorageNodes(cfg)
+	ds := cfg.GetDistributedStorage()
+	if ds.Enabled && len(storageNodes) > 0 {
+		log.Infow("Phase 6: Setting up distributed storage",
+			"type", ds.Type,
+			"nodes", len(storageNodes),
+			"forceRecreation", ds.ForceRecreation)
 
-		// If force recreate is enabled, teardown existing GlusterFS cluster first
-		if cfg.GlobalSettings.GlusterForceRecreate {
-			log.Infow("→ Force recreate enabled, tearing down existing GlusterFS cluster")
-			if err := teardownGlusterFS(ctx, sshPool, sshGlusterWorkers, cfg.GlobalSettings.GlusterVolume, cfg.GlobalSettings.GlusterMount, cfg.GlobalSettings.GlusterBrick); err != nil {
-				log.Warnw("⚠️ GlusterFS teardown had errors (continuing anyway)", "error", err)
+		// If force recreation is enabled, teardown existing storage cluster first
+		if ds.ForceRecreation {
+			log.Infow("→ Force recreation enabled, tearing down existing storage cluster")
+			if err := teardownDistributedStorage(ctx, sshPool, storageNodes, cfg); err != nil {
+				log.Warnw("⚠️ Storage teardown had errors (continuing anyway)", "error", err)
 			} else {
-				log.Infow("✓ GlusterFS teardown complete")
+				log.Infow("✓ Storage teardown complete")
 			}
 		}
 
-		// Get overlay IPs for GlusterFS if overlay provider is configured
-		glusterAddresses, err := getGlusterHostnames(ctx, sshPool, cfg, sshGlusterWorkers)
+		// Get overlay addresses for storage if overlay provider is configured
+		storageAddresses, err := getStorageHostnames(ctx, sshPool, cfg, storageNodes)
 		if err != nil {
-			return fmt.Errorf("failed to get GlusterFS addresses: %w", err)
+			return fmt.Errorf("failed to get storage node addresses: %w", err)
 		}
-		log.Infow("→ Using overlay IPs for GlusterFS", "addresses", glusterAddresses, "overlayProvider", cfg.GlobalSettings.OverlayProvider)
+		log.Infow("→ Using addresses for distributed storage", "addresses", storageAddresses, "overlayProvider", cfg.GlobalSettings.OverlayProvider)
 
-		validWorkers, err := orchestrator.GlusterSetup(ctx, sshPool, sshGlusterWorkers, glusterAddresses,
-			cfg.GlobalSettings.GlusterVolume,
-			cfg.GlobalSettings.GlusterMount,
-			cfg.GlobalSettings.GlusterBrick,
-			cfg.GlobalSettings.GlusterDiskManagement)
-		if err != nil {
-			return fmt.Errorf("failed to setup GlusterFS: %w", err)
+		// Setup distributed storage (MicroCeph)
+		if err := setupDistributedStorage(ctx, sshPool, storageNodes, storageAddresses, cfg); err != nil {
+			return fmt.Errorf("failed to setup distributed storage: %w", err)
 		}
 
-		if validWorkers == nil || len(validWorkers) == 0 {
-			log.Warnw("⚠️ GlusterFS setup skipped - no workers with available disks")
-		} else {
-			log.Infow("✅ GlusterFS setup complete", "activeWorkers", len(validWorkers), "totalWorkers", len(sshGlusterWorkers))
-
-			// Verify GlusterFS replication is working before proceeding
-			log.Infow("→ Verifying GlusterFS replication across nodes")
-			if err := verifyGlusterReplication(ctx, sshPool, validWorkers, cfg.GlobalSettings.GlusterMount); err != nil {
-				return fmt.Errorf("GlusterFS replication verification failed: %w", err)
-			}
-			log.Infow("✅ GlusterFS replication verified - files sync across all nodes")
-		}
+		log.Infow("✅ Distributed storage setup complete", "nodes", len(storageNodes), "type", ds.Type)
+	} else if !ds.Enabled {
+		log.Infow("Phase 6: Skipping distributed storage (disabled in config)")
 	} else {
-		log.Infow("Phase 6: Skipping GlusterFS (no workers with glusterEnabled)")
+		log.Infow("Phase 6: Skipping distributed storage (no nodes with storageEnabled)")
 	}
 
 	// Phase 7: Setup Docker Swarm
@@ -249,7 +240,11 @@ func Deploy(ctx context.Context, cfg *config.Config) error {
 
 	// Phase 9: Deploy services from YAML files
 	log.Infow("Phase 9: Deploying services")
-	metrics, err := services.DeployServices(ctx, sshPool, primaryMaster, cfg.GlobalSettings.ServicesDir, cfg.GlobalSettings.GlusterMount)
+	storageMountPath := ""
+	if ds.Enabled {
+		storageMountPath = ds.MountPath
+	}
+	metrics, err := services.DeployServices(ctx, sshPool, primaryMaster, cfg.GlobalSettings.ServicesDir, storageMountPath)
 	if err != nil {
 		log.Warnw("service deployment encountered errors", "error", err)
 	}
@@ -306,16 +301,18 @@ func Deploy(ctx context.Context, cfg *config.Config) error {
 }
 
 // Teardown orchestrates the complete cluster teardown from the configuration.
-func Teardown(ctx context.Context, cfg *config.Config, removeOverlays, removeGlusterData bool) error {
+func Teardown(ctx context.Context, cfg *config.Config, removeOverlays bool) error {
 	log := logging.L().With("component", "teardown")
 
 	startTime := time.Now()
+	ds := cfg.GetDistributedStorage()
 
 	log.Infow("🔥 Starting cluster teardown",
 		"clusterName", cfg.GlobalSettings.ClusterName,
 		"nodes", len(cfg.Nodes),
 		"removeOverlays", removeOverlays,
-		"removeGlusterData", removeGlusterData,
+		"storageEnabled", ds.Enabled,
+		"storageForceRecreation", ds.ForceRecreation,
 		"startTime", startTime.Format(time.RFC3339),
 	)
 
@@ -353,48 +350,43 @@ func Teardown(ctx context.Context, cfg *config.Config, removeOverlays, removeGlu
 		log.Infow("✅ Swarm left on all nodes")
 	}
 
-	// Phase 4: Unmount GlusterFS volumes on managers
-	if len(managers) > 0 {
-		log.Infow("Phase 4: Unmounting GlusterFS volumes on managers")
-		if err := unmountGlusterFS(ctx, sshPool, managers, cfg); err != nil {
-			log.Warnw("failed to unmount GlusterFS", "error", err)
+	// Phase 4: Unmount distributed storage volumes on all nodes
+	storageNodes := getStorageNodes(cfg)
+	if ds.Enabled && len(storageNodes) > 0 {
+		log.Infow("Phase 4: Unmounting distributed storage volumes")
+		if err := unmountDistributedStorage(ctx, sshPool, allNodes, cfg); err != nil {
+			log.Warnw("failed to unmount distributed storage", "error", err)
 		} else {
-			log.Infow("✅ GlusterFS unmounted on managers")
-		}
-	}
-
-	// Phase 5: Stop and delete GlusterFS volume on workers
-	if len(workers) > 0 {
-		log.Infow("Phase 5: Stopping and deleting GlusterFS volume")
-		if err := deleteGlusterVolume(ctx, sshPool, workers, cfg); err != nil {
-			log.Warnw("failed to delete GlusterFS volume", "error", err)
-		} else {
-			log.Infow("✅ GlusterFS volume deleted")
-		}
-	}
-
-	// Phase 6: Remove GlusterFS data if requested
-	if removeGlusterData && len(workers) > 0 {
-		log.Infow("Phase 6: Removing GlusterFS data directories")
-		if err := removeGlusterData_func(ctx, sshPool, workers, cfg); err != nil {
-			log.Warnw("failed to remove GlusterFS data", "error", err)
-		} else {
-			log.Infow("✅ GlusterFS data removed")
+			log.Infow("✅ Distributed storage unmounted")
 		}
 	} else {
-		log.Infow("Phase 6: Skipping GlusterFS data removal (use -remove-gluster-data to remove)")
+		log.Infow("Phase 4: Skipping storage unmount (not enabled)")
 	}
 
-	// Phase 7: Remove overlay networks if requested
+	// Phase 5: Teardown distributed storage cluster if forceRecreation is enabled
+	if ds.Enabled && ds.ForceRecreation && len(storageNodes) > 0 {
+		log.Infow("Phase 5: Tearing down distributed storage cluster")
+		if err := teardownDistributedStorage(ctx, sshPool, storageNodes, cfg); err != nil {
+			log.Warnw("failed to teardown distributed storage", "error", err)
+		} else {
+			log.Infow("✅ Distributed storage cluster removed")
+		}
+	} else if ds.Enabled && !ds.ForceRecreation {
+		log.Infow("Phase 5: Skipping storage teardown (forceRecreation=false in config)")
+	} else {
+		log.Infow("Phase 5: Skipping storage teardown (not enabled)")
+	}
+
+	// Phase 6: Remove overlay networks if requested
 	if removeOverlays {
-		log.Infow("Phase 7: Removing overlay networks")
+		log.Infow("Phase 6: Removing overlay networks")
 		if err := removeOverlayNetworks(ctx, sshPool, primaryManager); err != nil {
 			log.Warnw("failed to remove overlay networks", "error", err)
 		} else {
 			log.Infow("✅ Overlay networks removed")
 		}
 	} else {
-		log.Infow("Phase 7: Skipping overlay network removal (use -remove-overlays to remove)")
+		log.Infow("Phase 6: Skipping overlay network removal (use -remove-overlays to remove)")
 	}
 
 	// Calculate final metrics
@@ -560,6 +552,7 @@ func installDependencies(ctx context.Context, cfg *config.Config, sshPool *ssh.P
 	log := logging.L().With("phase", "dependencies")
 
 	enabledNodes := getEnabledNodes(cfg)
+	ds := cfg.GetDistributedStorage()
 	log.Infow("installing dependencies on all nodes", "totalNodes", len(enabledNodes))
 
 	for i, node := range enabledNodes {
@@ -582,20 +575,13 @@ func installDependencies(ctx context.Context, cfg *config.Config, sshPool *ssh.P
 		}
 		nodeLog.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "Docker installed"))
 
-		// Install GlusterFS if needed
-		if node.GlusterEnabled {
-			nodeLog.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "installing GlusterFS server"))
-			if err := installGlusterFS(ctx, sshPool, node.Hostname, true); err != nil {
-				return fmt.Errorf("failed to install GlusterFS on %s: %w", node.Hostname, err)
+		// Install MicroCeph if storage is enabled on this node
+		if ds.Enabled && node.StorageEnabled {
+			nodeLog.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "installing MicroCeph"))
+			if err := installMicroCeph(ctx, sshPool, node.Hostname); err != nil {
+				return fmt.Errorf("failed to install MicroCeph on %s: %w", node.Hostname, err)
 			}
-			nodeLog.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "GlusterFS server installed"))
-		} else if node.Role == "manager" && len(getGlusterWorkers(cfg)) > 0 {
-			// Managers need GlusterFS client if any workers have GlusterFS
-			nodeLog.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "installing GlusterFS client"))
-			if err := installGlusterFS(ctx, sshPool, node.Hostname, false); err != nil {
-				return fmt.Errorf("failed to install GlusterFS client on %s: %w", node.Hostname, err)
-			}
-			nodeLog.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "GlusterFS client installed"))
+			nodeLog.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "MicroCeph installed"))
 		}
 
 		nodeLog.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "all dependencies installed"))
@@ -625,38 +611,40 @@ func installDocker(ctx context.Context, sshPool *ssh.Pool, host string) error {
 	})
 }
 
-// installGlusterFS installs GlusterFS on a node via SSH.
-func installGlusterFS(ctx context.Context, sshPool *ssh.Pool, host string, server bool) error {
-	// Check if GlusterFS is already installed
-	_, _, err := sshPool.Run(ctx, host, "gluster --version")
+// installMicroCeph installs MicroCeph on a node via SSH.
+func installMicroCeph(ctx context.Context, sshPool *ssh.Pool, host string) error {
+	log := logging.L().With("component", "install-microceph", "host", host)
+
+	// Check if MicroCeph is already installed
+	_, _, err := sshPool.Run(ctx, host, "microceph version")
 	if err == nil {
-		logging.L().Infow("GlusterFS already installed", "node", host)
+		log.Infow("MicroCeph already installed")
 		return nil
 	}
 
-	// Add GlusterFS PPA for latest stable version (Ubuntu/Debian)
-	// For other distros, this will fail gracefully and fall back to default repos
-	addPPACmd := `
-if command -v add-apt-repository &> /dev/null; then
-    add-apt-repository -y ppa:gluster/glusterfs-11 2>/dev/null || true
-fi
+	log.Infow("installing MicroCeph via snap")
+
+	// Install MicroCeph using snap (the official installation method)
+	// MicroCeph requires snapd which should be available on Ubuntu
+	installCmd := `
+# Ensure snapd is installed and running
+apt-get update && apt-get install -y snapd
+systemctl enable snapd
+systemctl start snapd
+
+# Wait for snapd to be ready
+snap wait system seed.loaded
+
+# Install microceph
+snap install microceph --channel=reef/stable
 `
-	logging.L().Infow("adding GlusterFS PPA", "node", host)
-	sshPool.Run(ctx, host, addPPACmd) // Ignore errors, PPA might not be available
 
-	var cmd string
-	if server {
-		cmd = "apt-get update && apt-get install -y glusterfs-server && systemctl enable glusterd && systemctl start glusterd"
-	} else {
-		cmd = "apt-get update && apt-get install -y glusterfs-client"
-	}
-
-	// Install with retry logic (apt locks, network issues)
-	retryCfg := retry.PackageManagerConfig(fmt.Sprintf("install-glusterfs-%s", host))
+	// Install with retry logic (snap downloads can be flaky)
+	retryCfg := retry.PackageManagerConfig(fmt.Sprintf("install-microceph-%s", host))
 	return retry.Do(ctx, retryCfg, func() error {
-		_, stderr, err := sshPool.Run(ctx, host, cmd)
+		_, stderr, err := sshPool.Run(ctx, host, installCmd)
 		if err != nil {
-			return fmt.Errorf("glusterfs install failed: %w (stderr: %s)", err, stderr)
+			return fmt.Errorf("microceph install failed: %w (stderr: %s)", err, stderr)
 		}
 		return nil
 	})
@@ -1012,16 +1000,16 @@ func getEnabledNodes(cfg *config.Config) []config.NodeConfig {
 	return enabled
 }
 
-// getGlusterWorkers returns the hostnames of all enabled workers with GlusterFS enabled.
-func getGlusterWorkers(cfg *config.Config) []string {
-	var workers []string
+// getStorageNodes returns the hostnames of all enabled nodes with storage enabled.
+func getStorageNodes(cfg *config.Config) []string {
+	var nodes []string
 	enabledNodes := getEnabledNodes(cfg)
 	for _, node := range enabledNodes {
-		if node.Role == "worker" && node.GlusterEnabled {
-			workers = append(workers, node.Hostname)
+		if node.StorageEnabled {
+			nodes = append(nodes, node.Hostname)
 		}
 	}
-	return workers
+	return nodes
 }
 
 // categorizeNodes returns enabled managers and workers.
@@ -1303,6 +1291,7 @@ func rebootNodes(ctx context.Context, cfg *config.Config, sshPool *ssh.Pool) err
 // applyNodeLabels detects geolocation and applies automatic and custom labels to Docker nodes.
 func applyNodeLabels(ctx context.Context, cfg *config.Config, sshPool *ssh.Pool, primaryMaster string) error {
 	log := logging.L().With("phase", "labels")
+	ds := cfg.GetDistributedStorage()
 
 	// Detect geolocation for all nodes in parallel
 	log.Infow("detecting geolocation for all nodes")
@@ -1353,29 +1342,17 @@ func applyNodeLabels(ctx context.Context, cfg *config.Config, sshPool *ssh.Pool,
 			labels["overlay.provider"] = cfg.GlobalSettings.OverlayProvider
 		}
 
-		// GlusterFS labels
-		if node.GlusterEnabled {
-			labels["glusterfs.enabled"] = "true"
+		// Distributed storage labels
+		if ds.Enabled && node.StorageEnabled {
+			labels["storage.enabled"] = "true"
+			labels["storage.type"] = string(ds.Type)
 
-			// Get effective mount path
-			mountPath := node.GlusterMount
-			if mountPath == "" {
-				mountPath = cfg.GlobalSettings.GlusterMount
-			}
-			if mountPath != "" {
-				labels["glusterfs.mount-path"] = mountPath
-			}
-
-			// Get effective brick path
-			brickPath := node.GlusterBrick
-			if brickPath == "" {
-				brickPath = cfg.GlobalSettings.GlusterBrick
-			}
-			if brickPath != "" {
-				labels["glusterfs.brick-path"] = brickPath
+			// Add mount path label
+			if ds.MountPath != "" {
+				labels["storage.mount-path"] = ds.MountPath
 			}
 		} else {
-			labels["glusterfs.enabled"] = "false"
+			labels["storage.enabled"] = "false"
 		}
 
 		// Cluster name label
@@ -1498,89 +1475,29 @@ func leaveSwarm(ctx context.Context, sshPool *ssh.Pool, allNodes []string) error
 	return nil
 }
 
-// unmountGlusterFS unmounts GlusterFS volumes on manager nodes.
-func unmountGlusterFS(ctx context.Context, sshPool *ssh.Pool, managers []string, cfg *config.Config) error {
-	log := logging.L().With("component", "teardown-gluster-unmount")
+// unmountDistributedStorage unmounts distributed storage volumes on all nodes.
+func unmountDistributedStorage(ctx context.Context, sshPool *ssh.Pool, nodes []string, cfg *config.Config) error {
+	log := logging.L().With("component", "teardown-storage-unmount")
+	ds := cfg.GetDistributedStorage()
 
-	for _, manager := range managers {
-		if cfg.GlobalSettings.GlusterMount == "" {
-			continue
-		}
+	if ds.MountPath == "" {
+		return nil
+	}
 
-		unmountCmd := fmt.Sprintf("umount %s 2>/dev/null || true", cfg.GlobalSettings.GlusterMount)
-		log.Infow("unmounting GlusterFS", "host", manager, "mountPoint", cfg.GlobalSettings.GlusterMount, "command", unmountCmd)
-		if _, stderr, err := sshPool.Run(ctx, manager, unmountCmd); err != nil {
-			log.Warnw("failed to unmount GlusterFS", "host", manager, "error", err, "stderr", stderr)
+	for _, node := range nodes {
+		unmountCmd := fmt.Sprintf("umount %s 2>/dev/null || true", ds.MountPath)
+		log.Infow("unmounting distributed storage", "host", node, "mountPoint", ds.MountPath, "command", unmountCmd)
+		if _, stderr, err := sshPool.Run(ctx, node, unmountCmd); err != nil {
+			log.Warnw("failed to unmount storage", "host", node, "error", err, "stderr", stderr)
 		} else {
-			log.Infow("✅ GlusterFS unmounted", "host", manager)
+			log.Infow("✅ storage unmounted", "host", node)
 		}
 
 		// Remove from fstab
-		removeFstabCmd := fmt.Sprintf("sed -i '\\|%s|d' /etc/fstab", cfg.GlobalSettings.GlusterMount)
-		log.Infow("removing from fstab", "host", manager, "command", removeFstabCmd)
-		if _, stderr, err := sshPool.Run(ctx, manager, removeFstabCmd); err != nil {
-			log.Warnw("failed to remove from fstab", "host", manager, "error", err, "stderr", stderr)
-		}
-	}
-
-	return nil
-}
-
-// deleteGlusterVolume stops and deletes the GlusterFS volume.
-func deleteGlusterVolume(ctx context.Context, sshPool *ssh.Pool, workers []string, cfg *config.Config) error {
-	log := logging.L().With("component", "teardown-gluster-volume")
-
-	if len(workers) == 0 || cfg.GlobalSettings.GlusterVolume == "" {
-		return nil
-	}
-
-	orchestrator := workers[0]
-
-	// Stop volume
-	stopCmd := fmt.Sprintf("gluster volume stop %s force 2>/dev/null || true", cfg.GlobalSettings.GlusterVolume)
-	log.Infow("stopping GlusterFS volume", "host", orchestrator, "volume", cfg.GlobalSettings.GlusterVolume, "command", stopCmd)
-	if _, stderr, err := sshPool.Run(ctx, orchestrator, stopCmd); err != nil {
-		log.Warnw("failed to stop volume", "error", err, "stderr", stderr)
-	} else {
-		log.Infow("✅ volume stopped", "volume", cfg.GlobalSettings.GlusterVolume)
-	}
-
-	// Delete volume
-	deleteCmd := fmt.Sprintf("gluster volume delete %s 2>/dev/null || true", cfg.GlobalSettings.GlusterVolume)
-	log.Infow("deleting GlusterFS volume", "host", orchestrator, "volume", cfg.GlobalSettings.GlusterVolume, "command", deleteCmd)
-	if _, stderr, err := sshPool.Run(ctx, orchestrator, deleteCmd); err != nil {
-		log.Warnw("failed to delete volume", "error", err, "stderr", stderr)
-	} else {
-		log.Infow("✅ volume deleted", "volume", cfg.GlobalSettings.GlusterVolume)
-	}
-
-	// Detach peers
-	for _, worker := range workers[1:] {
-		detachCmd := fmt.Sprintf("gluster peer detach %s force 2>/dev/null || true", worker)
-		log.Infow("detaching GlusterFS peer", "host", orchestrator, "peer", worker, "command", detachCmd)
-		if _, stderr, err := sshPool.Run(ctx, orchestrator, detachCmd); err != nil {
-			log.Warnw("failed to detach peer", "peer", worker, "error", err, "stderr", stderr)
-		}
-	}
-
-	return nil
-}
-
-// removeGlusterData_func removes GlusterFS data directories on worker nodes.
-func removeGlusterData_func(ctx context.Context, sshPool *ssh.Pool, workers []string, cfg *config.Config) error {
-	log := logging.L().With("component", "teardown-gluster-data")
-
-	if cfg.GlobalSettings.GlusterBrick == "" {
-		return nil
-	}
-
-	for _, worker := range workers {
-		removeCmd := fmt.Sprintf("rm -rf %s", cfg.GlobalSettings.GlusterBrick)
-		log.Infow("removing GlusterFS data", "host", worker, "path", cfg.GlobalSettings.GlusterBrick, "command", removeCmd)
-		if _, stderr, err := sshPool.Run(ctx, worker, removeCmd); err != nil {
-			log.Warnw("failed to remove data", "host", worker, "error", err, "stderr", stderr)
-		} else {
-			log.Infow("✅ data removed", "host", worker, "path", cfg.GlobalSettings.GlusterBrick)
+		removeFstabCmd := fmt.Sprintf("sed -i '\\|%s|d' /etc/fstab", ds.MountPath)
+		log.Infow("removing from fstab", "host", node, "command", removeFstabCmd)
+		if _, stderr, err := sshPool.Run(ctx, node, removeFstabCmd); err != nil {
+			log.Warnw("failed to remove from fstab", "host", node, "error", err, "stderr", stderr)
 		}
 	}
 
@@ -1742,21 +1659,21 @@ func getOverlayHostnameForNode(ctx context.Context, sshPool *ssh.Pool, sshHost, 
 	return info.FQDN, err
 }
 
-// getGlusterHostnames returns the appropriate hostnames for GlusterFS based on overlay provider.
+// getStorageHostnames returns the appropriate hostnames for distributed storage based on overlay provider.
 // If an overlay provider is configured, it retrieves the overlay hostnames (e.g., netbird FQDN).
 // Otherwise, it returns the SSH connection hostnames.
-func getGlusterHostnames(ctx context.Context, sshPool *ssh.Pool, cfg *config.Config, sshHostnames []string) ([]string, error) {
-	log := logging.L().With("component", "gluster-hostnames")
+func getStorageHostnames(ctx context.Context, sshPool *ssh.Pool, cfg *config.Config, sshHostnames []string) ([]string, error) {
+	log := logging.L().With("component", "storage-hostnames")
 
 	provider := strings.ToLower(strings.TrimSpace(cfg.GlobalSettings.OverlayProvider))
 
 	// If no overlay provider, use SSH hostnames directly
 	if provider == "" || provider == "none" {
-		log.Infow("no overlay provider, using SSH hostnames for GlusterFS", "hostnames", sshHostnames)
+		log.Infow("no overlay provider, using SSH hostnames for storage", "hostnames", sshHostnames)
 		return sshHostnames, nil
 	}
 
-	// Get overlay info for each worker
+	// Get overlay info for each node
 	overlayHostnames := make([]string, 0, len(sshHostnames))
 
 	for _, sshHost := range sshHostnames {
@@ -1765,12 +1682,7 @@ func getGlusterHostnames(ctx context.Context, sshPool *ssh.Pool, cfg *config.Con
 			log.Warnw("failed to get overlay info, falling back to SSH hostname", "sshHost", sshHost, "error", err)
 			overlayHostnames = append(overlayHostnames, sshHost)
 		} else {
-			log.Infow("→ overlay info for GlusterFS", "sshHost", sshHost, "fqdn", overlayInfo.FQDN, "ip", overlayInfo.IP, "interface", overlayInfo.Interface)
-			// Use overlay FQDN for GlusterFS (e.g., node1.netbird.cloud)
-			// FQDNs are preferred because:
-			// 1. They are stable identifiers that don't change
-			// 2. Public IPs are never used (GlusterFS ports not exposed publicly)
-			// 3. Both peer probe and volume creation use the same identifier
+			log.Infow("→ overlay info for storage", "sshHost", sshHost, "fqdn", overlayInfo.FQDN, "ip", overlayInfo.IP, "interface", overlayInfo.Interface)
 			overlayHostnames = append(overlayHostnames, overlayInfo.FQDN)
 		}
 	}
@@ -1778,181 +1690,67 @@ func getGlusterHostnames(ctx context.Context, sshPool *ssh.Pool, cfg *config.Con
 	return overlayHostnames, nil
 }
 
-// teardownGlusterFS tears down an existing GlusterFS cluster.
-func teardownGlusterFS(ctx context.Context, sshPool *ssh.Pool, workers []string, volume, mount, brick string) error {
-	log := logging.L().With("component", "gluster-teardown")
+// setupDistributedStorage sets up the distributed storage cluster (MicroCeph).
+func setupDistributedStorage(ctx context.Context, sshPool *ssh.Pool, nodes []string, addresses []string, cfg *config.Config) error {
+	ds := cfg.GetDistributedStorage()
+	log := logging.L().With("component", "storage-setup", "type", ds.Type)
 
-	if len(workers) == 0 {
+	if len(nodes) == 0 {
 		return nil
 	}
 
-	orchestrator := workers[0]
+	log.Infow("setting up distributed storage cluster",
+		"nodes", len(nodes),
+		"type", ds.Type,
+		"poolName", ds.PoolName,
+		"mountPath", ds.MountPath)
 
-	// Stop and delete volume
-	log.Infow("→ stopping GlusterFS volume", "volume", volume, "orchestrator", orchestrator)
-	stopCmd := fmt.Sprintf("gluster volume stop %s force 2>/dev/null || true", volume)
-	_, _, _ = sshPool.Run(ctx, orchestrator, stopCmd)
+	// TODO: Implement MicroCeph cluster setup
+	// This will be implemented in a separate orchestrator package
+	log.Warnw("⚠️ MicroCeph setup not yet implemented - storage cluster will need manual configuration")
 
-	log.Infow("→ deleting GlusterFS volume", "volume", volume, "orchestrator", orchestrator)
-	deleteCmd := fmt.Sprintf("gluster volume delete %s 2>/dev/null || true", volume)
-	_, _, _ = sshPool.Run(ctx, orchestrator, deleteCmd)
-
-	// Detach ALL peers from orchestrator's perspective
-	// First get the list of all peers (by any identity - FQDN, IP, etc.)
-	log.Infow("→ detaching all peers from orchestrator")
-	peerListCmd := "gluster peer status 2>/dev/null | grep -E '^Hostname:' | awk '{print $2}' || true"
-	stdout, _, _ := sshPool.Run(ctx, orchestrator, peerListCmd)
-	for _, peer := range strings.Split(stdout, "\n") {
-		peer = strings.TrimSpace(peer)
-		if peer != "" {
-			log.Infow("→ detaching peer", "peer", peer, "orchestrator", orchestrator)
-			detachCmd := fmt.Sprintf("gluster peer detach %s force 2>/dev/null || true", peer)
-			_, _, _ = sshPool.Run(ctx, orchestrator, detachCmd)
-		}
-	}
-
-	// Clean up on all workers - ORDER MATTERS:
-	// 1. Stop glusterd and kill all gluster processes FIRST
-	// 2. Then unmount and clean up directories
-	// 3. Finally clear glusterd state and restart
-	for _, worker := range workers {
-		log.Infow("→ cleaning up GlusterFS on worker", "worker", worker)
-
-		// STEP 1: Stop glusterd and kill ALL gluster processes FIRST
-		// This must happen before we can unmount or clean up files
-		log.Infow("→ stopping glusterd and killing gluster processes", "worker", worker)
-		stopCmds := []string{
-			// Stop glusterd service
-			"systemctl stop glusterd 2>/dev/null || true",
-			// Kill ALL gluster-related processes that might be orphaned
-			// These can survive service stop and cause "brick already in use" errors
-			"pkill -9 glusterfsd 2>/dev/null || true",
-			"pkill -9 glusterfs 2>/dev/null || true",
-			"pkill -9 glustershd 2>/dev/null || true",
-			// Wait for processes to die
-			"sleep 2",
-			// Double-check with killall in case pkill missed any
-			"killall -9 glusterfsd 2>/dev/null || true",
-			"killall -9 glusterfs 2>/dev/null || true",
-		}
-		for _, cmd := range stopCmds {
-			_, _, _ = sshPool.Run(ctx, worker, cmd)
-		}
-
-		// STEP 2: Unmount volumes and brick (processes are dead, so this should work)
-		// Force unmount in case of stale handles
-		log.Infow("→ unmounting GlusterFS volume", "worker", worker, "mount", mount)
-		unmountVolumeCmd := fmt.Sprintf("umount -f %s 2>/dev/null || umount -l %s 2>/dev/null || true", mount, mount)
-		_, _, _ = sshPool.Run(ctx, worker, unmountVolumeCmd)
-
-		// Don't unmount the brick if it's an XFS disk - we want to keep the disk mounted
-		// Just clean the brick directory contents, not unmount the disk
-		// The brick path is like /mnt/GlusterFS/docker-swarm-0001/brick which is an XFS mount
-
-		// STEP 3: Remove fstab entries for GlusterFS (not the brick XFS mount)
-		fstabVolumeCmd := fmt.Sprintf("sed -i '\\|glusterfs.*%s|d' /etc/fstab 2>/dev/null || true", mount)
-		_, _, _ = sshPool.Run(ctx, worker, fstabVolumeCmd)
-
-		// STEP 4: Clean brick directory contents (but keep the mount)
-		// This removes the .glusterfs directory and any data
-		log.Infow("→ cleaning brick contents", "worker", worker, "brick", brick)
-		cleanBrickCmd := fmt.Sprintf("rm -rf %s/.glusterfs %s/* 2>/dev/null || true", brick, brick)
-		_, _, _ = sshPool.Run(ctx, worker, cleanBrickCmd)
-
-		// STEP 5: Remove mount directory if it exists
-		removeMountCmd := fmt.Sprintf("rm -rf %s 2>/dev/null || true", mount)
-		log.Infow("→ removing mount directory", "worker", worker, "mount", mount)
-		_, _, _ = sshPool.Run(ctx, worker, removeMountCmd)
-
-		// STEP 6: Clear all glusterd state
-		log.Infow("→ clearing glusterd state", "worker", worker)
-		clearCmds := []string{
-			"rm -rf /var/lib/glusterd/peers/* 2>/dev/null || true",
-			"rm -rf /var/lib/glusterd/vols/* 2>/dev/null || true",
-			"rm -rf /var/lib/glusterd/bitd/* 2>/dev/null || true",
-			"rm -rf /var/lib/glusterd/scrub/* 2>/dev/null || true",
-			"rm -rf /var/lib/glusterd/snaps/* 2>/dev/null || true",
-			"rm -rf /var/lib/glusterd/quotad/* 2>/dev/null || true",
-			"rm -rf /var/lib/glusterd/nfs/* 2>/dev/null || true",
-			"rm -rf /var/lib/glusterd/glustershd/* 2>/dev/null || true",
-		}
-		for _, cmd := range clearCmds {
-			_, _, _ = sshPool.Run(ctx, worker, cmd)
-		}
-
-		// STEP 7: Restart glusterd with clean state
-		log.Infow("→ restarting glusterd", "worker", worker)
-		_, _, _ = sshPool.Run(ctx, worker, "systemctl start glusterd 2>/dev/null || true")
-
-		log.Infow("✓ worker cleanup complete", "worker", worker)
-	}
-
-	// Wait for glusterd to stabilize on all nodes before returning
-	log.Infow("→ waiting for glusterd to stabilize")
-	time.Sleep(3 * time.Second)
-
-	log.Infow("✓ GlusterFS teardown complete")
 	return nil
 }
 
+// teardownDistributedStorage tears down an existing distributed storage cluster.
+func teardownDistributedStorage(ctx context.Context, sshPool *ssh.Pool, nodes []string, cfg *config.Config) error {
+	ds := cfg.GetDistributedStorage()
+	log := logging.L().With("component", "storage-teardown", "type", ds.Type)
 
-
-// verifyGlusterReplication creates a test file on one node and verifies it appears on all other nodes.
-// This ensures GlusterFS replication is working before proceeding with Docker Swarm setup.
-func verifyGlusterReplication(ctx context.Context, sshPool *ssh.Pool, workers []string, mountPath string) error {
-	log := logging.L().With("component", "gluster-verify")
-
-	if len(workers) < 2 {
-		log.Infow("only one worker, skipping replication verification")
+	if len(nodes) == 0 {
 		return nil
 	}
 
-	// Generate unique test file name
-	testFile := fmt.Sprintf("%s/.gluster-replication-test-%d", mountPath, time.Now().UnixNano())
-	testContent := fmt.Sprintf("replication-test-%d", time.Now().UnixNano())
+	log.Infow("tearing down distributed storage cluster", "nodes", len(nodes), "type", ds.Type)
 
-	// Create test file on first worker
-	sourceWorker := workers[0]
-	createCmd := fmt.Sprintf("echo '%s' > %s", testContent, testFile)
-	log.Infow("creating test file", "worker", sourceWorker, "file", testFile)
+	for _, node := range nodes {
+		log.Infow("→ cleaning up storage on node", "node", node)
 
-	_, stderr, err := sshPool.Run(ctx, sourceWorker, createCmd)
-	if err != nil {
-		return fmt.Errorf("failed to create test file on %s: %w (stderr: %s)", sourceWorker, err, stderr)
-	}
+		// Unmount storage
+		if ds.MountPath != "" {
+			unmountCmd := fmt.Sprintf("umount -f %s 2>/dev/null || umount -l %s 2>/dev/null || true",
+				ds.MountPath, ds.MountPath)
+			log.Infow("→ unmounting storage", "node", node, "mount", ds.MountPath, "command", unmountCmd)
+			_, _, _ = sshPool.Run(ctx, node, unmountCmd)
 
-	// Wait a moment for replication
-	time.Sleep(2 * time.Second)
-
-	// Verify file exists and has correct content on all other workers
-	var failedWorkers []string
-	for _, worker := range workers[1:] {
-		readCmd := fmt.Sprintf("cat %s 2>/dev/null || echo 'FILE_NOT_FOUND'", testFile)
-		stdout, _, err := sshPool.Run(ctx, worker, readCmd)
-		content := strings.TrimSpace(stdout)
-
-		if err != nil || content == "FILE_NOT_FOUND" {
-			log.Warnw("test file not found on worker", "worker", worker, "file", testFile)
-			failedWorkers = append(failedWorkers, worker)
-			continue
+			// Remove mount directory
+			removeMountCmd := fmt.Sprintf("rm -rf %s 2>/dev/null || true", ds.MountPath)
+			_, _, _ = sshPool.Run(ctx, node, removeMountCmd)
 		}
 
-		if content != testContent {
-			log.Warnw("test file content mismatch", "worker", worker, "expected", testContent, "got", content)
-			failedWorkers = append(failedWorkers, worker)
-			continue
+		// Remove MicroCeph if installed
+		log.Infow("→ removing MicroCeph", "node", node)
+		removeCmds := []string{
+			"snap remove microceph --purge 2>/dev/null || true",
 		}
 
-		log.Infow("✓ replication verified", "worker", worker)
+		for _, cmd := range removeCmds {
+			_, _, _ = sshPool.Run(ctx, node, cmd)
+		}
+
+		log.Infow("✓ node cleanup complete", "node", node)
 	}
 
-	// Cleanup test file on source worker
-	cleanupCmd := fmt.Sprintf("rm -f %s 2>/dev/null || true", testFile)
-	sshPool.Run(ctx, sourceWorker, cleanupCmd)
-
-	if len(failedWorkers) > 0 {
-		return fmt.Errorf("replication failed on %d/%d workers: %v", len(failedWorkers), len(workers)-1, failedWorkers)
-	}
-
+	log.Infow("✓ distributed storage teardown complete")
 	return nil
 }

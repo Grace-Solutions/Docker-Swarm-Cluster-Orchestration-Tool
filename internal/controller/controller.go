@@ -24,8 +24,9 @@ type ServeOptions struct {
 }
 
 type MasterInitOptions struct {
-	StateDir      string
-	EnableGluster bool
+	StateDir       string
+	EnableStorage  bool
+	StorageType    string // "microceph"
 }
 
 type MasterResetOptions struct {
@@ -41,13 +42,14 @@ type NodeRegistration struct {
 	CPU             int       `json:"cpu"`
 	MemoryMB        int       `json:"memoryMb"`
 	DockerVersion   string    `json:"dockerVersion"`
-	GlusterCapable  bool      `json:"glusterCapable"`
+	GlusterCapable  bool      `json:"glusterCapable"`  // Deprecated: use StorageEnabled
+	StorageEnabled  bool      `json:"storageEnabled"`  // Node participates in distributed storage
 	DeployPortainer bool      `json:"deployPortainer,omitempty"`
 	Timestamp       time.Time `json:"timestamp"`
 	// Action controls how the controller treats this registration. If empty or
 	// "register", the node is upserted into state. If "deregister", the node
-	// is removed from state. If "gluster-ready", the orchestrator signals that
-	// the GlusterFS volume is ready for mounting.
+	// is removed from state. If "storage-ready", the orchestrator signals that
+	// the storage cluster is ready for use.
 	Action string `json:"action,omitempty"`
 }
 
@@ -59,27 +61,24 @@ const (
 )
 
 type NodeResponse struct {
-	Status              NodeResponseStatus `json:"status"`
-	SwarmRole           string             `json:"swarmRole"`
-	SwarmJoinToken      string             `json:"swarmJoinToken"`
-	SwarmManagerAddr    string             `json:"swarmManagerAddr"`
-	OverlayType         string             `json:"overlayType"`
-	OverlayPayload      string             `json:"overlayPayload"`
-	GlusterEnabled      bool               `json:"glusterEnabled"`
-	GlusterVolume       string             `json:"glusterVolume"`
-	GlusterMount        string             `json:"glusterMount"`
-	GlusterBrick        string             `json:"glusterBrick"`
-	GlusterOrchestrator bool               `json:"glusterOrchestrator"`
-	GlusterWorkerNodes  []string           `json:"glusterWorkerNodes,omitempty"`
-	GlusterReady        bool               `json:"glusterReady"`
-	DeployPortainer     bool               `json:"deployPortainer"`
-	SSHPublicKey        string             `json:"sshPublicKey,omitempty"` // SSH public key for remote orchestration
+	Status           NodeResponseStatus `json:"status"`
+	SwarmRole        string             `json:"swarmRole"`
+	SwarmJoinToken   string             `json:"swarmJoinToken"`
+	SwarmManagerAddr string             `json:"swarmManagerAddr"`
+	OverlayType      string             `json:"overlayType"`
+	OverlayPayload   string             `json:"overlayPayload"`
+	StorageEnabled   bool               `json:"storageEnabled"`
+	StorageType      string             `json:"storageType"`                   // "microceph"
+	StorageReady     bool               `json:"storageReady"`
+	StorageNodes     []string           `json:"storageNodes,omitempty"`
+	DeployPortainer  bool               `json:"deployPortainer"`
+	SSHPublicKey     string             `json:"sshPublicKey,omitempty"`        // SSH public key for remote orchestration
 }
 
-// MasterInit prepares a host as the initial Swarm manager and optional GlusterFS brick.
+// MasterInit prepares a host as the initial Swarm manager and optional distributed storage.
 //
 // It ensures the controller state directory exists and, when requested, records
-// cluster-wide GlusterFS configuration that will be sent to Gluster-capable
+// cluster-wide storage configuration that will be sent to storage-enabled
 // nodes as they join.
 //
 // MasterInit clears any existing node registrations to ensure a clean start.
@@ -122,20 +121,23 @@ func MasterInit(ctx context.Context, opts MasterInitOptions) error {
 
 	logging.L().Infow(fmt.Sprintf("SSH keypair generated: %s, %s", privateKeyPath, publicKeyPath))
 
-	if opts.EnableGluster {
-		volume, mount, brick := deriveGlusterDefaults(opts.StateDir)
-		if _, err := store.setGlusterConfig(true, volume, mount, brick); err != nil {
+	if opts.EnableStorage {
+		storageType := opts.StorageType
+		if storageType == "" {
+			storageType = "microceph"
+		}
+		if _, err := store.setStorageConfig(true, storageType); err != nil {
 			return err
 		}
 
 		logging.L().Infow(fmt.Sprintf(
-			"master init complete with GlusterFS enabled: stateDir=%s volume=%s mount=%s brick=%s",
-			opts.StateDir, volume, mount, brick,
+			"master init complete with distributed storage enabled: stateDir=%s storageType=%s",
+			opts.StateDir, storageType,
 		))
 		return nil
 	}
 
-	logging.L().Infow(fmt.Sprintf("master init complete: stateDir=%s glusterEnabled=%t", opts.StateDir, false))
+	logging.L().Infow(fmt.Sprintf("master init complete: stateDir=%s storageEnabled=%t", opts.StateDir, false))
 	return nil
 }
 
@@ -170,18 +172,4 @@ func MasterReset(ctx context.Context, opts MasterResetOptions) error {
 
 	logging.L().Infow("master reset complete", "stateDir", opts.StateDir)
 	return nil
-}
-
-func deriveGlusterDefaults(stateDir string) (volume, mount, brick string) {
-	mount = stateDir
-
-	parent := filepath.Dir(stateDir)
-	brick = filepath.Join(parent, "brick")
-
-	volume = filepath.Base(parent)
-	if volume == "" || volume == "." || volume == string(filepath.Separator) {
-		volume = "gv0"
-	}
-
-	return volume, mount, brick
 }

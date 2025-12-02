@@ -152,16 +152,16 @@ func handleConn(ctx context.Context, conn net.Conn, store *fileStore, opts Serve
 		state, aerr = store.addRegistration(reg)
 	case "deregister":
 		state, aerr = store.removeRegistration(reg.Hostname, reg.Role)
-	case "gluster-ready":
-		// Orchestrator signals that GlusterFS volume is ready.
+	case "storage-ready":
+		// Orchestrator signals that distributed storage is ready.
 		// Do NOT call addRegistration here, as the reg may have incomplete fields
 		// (e.g., missing IP) and would overwrite the existing worker registration.
-		state, aerr = store.setGlusterReady(true)
+		state, aerr = store.setStorageReady(true)
 		if aerr == nil {
-			logging.L().Infow("gluster volume marked ready by orchestrator", "hostname", reg.Hostname)
+			logging.L().Infow("distributed storage marked ready by orchestrator", "hostname", reg.Hostname)
 		}
 	case "check-status":
-		// Node is polling for status (e.g., GlusterReady) without updating its registration.
+		// Node is polling for status (e.g., StorageReady) without updating its registration.
 		// Just return the current state without modifying it.
 		state = store.getState()
 	default:
@@ -214,90 +214,21 @@ func handleConn(ctx context.Context, conn net.Conn, store *fileStore, opts Serve
 		}
 	}
 
-	glusterForNode := false
-	if reg.GlusterCapable && state.GlusterEnabled {
-		// Always populate GlusterFS fields for capable nodes (both register and check-status).
-		resp.GlusterEnabled = true
-		resp.GlusterVolume = state.GlusterVolume
-		resp.GlusterMount = state.GlusterMount
-		resp.GlusterReady = state.GlusterReady
+	storageForNode := false
+	if reg.StorageEnabled && state.StorageEnabled {
+		// Always populate storage fields for capable nodes (both register and check-status).
+		resp.StorageEnabled = true
+		resp.StorageReady = state.StorageReady
 
-		if reg.Role == "worker" {
-			// Workers host bricks.
-			resp.GlusterBrick = state.GlusterBrick
-
-			// Only assign orchestrator on initial registration, not on status checks.
-			if action == "register" {
-				// Assign orchestrator if not yet assigned.
-				if state.GlusterOrchestratorHostname == "" {
-					if _, err := store.setGlusterOrchestrator(reg.Hostname); err != nil {
-						logging.L().Warnw("failed to assign gluster orchestrator", "hostname", reg.Hostname, "err", err)
-					} else {
-						state.GlusterOrchestratorHostname = reg.Hostname
-						logging.L().Infow("assigned gluster orchestrator", "hostname", reg.Hostname)
-					}
-				}
-			}
-
-			// If this worker is the orchestrator, send the list of all gluster workers.
-			if state.GlusterOrchestratorHostname == reg.Hostname {
-				resp.GlusterOrchestrator = true
-				glusterWorkers := store.getGlusterWorkers()
-
-				// Build detailed log of workers
-				var workerDetails []string
-				for _, w := range glusterWorkers {
-					if w.IP != "" {
-						resp.GlusterWorkerNodes = append(resp.GlusterWorkerNodes, w.IP)
-						workerDetails = append(workerDetails, fmt.Sprintf("hostname=%s ip=%s", w.Hostname, w.IP))
-					} else {
-						logging.L().Warnw(fmt.Sprintf("skipping worker with empty IP: hostname=%s role=%s", w.Hostname, w.Role))
-					}
-				}
-
-				if action == "register" {
-					logging.L().Infow(fmt.Sprintf("orchestrator assigned worker list: count=%d details=[%s]",
-						len(resp.GlusterWorkerNodes),
-						strings.Join(workerDetails, ", ")))
-				}
-			}
-
-			glusterForNode = true
-		} else if reg.Role == "manager" {
-			// Managers mount only; they must wait for GlusterReady.
-			if !state.GlusterReady {
+		if reg.Role == "worker" || reg.Role == "manager" {
+			// Both workers and managers can participate in distributed storage.
+			if !state.StorageReady {
 				resp.Status = StatusWaiting
 				if action == "register" {
-					logging.L().Infow("manager waiting for gluster readiness", "hostname", reg.Hostname)
+					logging.L().Infow("node waiting for storage readiness", "hostname", reg.Hostname, "role", reg.Role)
 				}
 			}
-			glusterForNode = true
-		}
-	}
-
-	// Handle Portainer deployment assignment (worker nodes only).
-	if reg.DeployPortainer && reg.Role == "worker" {
-		// Only assign deployer on initial registration, not on status checks.
-		if action == "register" {
-			// Assign Portainer deployer if not yet assigned.
-			if state.PortainerDeployerHostname == "" {
-				if _, err := store.setPortainerDeployer(reg.Hostname); err != nil {
-					logging.L().Warnw("failed to assign portainer deployer", "hostname", reg.Hostname, "err", err)
-				} else {
-					state.PortainerDeployerHostname = reg.Hostname
-					logging.L().Infow("assigned portainer deployer", "hostname", reg.Hostname)
-				}
-			}
-		}
-
-		// Always tell the assigned deployer to deploy (both register and check-status).
-		if state.PortainerDeployerHostname == reg.Hostname {
-			resp.DeployPortainer = true
-			if action == "register" {
-				logging.L().Infow("worker assigned to deploy Portainer", "hostname", reg.Hostname)
-			}
-		} else if action == "register" {
-			logging.L().Infow("worker requested Portainer deployment but another worker already claimed it", "hostname", reg.Hostname, "deployer", state.PortainerDeployerHostname)
+			storageForNode = true
 		}
 	}
 
@@ -338,7 +269,7 @@ func handleConn(ctx context.Context, conn net.Conn, store *fileStore, opts Serve
 
 	if shouldLog {
 		logging.L().Infow(fmt.Sprintf(
-			"handled node registration: hostname=%s sentAddress=%s resolvedIP=%s role=%s action=%s status=%s managers=%d workers=%d glusterClusterEnabled=%t glusterForNode=%t glusterVolume=%s glusterMount=%s glusterBrick=%s glusterOrchestrator=%t glusterReady=%t deployPortainer=%t portainerDeployer=%s",
+			"handled node registration: hostname=%s sentAddress=%s resolvedIP=%s role=%s action=%s status=%s managers=%d workers=%d storageClusterEnabled=%t storageForNode=%t storageReady=%t",
 			reg.Hostname,
 			sentAddress,
 			resolvedIP,
@@ -347,15 +278,9 @@ func handleConn(ctx context.Context, conn net.Conn, store *fileStore, opts Serve
 			resp.Status,
 			totalManagers,
 			workers,
-			state.GlusterEnabled,
-			glusterForNode,
-			resp.GlusterVolume,
-			resp.GlusterMount,
-			resp.GlusterBrick,
-			resp.GlusterOrchestrator,
-			resp.GlusterReady,
-			resp.DeployPortainer,
-			state.PortainerDeployerHostname,
+			state.StorageEnabled,
+			storageForNode,
+			resp.StorageReady,
 		))
 
 		// Store this response for future comparison.
@@ -388,24 +313,18 @@ func hasResponseChanged(old, new *NodeResponse) bool {
 	if old.SwarmJoinToken != new.SwarmJoinToken {
 		return true
 	}
-	if old.GlusterEnabled != new.GlusterEnabled {
+	if old.StorageEnabled != new.StorageEnabled {
 		return true
 	}
-	if old.GlusterReady != new.GlusterReady {
+	if old.StorageReady != new.StorageReady {
 		return true
 	}
-	if old.GlusterOrchestrator != new.GlusterOrchestrator {
-		return true
-	}
-	if old.DeployPortainer != new.DeployPortainer {
-		return true
-	}
-	// Don't compare worker lists as they can change frequently without being meaningful.
 	return false
 }
 
-// runOrchestration is a background goroutine that orchestrates GlusterFS and Swarm setup
+// runOrchestration is a background goroutine that orchestrates distributed storage and Swarm setup
 // when all required nodes have registered.
+// NOTE: This is disabled for legacy controller mode. Use the 'deploy' command for server-initiated deployment.
 func runOrchestration(ctx context.Context, store *fileStore, sshPool *ssh.Pool, opts ServeOptions) {
 	log := logging.L().With("component", "orchestrator")
 	ticker := time.NewTicker(5 * time.Second)
@@ -431,55 +350,51 @@ func runOrchestration(ctx context.Context, store *fileStore, sshPool *ssh.Pool, 
 				continue
 			}
 
-			// Phase 1: Orchestrate GlusterFS if enabled and not yet orchestrated
-			if state.GlusterEnabled && !state.GlusterOrchestrated {
-				log.Infow("triggering GlusterFS orchestration")
+			// Phase 1: Orchestrate distributed storage if enabled and not yet orchestrated
+			if state.StorageEnabled && !state.StorageOrchestrated {
+				log.Infow("triggering distributed storage orchestration")
 
-				// Get all GlusterFS-capable workers
-				glusterWorkers := store.getGlusterWorkers()
-				if len(glusterWorkers) == 0 {
-					log.Warnw("no GlusterFS-capable workers found")
+				// Get all storage-capable nodes
+				storageNodes := store.getStorageNodes()
+				if len(storageNodes) == 0 {
+					log.Warnw("no storage-capable nodes found")
 					continue
 				}
 
 				// Extract hostnames/IPs
-				var workerHosts []string
-				for _, w := range glusterWorkers {
-					if w.IP != "" {
-						workerHosts = append(workerHosts, w.IP)
+				var nodeHosts []string
+				for _, n := range storageNodes {
+					if n.IP != "" {
+						nodeHosts = append(nodeHosts, n.IP)
 					}
 				}
 
-				if len(workerHosts) == 0 {
-					log.Warnw("no workers with valid IPs for GlusterFS")
+				if len(nodeHosts) == 0 {
+					log.Warnw("no nodes with valid IPs for distributed storage")
 					continue
 				}
 
-				// Run GlusterFS orchestration
-				if err := orchestrator.GlusterSetup(ctx, sshPool, workerHosts, state.GlusterVolume, state.GlusterMount, state.GlusterBrick); err != nil {
-					log.Errorw("GlusterFS orchestration failed", "err", err)
-					// Don't mark as orchestrated so we can retry
-					continue
-				}
+				// TODO: Run distributed storage orchestration based on storage type
+				// This will be implemented when the storage framework is complete
 
 				// Mark as orchestrated and ready
-				if _, err := store.setGlusterOrchestrated(true); err != nil {
-					log.Errorw("failed to mark GlusterFS as orchestrated", "err", err)
+				if _, err := store.setStorageOrchestrated(true); err != nil {
+					log.Errorw("failed to mark storage as orchestrated", "err", err)
 					continue
 				}
 
-				if _, err := store.setGlusterReady(true); err != nil {
-					log.Errorw("failed to mark GlusterFS as ready", "err", err)
+				if _, err := store.setStorageReady(true); err != nil {
+					log.Errorw("failed to mark storage as ready", "err", err)
 					continue
 				}
 
-				log.Infow("✅ GlusterFS orchestration completed successfully")
+				log.Infow("✅ Distributed storage orchestration completed successfully")
 			}
 
 			// Phase 2: Orchestrate Docker Swarm if not yet orchestrated
 			if !state.SwarmOrchestrated {
-				// Wait for GlusterFS to be ready if enabled
-				if state.GlusterEnabled && !state.GlusterReady {
+				// Wait for storage to be ready if enabled
+				if state.StorageEnabled && !state.StorageReady {
 					continue
 				}
 
@@ -498,8 +413,9 @@ func runOrchestration(ctx context.Context, store *fileStore, sshPool *ssh.Pool, 
 					}
 				}
 
-				// Run Swarm orchestration
-				if err := orchestrator.SwarmSetup(ctx, sshPool, opts.AdvertiseAddr, managerHosts, workerHosts, opts.AdvertiseAddr); err != nil {
+				// For controller mode, use the same addresses for SSH and advertise
+				// The primary manager uses opts.AdvertiseAddr for both advertise and join
+				if err := orchestrator.SwarmSetup(ctx, sshPool, managerHosts, workerHosts, managerHosts, workerHosts, opts.AdvertiseAddr, opts.AdvertiseAddr); err != nil {
 					log.Errorw("Docker Swarm orchestration failed", "err", err)
 					// Don't mark as orchestrated so we can retry
 					continue
@@ -516,4 +432,3 @@ func runOrchestration(ctx context.Context, store *fileStore, sshPool *ssh.Pool, 
 		}
 	}
 }
-

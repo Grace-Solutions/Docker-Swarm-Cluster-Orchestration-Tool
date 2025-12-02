@@ -11,18 +11,15 @@ import (
 )
 
 // clusterState is the on-disk representation of controller state.
-// It includes node registrations and cluster-wide GlusterFS configuration.
+// It includes node registrations and cluster-wide configuration.
 type clusterState struct {
-	Nodes                       []NodeRegistration `json:"nodes"`
-	GlusterEnabled              bool               `json:"glusterEnabled"`
-	GlusterVolume               string             `json:"glusterVolume"`
-	GlusterMount                string             `json:"glusterMount"`
-	GlusterBrick                string             `json:"glusterBrick"`
-	GlusterOrchestratorHostname string             `json:"glusterOrchestratorHostname,omitempty"` // Deprecated: controller now orchestrates via SSH
-	GlusterReady                bool               `json:"glusterReady"`
-	GlusterOrchestrated         bool               `json:"glusterOrchestrated"`         // True if controller has orchestrated GlusterFS setup via SSH
-	SwarmOrchestrated           bool               `json:"swarmOrchestrated"`           // True if controller has orchestrated Swarm setup via SSH
-	PortainerDeployerHostname   string             `json:"portainerDeployerHostname,omitempty"`
+	Nodes                     []NodeRegistration `json:"nodes"`
+	StorageEnabled            bool               `json:"storageEnabled"`
+	StorageType               string             `json:"storageType"`                           // "microceph"
+	StorageOrchestrated       bool               `json:"storageOrchestrated"`                   // True if controller has orchestrated storage setup via SSH
+	StorageReady              bool               `json:"storageReady"`                          // True if storage cluster is ready for use
+	SwarmOrchestrated         bool               `json:"swarmOrchestrated"`                     // True if controller has orchestrated Swarm setup via SSH
+	PortainerDeployerHostname string             `json:"portainerDeployerHostname,omitempty"`
 }
 
 // fileStore is a simple JSON-backed state store stored under the configured
@@ -137,14 +134,12 @@ func (s *fileStore) reset() (clusterState, error) {
 	return s.state, nil
 }
 
-func (s *fileStore) setGlusterConfig(enabled bool, volume, mount, brick string) (clusterState, error) {
+func (s *fileStore) setStorageConfig(enabled bool, storageType string) (clusterState, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.state.GlusterEnabled = enabled
-	s.state.GlusterVolume = volume
-	s.state.GlusterMount = mount
-	s.state.GlusterBrick = brick
+	s.state.StorageEnabled = enabled
+	s.state.StorageType = storageType
 
 	if err := s.saveLocked(); err != nil {
 		return clusterState{}, err
@@ -177,38 +172,27 @@ func (s *fileStore) getState() clusterState {
 	return s.state
 }
 
-// getGlusterWorkers returns all registered worker nodes that have GlusterCapable=true.
-func (s *fileStore) getGlusterWorkers() []NodeRegistration {
+// getStorageNodes returns all registered nodes that have storage enabled.
+func (s *fileStore) getStorageNodes() []NodeRegistration {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var workers []NodeRegistration
+	var storageNodes []NodeRegistration
 	for _, n := range s.state.Nodes {
-		if n.Role == "worker" && n.GlusterCapable {
-			workers = append(workers, n)
+		// Check StorageEnabled first, fall back to deprecated GlusterCapable for migration
+		if n.StorageEnabled || n.GlusterCapable {
+			storageNodes = append(storageNodes, n)
 		}
 	}
-	return workers
+	return storageNodes
 }
 
-// setGlusterOrchestrator assigns the orchestrator hostname and persists state.
-func (s *fileStore) setGlusterOrchestrator(hostname string) (clusterState, error) {
+// setStorageReady marks distributed storage as ready and persists state.
+func (s *fileStore) setStorageReady(ready bool) (clusterState, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.state.GlusterOrchestratorHostname = hostname
-	if err := s.saveLocked(); err != nil {
-		return clusterState{}, err
-	}
-	return s.state, nil
-}
-
-// setGlusterReady marks GlusterFS as ready (volume created and started) and persists state.
-func (s *fileStore) setGlusterReady(ready bool) (clusterState, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.state.GlusterReady = ready
+	s.state.StorageReady = ready
 	if err := s.saveLocked(); err != nil {
 		return clusterState{}, err
 	}
@@ -248,12 +232,12 @@ func (s *fileStore) setLastResponse(hostname, role string, resp *NodeResponse) {
 	s.lastResponses[key] = &respCopy
 }
 
-// setGlusterOrchestrated marks GlusterFS as orchestrated by the controller.
-func (s *fileStore) setGlusterOrchestrated(orchestrated bool) (clusterState, error) {
+// setStorageOrchestrated marks distributed storage as orchestrated by the controller.
+func (s *fileStore) setStorageOrchestrated(orchestrated bool) (clusterState, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.state.GlusterOrchestrated = orchestrated
+	s.state.StorageOrchestrated = orchestrated
 	if err := s.saveLocked(); err != nil {
 		return clusterState{}, err
 	}

@@ -14,12 +14,9 @@ import (
 	"time"
 
 	"clusterctl/internal/controller"
-	"clusterctl/internal/deps"
-	"clusterctl/internal/gluster"
 	"clusterctl/internal/ipdetect"
 	"clusterctl/internal/logging"
 	"clusterctl/internal/overlay"
-	"clusterctl/internal/portainer"
 	"clusterctl/internal/swarm"
 )
 
@@ -30,21 +27,20 @@ type JoinOptions struct {
 	HostnameOverride string
 	OverlayProvider  string
 	OverlayConfig    string
-	EnableGluster    bool
-	UseIPAddress     bool // If true, use IP address instead of hostname for Swarm/Gluster identity
-	DeployPortainer  bool // If true, request Portainer deployment (worker nodes only)
+	EnableStorage    bool
+	UseIPAddress     bool // If true, use IP address instead of hostname for Swarm identity
 }
 
 type ResetOptions struct {
-	MasterAddr        string
-	Role              string
-	HostnameOverride  string
-	OverlayProvider   string
-	OverlayConfig     string
-	GlusterMount      string
-	Deregister        bool
-	CleanupOverlay    bool
-	CleanupGlusterfs  bool
+	MasterAddr       string
+	Role             string
+	HostnameOverride string
+	OverlayProvider  string
+	OverlayConfig    string
+	StorageMount     string
+	Deregister       bool
+	CleanupOverlay   bool
+	CleanupStorage   bool
 }
 
 
@@ -63,15 +59,14 @@ func Join(ctx context.Context, opts JoinOptions) error {
 	}
 
 	reg := controller.NodeRegistration{
-		Hostname:        hostname,
-		Role:            opts.Role,
-		IP:              addr,
-		OS:              runtime.GOOS,
-		CPU:             runtime.NumCPU(),
-		MemoryMB:        memoryMB(),
-		DockerVersion:   dockerVersion(ctx),
-		GlusterCapable:  opts.EnableGluster,
-		DeployPortainer: opts.DeployPortainer,
+		Hostname:       hostname,
+		Role:           opts.Role,
+		IP:             addr,
+		OS:             runtime.GOOS,
+		CPU:            runtime.NumCPU(),
+		MemoryMB:       memoryMB(),
+		DockerVersion:  dockerVersion(ctx),
+		StorageEnabled: opts.EnableStorage,
 	}
 
 	// Resolve the address to an IP for logging purposes.
@@ -87,7 +82,7 @@ func Join(ctx context.Context, opts JoinOptions) error {
 		"hostname", reg.Hostname,
 		"ip", reg.IP,
 	)
-	log.Infow(fmt.Sprintf("starting node join: sending to controller hostname=%s address=%s resolvedIP=%s role=%s glusterCapable=%t", reg.Hostname, reg.IP, resolvedIP, reg.Role, reg.GlusterCapable))
+	log.Infow(fmt.Sprintf("starting node join: sending to controller hostname=%s address=%s resolvedIP=%s role=%s storageEnabled=%t", reg.Hostname, reg.IP, resolvedIP, reg.Role, reg.StorageEnabled))
 
 	backoff := time.Second
 	var lastResp *controller.NodeResponse
@@ -139,18 +134,13 @@ func Join(ctx context.Context, opts JoinOptions) error {
 	}
 
 	log.Infow(fmt.Sprintf(
-		"controller response: status=%s swarmRole=%s managerAddr=%s hasJoinToken=%t glusterEnabled=%t glusterVolume=%s glusterMount=%s glusterBrick=%s glusterOrchestrator=%t glusterReady=%t deployPortainer=%t hasSSHKey=%t",
+		"controller response: status=%s swarmRole=%s managerAddr=%s hasJoinToken=%t storageEnabled=%t storageReady=%t hasSSHKey=%t",
 		lastResp.Status,
 		lastResp.SwarmRole,
 		lastResp.SwarmManagerAddr,
 		lastResp.SwarmJoinToken != "",
-		lastResp.GlusterEnabled,
-		lastResp.GlusterVolume,
-		lastResp.GlusterMount,
-		lastResp.GlusterBrick,
-		lastResp.GlusterOrchestrator,
-		lastResp.GlusterReady,
-		lastResp.DeployPortainer,
+		lastResp.StorageEnabled,
+		lastResp.StorageReady,
 		lastResp.SSHPublicKey != "",
 	))
 
@@ -169,53 +159,24 @@ func Join(ctx context.Context, opts JoinOptions) error {
 		return err
 	}
 
-	// NOTE: Swarm and GlusterFS setup is now orchestrated by the controller via SSH.
+	// NOTE: Swarm and distributed storage setup is now orchestrated by the controller via SSH.
 	// Nodes no longer perform local convergence. They just wait for the controller
 	// to complete orchestration and then verify the setup.
 
-	log.Infow("waiting for controller to orchestrate GlusterFS and Swarm setup via SSH...")
+	log.Infow("waiting for controller to orchestrate distributed storage and Swarm setup via SSH...")
 
-	// Only proceed with GlusterFS and Portainer if the controller says we're ready.
-	// Managers may get StatusWaiting if GlusterFS is not ready yet.
+	// Only proceed if the controller says we're ready.
+	// Managers may get StatusWaiting if storage is not ready yet.
 	if lastResp.Status == controller.StatusWaiting {
-		log.Infow("controller says to wait (GlusterFS not ready yet); node join will retry")
+		log.Infow("controller says to wait (storage not ready yet); node join will retry")
 		return nil
 	}
 
-	if lastResp.GlusterEnabled {
-		// Verify GlusterFS mount (controller should have mounted it via SSH)
-		log.Infow("verifying GlusterFS mount orchestrated by controller")
-		if err := verifyGlusterMount(ctx, lastResp.GlusterMount); err != nil {
-			log.Warnw("GlusterFS mount verification failed", "err", err)
-			return err
-		}
-		log.Infow("✅ GlusterFS mount verified successfully")
-
-		// Deploy Portainer if the controller assigned this worker to deploy it.
-		// The controller ensures only one worker gets the deployment job.
-		if lastResp.DeployPortainer {
-			log.Infow("controller assigned this worker to deploy Portainer (GlusterFS is ready)")
-			if err := portainer.DeployPortainer(ctx, true, lastResp.GlusterMount); err != nil {
-				log.Warnw("portainer deployment failed (non-fatal)", "err", err)
-				// Non-fatal; continue.
-			}
-		} else if opts.DeployPortainer {
-			log.Infow("portainer deployment requested but another worker was assigned by controller")
-		}
+	if lastResp.StorageEnabled {
+		log.Infow("distributed storage enabled for this node")
+		// Storage verification is handled by the controller via SSH
 	} else {
-		log.Infow("gluster not enabled for this node by controller")
-
-		// Deploy Portainer if the controller assigned this worker to deploy it.
-		// The controller ensures only one worker gets the deployment job.
-		if lastResp.DeployPortainer {
-			log.Infow("controller assigned this worker to deploy Portainer (no GlusterFS)")
-			if err := portainer.DeployPortainer(ctx, false, ""); err != nil {
-				log.Warnw("portainer deployment failed (non-fatal)", "err", err)
-				// Non-fatal; continue.
-			}
-		} else if opts.DeployPortainer {
-			log.Infow("portainer deployment requested but another worker was assigned by controller")
-		}
+		log.Infow("distributed storage not enabled for this node by controller")
 	}
 
 	log.Infow("node join completed")
@@ -224,9 +185,9 @@ func Join(ctx context.Context, opts JoinOptions) error {
 
 // Reset implements the node-side behaviour for `clusterctl node reset`.
 //
-// By default it leaves overlay connectivity and GlusterFS mounts in place so
+// By default it leaves overlay connectivity and storage mounts in place so
 // they can be reused. When the corresponding cleanup flags are set it will
-// also tear down overlay connectivity and GlusterFS mounts, and it always
+// also tear down overlay connectivity and storage mounts, and it always
 // attempts to leave the Swarm and optionally deregister from the controller.
 func Reset(ctx context.Context, opts ResetOptions) error {
 	log := logging.L().With(
@@ -245,13 +206,11 @@ func Reset(ctx context.Context, opts ResetOptions) error {
 		log.Infow("overlay teardown skipped; cleanupOverlay=false")
 	}
 
-	if opts.CleanupGlusterfs {
-		if err := gluster.Teardown(ctx, opts.GlusterMount); err != nil {
-			log.Warnw("gluster teardown failed", "err", err)
-			return err
-		}
+	if opts.CleanupStorage {
+		// Storage cleanup is handled by the controller via SSH
+		log.Infow("storage cleanup requested; will be handled by controller")
 	} else {
-		log.Infow("gluster teardown skipped; cleanupGlusterfs=false")
+		log.Infow("storage teardown skipped; cleanupStorage=false")
 	}
 
 	if err := swarm.Leave(ctx, true); err != nil {
@@ -311,7 +270,7 @@ func validateJoinOptions(opts JoinOptions) error {
 
 // detectIdentity returns the address (typically an overlay hostname/FQDN or
 // IP) and hostname that should be used when registering the node with the
-// controller. The address is what Swarm/gluster will ultimately use to talk to
+// controller. The address is what Swarm will ultimately use to talk to
 // this node.
 func detectIdentity(ctx context.Context, opts JoinOptions) (addr string, hostname string, err error) {
 	// Hostname first: honour explicit override, otherwise fall back to os.Hostname.
@@ -459,175 +418,6 @@ func memoryMB() int {
 	return 0
 }
 
-func convergeGluster(ctx context.Context, opts JoinOptions, resp *controller.NodeResponse) error {
-	log := logging.L()
-
-	if opts.Role == "worker" {
-		// Workers host bricks.
-		if resp.GlusterOrchestrator {
-			// This worker is the orchestrator.
-			log.Infow("this worker is the gluster orchestrator", "workers", len(resp.GlusterWorkerNodes))
-
-			// Determine our own identity (hostname or IP) for GlusterFS.
-			// This is the same address we registered with the controller.
-			selfIdentity, _, err := detectIdentity(ctx, opts)
-			if err != nil {
-				return fmt.Errorf("failed to detect self identity: %w", err)
-			}
-
-			if err := gluster.Orchestrate(ctx, resp.GlusterVolume, resp.GlusterBrick, resp.GlusterMount, resp.GlusterWorkerNodes, selfIdentity); err != nil {
-				return fmt.Errorf("gluster orchestration failed: %w", err)
-			}
-
-			// Signal controller that GlusterFS is ready.
-			if err := signalGlusterReady(ctx, opts.MasterAddr); err != nil {
-				log.Warnw("failed to signal gluster ready to controller", "err", err)
-				// Non-fatal; continue.
-			}
-
-			log.Infow("gluster orchestration completed and signaled to controller")
-		} else {
-			// Non-orchestrator worker: install GlusterFS, start daemon, ensure brick, wait for ready, then mount.
-			log.Infow("this worker is not the orchestrator; ensuring gluster daemon and brick, then waiting for volume readiness")
-
-			// Install GlusterFS and start the daemon so the orchestrator can peer probe us.
-			if err := deps.EnsureGluster(ctx); err != nil {
-				return fmt.Errorf("gluster install failed: %w", err)
-			}
-
-			// Ensure brick directory.
-			if err := gluster.Ensure(ctx, "", "", resp.GlusterBrick); err != nil {
-				return fmt.Errorf("gluster brick ensure failed: %w", err)
-			}
-
-			// Wait for volume to be ready (poll controller or wait for GlusterReady).
-			if err := waitForGlusterReady(ctx, opts); err != nil {
-				return fmt.Errorf("gluster wait for ready failed: %w", err)
-			}
-
-			// Build backup server list for failover (all workers except self).
-			// We use localhost as primary, with all other workers as backups.
-			var backupServers []string
-			selfIdentity, _, err := detectIdentity(ctx, opts)
-			if err == nil {
-				for _, wh := range resp.GlusterWorkerNodes {
-					if wh != selfIdentity && wh != "localhost" {
-						backupServers = append(backupServers, wh)
-					}
-				}
-			}
-
-			// Mount with failover support and add to fstab.
-			if err := gluster.EnsureWithFailover(ctx, resp.GlusterVolume, resp.GlusterMount, "", backupServers); err != nil {
-				return fmt.Errorf("gluster mount failed: %w", err)
-			}
-			if err := gluster.AddToFstabWithFailover(resp.GlusterVolume, resp.GlusterMount, "localhost", backupServers); err != nil {
-				return fmt.Errorf("gluster fstab add failed: %w", err)
-			}
-
-			log.Infow("gluster converged on worker", "volume", resp.GlusterVolume, "mount", resp.GlusterMount, "failoverServers", len(backupServers))
-		}
-	} else if opts.Role == "manager" {
-		// Managers mount only (no brick).
-		log.Infow("this manager will mount gluster volume (no brick)")
-
-		// GlusterReady should already be true if we got here (controller gates StatusReady).
-		// Install client-only.
-		if err := deps.EnsureGlusterClient(ctx); err != nil {
-			return fmt.Errorf("gluster client install failed: %w", err)
-		}
-
-		// Build backup server list for failover (all workers).
-		// Managers don't have bricks, so we use all workers as potential mount sources.
-		var backupServers []string
-		if len(resp.GlusterWorkerNodes) > 1 {
-			// Use first worker as primary, rest as backups.
-			backupServers = resp.GlusterWorkerNodes[1:]
-		}
-		primaryServer := "localhost"
-		if len(resp.GlusterWorkerNodes) > 0 {
-			primaryServer = resp.GlusterWorkerNodes[0]
-		}
-
-		// Mount with failover support and add to fstab.
-		if err := gluster.EnsureWithFailover(ctx, resp.GlusterVolume, resp.GlusterMount, "", backupServers); err != nil {
-			return fmt.Errorf("gluster mount failed: %w", err)
-		}
-		if err := gluster.AddToFstabWithFailover(resp.GlusterVolume, resp.GlusterMount, primaryServer, backupServers); err != nil {
-			return fmt.Errorf("gluster fstab add failed: %w", err)
-		}
-
-		log.Infow("gluster converged on manager", "volume", resp.GlusterVolume, "mount", resp.GlusterMount, "failoverServers", len(backupServers))
-	}
-
-	return nil
-}
-
-func waitForGlusterReady(ctx context.Context, opts JoinOptions) error {
-	log := logging.L()
-	backoff := 2 * time.Second
-	for {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-
-		// Poll the controller for GlusterReady status without updating our registration.
-		// Use action="check-status" to avoid overwriting our existing registration.
-		hostname, err := os.Hostname()
-		if err != nil {
-			return err
-		}
-
-		reg := controller.NodeRegistration{
-			Hostname: hostname,
-			Role:     opts.Role,
-			OS:       runtime.GOOS,
-			Action:   "check-status",
-		}
-
-		resp, err := registerOnce(ctx, opts.MasterAddr, reg)
-		if err != nil {
-			log.Warnw("gluster ready check registration failed", "err", err)
-		} else {
-			if resp.GlusterReady {
-				log.Infow("gluster volume is ready")
-				return nil
-			}
-			// Log that we're still waiting (only on first check or every 10 seconds to reduce spam).
-			if backoff == time.Second || backoff >= 10*time.Second {
-				log.Infow("waiting for gluster volume to be ready", "backoff", backoff)
-			}
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(backoff):
-		}
-
-		if backoff < 10*time.Second {
-			backoff += time.Second
-		}
-	}
-}
-
-func signalGlusterReady(ctx context.Context, masterAddr string) error {
-	hostname, err := os.Hostname()
-	if err != nil {
-		return err
-	}
-
-	reg := controller.NodeRegistration{
-		Hostname: hostname,
-		Role:     "worker",
-		OS:       runtime.GOOS,
-		Action:   "gluster-ready",
-	}
-
-	_, err = registerOnce(ctx, masterAddr, reg)
-	return err
-}
-
 // hasNodeResponseChanged checks if the response has changed in any meaningful way.
 func hasNodeResponseChanged(old, new *controller.NodeResponse) bool {
 	if old == nil || new == nil {
@@ -639,16 +429,10 @@ func hasNodeResponseChanged(old, new *controller.NodeResponse) bool {
 	if old.SwarmJoinToken != new.SwarmJoinToken {
 		return true
 	}
-	if old.GlusterEnabled != new.GlusterEnabled {
+	if old.StorageEnabled != new.StorageEnabled {
 		return true
 	}
-	if old.GlusterReady != new.GlusterReady {
-		return true
-	}
-	if old.GlusterOrchestrator != new.GlusterOrchestrator {
-		return true
-	}
-	if old.DeployPortainer != new.DeployPortainer {
+	if old.StorageReady != new.StorageReady {
 		return true
 	}
 	return false
@@ -708,30 +492,3 @@ func installSSHKey(ctx context.Context, publicKey string) error {
 	logging.L().Infow(fmt.Sprintf("SSH public key added to %s", authorizedKeysPath))
 	return nil
 }
-
-// verifyGlusterMount verifies that GlusterFS is mounted at the specified path.
-func verifyGlusterMount(ctx context.Context, mount string) error {
-	if mount == "" {
-		return errors.New("mount path is empty")
-	}
-
-	// Check if the mount point exists
-	if _, err := os.Stat(mount); err != nil {
-		return fmt.Errorf("mount point does not exist: %w", err)
-	}
-
-	// Check if it's a GlusterFS mount using df -T
-	cmd := exec.CommandContext(ctx, "df", "-T", mount)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("failed to check mount type: %w (output: %s)", err, string(output))
-	}
-
-	// Look for "fuse.glusterfs" in the output
-	if !strings.Contains(string(output), "fuse.glusterfs") {
-		return fmt.Errorf("mount point is not a GlusterFS mount: %s", string(output))
-	}
-
-	return nil
-}
-
