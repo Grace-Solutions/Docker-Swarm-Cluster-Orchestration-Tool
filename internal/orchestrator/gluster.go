@@ -526,14 +526,11 @@ func mountVolume(ctx context.Context, sshPool *ssh.Pool, sshWorkers, glusterWork
 		return fmt.Errorf("sshWorkers and glusterWorkers must have same length")
 	}
 
-	// Build backup volfile servers list using Gluster FQDNs (all except the first one)
-	var backupServers []string
-	for _, glusterWorker := range glusterWorkers[1:] {
-		backupServers = append(backupServers, glusterWorker)
-	}
+	// backupvolfile-server only takes a single server, not multiple
+	// If we have more than one server, use the second one as backup
 	backupOpt := ""
-	if len(backupServers) > 0 {
-		backupOpt = fmt.Sprintf(",backupvolfile-server=%s", strings.Join(backupServers, ":"))
+	if len(glusterWorkers) > 1 {
+		backupOpt = fmt.Sprintf(",backupvolfile-server=%s", glusterWorkers[1])
 	}
 
 	// Primary server is the first Gluster FQDN
