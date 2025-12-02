@@ -24,6 +24,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$VerbosePreference = "Continue"
 
 # Configuration
 $BinaryName = "dswrmctl"
