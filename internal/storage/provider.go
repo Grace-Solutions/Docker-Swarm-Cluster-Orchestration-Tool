@@ -96,14 +96,24 @@ func SetupCluster(ctx context.Context, sshPool *ssh.Pool, provider Provider, nod
 
 	primaryNode := nodes[0]
 
-	// Step 1: Bootstrap the primary node
+	// Step 1: Install storage software on all nodes
+	log.Infow("→ installing storage software on all nodes")
+	for _, node := range nodes {
+		log.Infow("→ installing on node", "node", node)
+		if err := provider.Install(ctx, sshPool, node); err != nil {
+			return fmt.Errorf("failed to install storage on %s: %w", node, err)
+		}
+		log.Infow("✓ storage software installed", "node", node)
+	}
+
+	// Step 2: Bootstrap the primary node
 	log.Infow("→ bootstrapping primary node", "node", primaryNode)
 	if err := provider.Bootstrap(ctx, sshPool, primaryNode); err != nil {
 		return fmt.Errorf("failed to bootstrap primary node %s: %w", primaryNode, err)
 	}
 	log.Infow("✓ primary node bootstrapped", "node", primaryNode)
 
-	// Step 2: Join additional nodes
+	// Step 3: Join additional nodes
 	for i := 1; i < len(nodes); i++ {
 		node := nodes[i]
 		log.Infow("→ joining node to cluster", "node", node, "index", i+1, "total", len(nodes))
@@ -121,7 +131,7 @@ func SetupCluster(ctx context.Context, sshPool *ssh.Pool, provider Provider, nod
 		log.Infow("✓ node joined cluster", "node", node)
 	}
 
-	// Step 3: Add storage to all nodes
+	// Step 4: Add storage to all nodes
 	for _, node := range nodes {
 		log.Infow("→ adding storage to node", "node", node)
 		if err := provider.AddStorage(ctx, sshPool, node); err != nil {
@@ -130,14 +140,14 @@ func SetupCluster(ctx context.Context, sshPool *ssh.Pool, provider Provider, nod
 		log.Infow("✓ storage added", "node", node)
 	}
 
-	// Step 4: Create storage pool
+	// Step 5: Create storage pool
 	log.Infow("→ creating storage pool", "poolName", ds.PoolName, "poolSize", ds.PoolSize)
 	if err := provider.CreatePool(ctx, sshPool, primaryNode, ds.PoolName, ds.PoolSize); err != nil {
 		return fmt.Errorf("failed to create storage pool: %w", err)
 	}
 	log.Infow("✓ storage pool created", "poolName", ds.PoolName)
 
-	// Step 5: Mount storage on all nodes
+	// Step 6: Mount storage on all nodes
 	for _, node := range nodes {
 		log.Infow("→ mounting storage on node", "node", node, "mountPath", ds.MountPath)
 		if err := provider.Mount(ctx, sshPool, node, ds.PoolName, ds.MountPath); err != nil {
