@@ -36,7 +36,7 @@ if ($PSScriptRoot) {
 }
 $OutputDir = Join-Path $RepoRoot "binaries"
 $ResourcesDir = Join-Path $RepoRoot "resources"
-$CmdDir = Join-Path $RepoRoot "cmd\clusterctl"
+$CmdDir = Join-Path $RepoRoot "cmd\dswrmctl"
 $IconPath = Join-Path $ResourcesDir "0001.ico"
 
 # Dynamic version based on current datetime (yyyy-MM-dd-HHmm)
@@ -98,7 +98,7 @@ foreach ($Target in $Targets) {
             "build",
             "-ldflags", $LdFlags,
             "-o", $OutputPath,
-            "./cmd/clusterctl"
+            "./cmd/dswrmctl"
         )
 
         $Result = & go @BuildArgs 2>&1

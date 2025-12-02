@@ -316,18 +316,22 @@ func Deploy(ctx context.Context, cfg *config.Config) error {
 }
 
 // Teardown orchestrates the complete cluster teardown from the configuration.
-func Teardown(ctx context.Context, cfg *config.Config, removeOverlays bool) error {
+func Teardown(ctx context.Context, cfg *config.Config, disconnectOverlays bool) error {
 	log := logging.L().With("component", "teardown")
 
 	startTime := time.Now()
 	ds := cfg.GetDistributedStorage()
+	decom := cfg.GetDecommissioning()
 
-	log.Infow("🔥 Starting cluster teardown",
+	// Determine if storage should be removed (decommissioning.removeStorage overrides forceRecreation)
+	removeStorage := decom.ShouldRemoveStorage(ds)
+
+	log.Infow("🔥 Starting cluster decommissioning",
 		"clusterName", cfg.GlobalSettings.ClusterName,
 		"nodes", len(cfg.Nodes),
-		"removeOverlays", removeOverlays,
-		"storageEnabled", ds.Enabled,
-		"storageForceRecreation", ds.ForceRecreation,
+		"disconnectOverlays", disconnectOverlays,
+		"removeStorage", removeStorage,
+		"removeDockerSwarm", decom.ShouldRemoveDockerSwarm(),
 		"startTime", startTime.Format(time.RFC3339),
 	)
 
@@ -378,37 +382,37 @@ func Teardown(ctx context.Context, cfg *config.Config, removeOverlays bool) erro
 		log.Infow("Phase 4: Skipping storage unmount (not enabled)")
 	}
 
-	// Phase 5: Teardown distributed storage cluster if forceRecreation is enabled
-	if ds.Enabled && ds.ForceRecreation && len(storageNodes) > 0 {
+	// Phase 5: Teardown distributed storage cluster if removeStorage is enabled
+	if ds.Enabled && removeStorage && len(storageNodes) > 0 {
 		log.Infow("Phase 5: Tearing down distributed storage cluster")
 		if err := teardownDistributedStorage(ctx, sshPool, storageNodes, cfg); err != nil {
 			log.Warnw("failed to teardown distributed storage", "error", err)
 		} else {
 			log.Infow("✅ Distributed storage cluster removed")
 		}
-	} else if ds.Enabled && !ds.ForceRecreation {
-		log.Infow("Phase 5: Skipping storage teardown (forceRecreation=false in config)")
+	} else if ds.Enabled && !removeStorage {
+		log.Infow("Phase 5: Skipping storage teardown (decommissioning.removeStorage=false)")
 	} else {
 		log.Infow("Phase 5: Skipping storage teardown (not enabled)")
 	}
 
-	// Phase 6: Remove overlay networks if requested
-	if removeOverlays {
-		log.Infow("Phase 6: Removing overlay networks")
+	// Phase 6: Disconnect overlay networks if requested
+	if disconnectOverlays {
+		log.Infow("Phase 6: Disconnecting overlay networks")
 		if err := removeOverlayNetworks(ctx, sshPool, primaryManager); err != nil {
-			log.Warnw("failed to remove overlay networks", "error", err)
+			log.Warnw("failed to disconnect overlay networks", "error", err)
 		} else {
-			log.Infow("✅ Overlay networks removed")
+			log.Infow("✅ Overlay networks disconnected")
 		}
 	} else {
-		log.Infow("Phase 6: Skipping overlay network removal (use -remove-overlays to remove)")
+		log.Infow("Phase 6: Skipping overlay disconnect (decommissioning.disconnectOverlays=false)")
 	}
 
 	// Calculate final metrics
 	endTime := time.Now()
 	duration := endTime.Sub(startTime)
 
-	log.Infow("🎉 Cluster teardown complete!",
+	log.Infow("🎉 Cluster decommissioning complete!",
 		"totalDuration", duration.String(),
 		"startTime", startTime.Format(time.RFC3339),
 		"endTime", endTime.Format(time.RFC3339),

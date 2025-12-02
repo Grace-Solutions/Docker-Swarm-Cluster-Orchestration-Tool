@@ -139,6 +139,28 @@ type ScriptCondition struct {
 	Negate   bool   `json:"negate"`         // Negate the result of this condition (default: false)
 }
 
+// Decommissioning contains settings for cluster teardown/decommissioning.
+type Decommissioning struct {
+	// Enabled triggers cluster teardown instead of deployment.
+	// When true, the cluster will be torn down according to the settings below.
+	// Default: false
+	Enabled bool `json:"enabled"`
+
+	// DisconnectOverlays removes overlay network agents during teardown.
+	// WARNING: This may break SSH connectivity if you're connected via the overlay.
+	// Default: false
+	DisconnectOverlays bool `json:"disconnectOverlays"`
+
+	// RemoveStorage tears down the distributed storage cluster.
+	// This is also controlled by distributedStorage.forceRecreation.
+	// Default: uses distributedStorage.forceRecreation value
+	RemoveStorage *bool `json:"removeStorage,omitempty"`
+
+	// RemoveDockerSwarm removes Docker Swarm configuration from all nodes.
+	// Default: true
+	RemoveDockerSwarm *bool `json:"removeDockerSwarm,omitempty"`
+}
+
 // GlobalSettings contains cluster-wide configuration.
 type GlobalSettings struct {
 	ClusterName                    string             `json:"clusterName"`                    // Cluster name (required)
@@ -150,6 +172,7 @@ type GlobalSettings struct {
 	PreScripts                     []ScriptConfig     `json:"preScripts"`                     // Scripts to execute before deployment
 	PostScripts                    []ScriptConfig     `json:"postScripts"`                    // Scripts to execute after deployment
 	RemoveSSHPublicKeyOnCompletion bool               `json:"removeSSHPublicKeyOnCompletion"` // Remove SSH public key from nodes on completion (default: false)
+	Decommissioning                Decommissioning    `json:"decommissioning"`                // Cluster teardown/decommissioning settings
 }
 
 // NodeConfig represents a single node's configuration.
@@ -351,4 +374,32 @@ func (c *Config) GetDistributedStorage() *DistributedStorage {
 // IsStorageEnabled returns true if distributed storage is enabled globally.
 func (c *Config) IsStorageEnabled() bool {
 	return c.GlobalSettings.DistributedStorage.Enabled
+}
+
+// GetDecommissioning returns the decommissioning configuration.
+func (c *Config) GetDecommissioning() *Decommissioning {
+	return &c.GlobalSettings.Decommissioning
+}
+
+// IsDecommissioning returns true if decommissioning mode is enabled.
+func (c *Config) IsDecommissioning() bool {
+	return c.GlobalSettings.Decommissioning.Enabled
+}
+
+// ShouldRemoveStorage returns true if storage should be removed during decommissioning.
+// Falls back to distributedStorage.forceRecreation if not explicitly set.
+func (d *Decommissioning) ShouldRemoveStorage(ds *DistributedStorage) bool {
+	if d.RemoveStorage != nil {
+		return *d.RemoveStorage
+	}
+	return ds.ForceRecreation
+}
+
+// ShouldRemoveDockerSwarm returns true if Docker Swarm should be removed during decommissioning.
+// Defaults to true if not explicitly set.
+func (d *Decommissioning) ShouldRemoveDockerSwarm() bool {
+	if d.RemoveDockerSwarm != nil {
+		return *d.RemoveDockerSwarm
+	}
+	return true
 }

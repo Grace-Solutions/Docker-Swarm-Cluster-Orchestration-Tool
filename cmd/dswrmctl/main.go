@@ -36,10 +36,8 @@ func main() {
 
 	// Parse flags
 	fs := flag.NewFlagSet(BinaryName, flag.ExitOnError)
-	configPath := fs.String("config", "", "Path to JSON configuration file (default: dswrmctl.json in binary directory)")
+	configPath := fs.String("configpath", "", "Path to JSON configuration file (default: dswrmctl.json in binary directory)")
 	dryRun := fs.Bool("dry-run", false, "Validate configuration without deploying")
-	teardown := fs.Bool("teardown", false, "Teardown/reset the cluster")
-	removeOverlays := fs.Bool("remove-overlays", false, "Remove overlay networks during teardown (may break connectivity)")
 	showHelp := fs.Bool("help", false, "Show help message")
 	showVersion := fs.Bool("version", false, "Show version information")
 
@@ -58,11 +56,7 @@ func main() {
 		return
 	}
 
-	if *teardown {
-		runTeardown(ctx, *configPath, *removeOverlays)
-	} else {
-		runDeploy(ctx, *configPath, *dryRun)
-	}
+	run(ctx, *configPath, *dryRun)
 }
 
 func withSignals(parent context.Context) context.Context {
@@ -121,79 +115,41 @@ Usage:
   %s [flags]
 
 Flags:
-  -config string
+  -configpath string
         Path to JSON configuration file (default: dswrmctl.json in binary directory)
   -dry-run
         Validate configuration without deploying
-  -teardown
-        Teardown/reset the cluster (removes services, swarm, optionally networks and storage)
-  -remove-overlays
-        Remove overlay networks during teardown (may break connectivity, use with caution)
   -version
         Show version information
   -help
         Show this help message
 
-Notes:
-  Distributed storage teardown is controlled by the "globalSettings.distributedStorage.forceRecreation"
-  setting in the configuration file. Set it to true to allow storage removal during teardown.
+Execution Mode:
+  The execution mode is controlled by the configuration file:
+
+  Deploy (default):
+    "globalSettings.decommissioning.enabled": false
+
+  Decommission/Teardown:
+    "globalSettings.decommissioning.enabled": true
+    "globalSettings.decommissioning.disconnectOverlays": true/false
+    "globalSettings.decommissioning.removeStorage": true/false (defaults to forceRecreation)
+    "globalSettings.decommissioning.removeDockerSwarm": true/false (default: true)
 
 Examples:
   # Deploy cluster
-  %s -config cluster.json
+  %s -configpath cluster.json
 
   # Validate configuration
-  %s -config cluster.json -dry-run
-
-  # Teardown cluster (honors distributedStorage.forceRecreation setting)
-  %s -config cluster.json -teardown
-
-  # Full teardown (removes overlay networks as well)
-  %s -config cluster.json -teardown -remove-overlays
+  %s -configpath cluster.json -dry-run
 
 For configuration examples, see dswrmctl.json.example
 
-`, BinaryName, Version, BuildTime, BinaryName, BinaryName, BinaryName, BinaryName, BinaryName)
+`, BinaryName, Version, BuildTime, BinaryName, BinaryName, BinaryName)
 }
 
-func runDeploy(ctx context.Context, configPath string, dryRun bool) {
-	log := logging.L().With("command", "deploy")
-
-	// Load configuration
-	log.Infow("loading configuration", "configPath", configPath)
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		log.Errorw("failed to load configuration")
-		fmt.Fprintf(os.Stderr, "\nError:\n  %s\n\n", formatError(err))
-		os.Exit(1)
-	}
-
-	log.Infow("configuration loaded successfully",
-		"configFile", cfg.ConfigPath,
-		"clusterName", cfg.GlobalSettings.ClusterName,
-		"nodes", len(cfg.Nodes),
-		"overlayProvider", cfg.GlobalSettings.OverlayProvider,
-		"preScripts", len(cfg.GlobalSettings.PreScripts),
-		"postScripts", len(cfg.GlobalSettings.PostScripts),
-	)
-
-	if dryRun {
-		log.Infow("dry-run mode: configuration is valid")
-		return
-	}
-
-	// Run deployment
-	if err := deployer.Deploy(ctx, cfg); err != nil {
-		log.Errorw("deployment failed")
-		fmt.Fprintf(os.Stderr, "\nError:\n  %s\n\n", formatError(err))
-		os.Exit(1)
-	}
-
-	log.Infow("✅ Deployment completed successfully!")
-}
-
-func runTeardown(ctx context.Context, configPath string, removeOverlays bool) {
-	log := logging.L().With("command", "teardown")
+func run(ctx context.Context, configPath string, dryRun bool) {
+	log := logging.L()
 
 	// Load configuration
 	log.Infow("loading configuration", "configPath", configPath)
@@ -205,20 +161,53 @@ func runTeardown(ctx context.Context, configPath string, removeOverlays bool) {
 	}
 
 	ds := cfg.GetDistributedStorage()
+	decom := cfg.GetDecommissioning()
+
 	log.Infow("configuration loaded successfully",
+		"configFile", cfg.ConfigPath,
 		"clusterName", cfg.GlobalSettings.ClusterName,
 		"nodes", len(cfg.Nodes),
-		"removeOverlays", removeOverlays,
-		"storageEnabled", ds.Enabled,
-		"storageForceRecreation", ds.ForceRecreation,
+		"overlayProvider", cfg.GlobalSettings.OverlayProvider,
+		"decommissioning", decom.Enabled,
 	)
 
-	// Run teardown
-	if err := deployer.Teardown(ctx, cfg, removeOverlays); err != nil {
-		log.Errorw("teardown failed")
-		fmt.Fprintf(os.Stderr, "\nError:\n  %s\n\n", formatError(err))
-		os.Exit(1)
+	if dryRun {
+		log.Infow("dry-run mode: configuration is valid")
+		return
 	}
 
-	log.Infow("teardown completed successfully")
+	// Check execution mode from config
+	if decom.Enabled {
+		// Decommissioning mode
+		log = log.With("command", "decommission")
+		log.Infow("decommissioning mode enabled",
+			"disconnectOverlays", decom.DisconnectOverlays,
+			"removeStorage", decom.ShouldRemoveStorage(ds),
+			"removeDockerSwarm", decom.ShouldRemoveDockerSwarm(),
+		)
+
+		if err := deployer.Teardown(ctx, cfg, decom.DisconnectOverlays); err != nil {
+			log.Errorw("decommissioning failed")
+			fmt.Fprintf(os.Stderr, "\nError:\n  %s\n\n", formatError(err))
+			os.Exit(1)
+		}
+
+		log.Infow("✅ Decommissioning completed successfully!")
+	} else {
+		// Deployment mode
+		log = log.With("command", "deploy")
+		log.Infow("deployment mode",
+			"preScripts", len(cfg.GlobalSettings.PreScripts),
+			"postScripts", len(cfg.GlobalSettings.PostScripts),
+			"storageEnabled", ds.Enabled,
+		)
+
+		if err := deployer.Deploy(ctx, cfg); err != nil {
+			log.Errorw("deployment failed")
+			fmt.Fprintf(os.Stderr, "\nError:\n  %s\n\n", formatError(err))
+			os.Exit(1)
+		}
+
+		log.Infow("✅ Deployment completed successfully!")
+	}
 }
