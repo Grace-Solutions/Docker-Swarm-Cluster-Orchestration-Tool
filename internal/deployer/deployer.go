@@ -153,6 +153,13 @@ func Deploy(ctx context.Context, cfg *config.Config) error {
 			log.Warnw("⚠️ GlusterFS setup skipped - no workers with available disks")
 		} else {
 			log.Infow("✅ GlusterFS setup complete", "activeWorkers", len(validWorkers), "totalWorkers", len(sshGlusterWorkers))
+
+			// Verify GlusterFS replication is working before proceeding
+			log.Infow("→ Verifying GlusterFS replication across nodes")
+			if err := verifyGlusterReplication(ctx, sshPool, validWorkers, cfg.GlobalSettings.GlusterMount); err != nil {
+				return fmt.Errorf("GlusterFS replication verification failed: %w", err)
+			}
+			log.Infow("✅ GlusterFS replication verified - files sync across all nodes")
 		}
 	} else {
 		log.Infow("Phase 6: Skipping GlusterFS (no workers with glusterEnabled)")
@@ -1858,5 +1865,67 @@ func teardownGlusterFS(ctx context.Context, sshPool *ssh.Pool, workers []string,
 	}
 
 	log.Infow("✓ GlusterFS teardown complete")
+	return nil
+}
+
+
+
+// verifyGlusterReplication creates a test file on one node and verifies it appears on all other nodes.
+// This ensures GlusterFS replication is working before proceeding with Docker Swarm setup.
+func verifyGlusterReplication(ctx context.Context, sshPool *ssh.Pool, workers []string, mountPath string) error {
+	log := logging.L().With("component", "gluster-verify")
+
+	if len(workers) < 2 {
+		log.Infow("only one worker, skipping replication verification")
+		return nil
+	}
+
+	// Generate unique test file name
+	testFile := fmt.Sprintf("%s/.gluster-replication-test-%d", mountPath, time.Now().UnixNano())
+	testContent := fmt.Sprintf("replication-test-%d", time.Now().UnixNano())
+
+	// Create test file on first worker
+	sourceWorker := workers[0]
+	createCmd := fmt.Sprintf("echo '%s' > %s", testContent, testFile)
+	log.Infow("creating test file", "worker", sourceWorker, "file", testFile)
+
+	_, stderr, err := sshPool.Run(ctx, sourceWorker, createCmd)
+	if err != nil {
+		return fmt.Errorf("failed to create test file on %s: %w (stderr: %s)", sourceWorker, err, stderr)
+	}
+
+	// Wait a moment for replication
+	time.Sleep(2 * time.Second)
+
+	// Verify file exists and has correct content on all other workers
+	var failedWorkers []string
+	for _, worker := range workers[1:] {
+		readCmd := fmt.Sprintf("cat %s 2>/dev/null || echo 'FILE_NOT_FOUND'", testFile)
+		stdout, _, err := sshPool.Run(ctx, worker, readCmd)
+		content := strings.TrimSpace(stdout)
+
+		if err != nil || content == "FILE_NOT_FOUND" {
+			log.Warnw("test file not found on worker", "worker", worker, "file", testFile)
+			failedWorkers = append(failedWorkers, worker)
+			continue
+		}
+
+		if content != testContent {
+			log.Warnw("test file content mismatch", "worker", worker, "expected", testContent, "got", content)
+			failedWorkers = append(failedWorkers, worker)
+			continue
+		}
+
+		log.Infow("✓ replication verified", "worker", worker)
+	}
+
+	// Cleanup test file on source worker
+	cleanupCmd := fmt.Sprintf("rm -f %s 2>/dev/null || true", testFile)
+	sshPool.Run(ctx, sourceWorker, cleanupCmd)
+
+	if len(failedWorkers) > 0 {
+		return fmt.Errorf("replication failed on %d/%d workers: %v", len(failedWorkers), len(workers)-1, failedWorkers)
+	}
+
 	return nil
 }
