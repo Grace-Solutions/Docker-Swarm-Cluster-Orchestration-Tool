@@ -509,19 +509,16 @@ func (p *MicroCephProvider) EnableRadosGateway(ctx context.Context, sshPool *ssh
 		port = 7480 // Default RGW port
 	}
 
-	// Use first OSD node as primary for commands
+	// Use first OSD node to run the enable command (only needs to run once)
 	primaryOSD := osdNodes[0]
 
-	// Build placement string with all OSD hostnames for HA
-	// Format: --target node1 --target node2 --target node3
-	var placementArgs []string
-	for _, node := range osdNodes {
-		placementArgs = append(placementArgs, "--target", node)
-	}
+	// Build placement string with comma-separated hostnames for HA
+	// Format: --placement=node1,node2,node3
+	placement := strings.Join(osdNodes, ",")
 
-	// Enable RGW with placement on all OSD nodes
-	// microceph enable rgw --target node1 --target node2 ...
-	enableCmd := fmt.Sprintf("microceph enable rgw --port %d %s", port, strings.Join(placementArgs, " "))
+	// Enable RGW with placement on all OSD nodes (run from one node only)
+	// microceph enable rgw --port 7480 --placement=node1,node2,node3
+	enableCmd := fmt.Sprintf("microceph enable rgw --port %d --placement=%s", port, placement)
 	log.Infow("enabling RADOS Gateway on OSD nodes", "command", enableCmd)
 	if _, stderr, err := sshPool.Run(ctx, primaryOSD, enableCmd); err != nil {
 		// Check if already enabled
