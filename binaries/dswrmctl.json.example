@@ -29,14 +29,37 @@
         }
       }
     },
-    "preScripts": [],
-    "postScripts": [],
     "decommissioning": {
       "enabled": false,
       "disconnectOverlays": false,
       "removeStorage": false,
       "removeDockerSwarm": true
-    }
+    },
+    "preScripts": [
+      {
+        "enabled": false,
+        "continueOnError": false,
+        "name": "manager-pre-check",
+        "source": "https://example.com/scripts/manager-pre-check.sh",
+        "parameters": "--verbose",
+        "conditions": [
+          { "property": "role", "operator": "=", "value": "manager", "negate": false }
+        ]
+      }
+    ],
+    "postScripts": [
+      {
+        "enabled": false,
+        "continueOnError": true,
+        "name": "worker-post-setup",
+        "source": "https://example.com/scripts/worker-post-setup.sh",
+        "parameters": "--environment production",
+        "conditions": [
+          { "property": "role", "operator": "=", "value": "worker", "negate": false },
+          { "property": "label.environment", "operator": "=", "value": "production", "negate": false }
+        ]
+      }
+    ]
   },
   "nodes": [
     {
