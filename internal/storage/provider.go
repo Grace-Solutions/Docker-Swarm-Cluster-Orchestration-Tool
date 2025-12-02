@@ -4,6 +4,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"clusterctl/internal/config"
 	"clusterctl/internal/logging"
@@ -53,8 +54,9 @@ type Provider interface {
 	Status(ctx context.Context, sshPool *ssh.Pool, node string) (*ClusterStatus, error)
 
 	// EnableRadosGateway enables the RADOS Gateway (S3-compatible) on specified OSD nodes.
+	// overlayProvider is used for hostname precedence: overlay hostname > overlay IP > private hostname > private IP.
 	// Returns the S3 endpoint URL and credentials.
-	EnableRadosGateway(ctx context.Context, sshPool *ssh.Pool, osdNodes []string, port int) (*RadosGatewayInfo, error)
+	EnableRadosGateway(ctx context.Context, sshPool *ssh.Pool, osdNodes []string, port int, overlayProvider string) (*RadosGatewayInfo, error)
 }
 
 // RadosGatewayInfo contains the S3 endpoint and credentials for RADOS Gateway.
@@ -214,8 +216,9 @@ func SetupCluster(ctx context.Context, sshPool *ssh.Pool, provider Provider, man
 	// Step 8: Enable RADOS Gateway (S3) on OSD nodes if configured
 	mcCfg := ds.Providers.MicroCeph
 	if mcCfg.EnableRadosGateway && len(workers) > 0 {
-		log.Infow("→ Step 8: Enabling RADOS Gateway (S3) on OSD nodes", "port", mcCfg.RadosGatewayPort, "nodes", len(workers))
-		rgwInfo, err := provider.EnableRadosGateway(ctx, sshPool, workers, mcCfg.RadosGatewayPort)
+		overlayProvider := strings.ToLower(strings.TrimSpace(cfg.GlobalSettings.OverlayProvider))
+		log.Infow("→ Step 8: Enabling RADOS Gateway (S3) on OSD nodes", "port", mcCfg.RadosGatewayPort, "nodes", len(workers), "overlayProvider", overlayProvider)
+		rgwInfo, err := provider.EnableRadosGateway(ctx, sshPool, workers, mcCfg.RadosGatewayPort, overlayProvider)
 		if err != nil {
 			return fmt.Errorf("failed to enable RADOS Gateway: %w", err)
 		}

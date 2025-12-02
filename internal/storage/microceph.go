@@ -499,8 +499,9 @@ func (p *MicroCephProvider) Status(ctx context.Context, sshPool *ssh.Pool, node 
 
 // EnableRadosGateway enables RADOS Gateway (S3-compatible) on the specified OSD nodes.
 // RGW is enabled on workers (OSD nodes) only, with placement for HA across multiple nodes.
-func (p *MicroCephProvider) EnableRadosGateway(ctx context.Context, sshPool *ssh.Pool, osdNodes []string, port int) (*RadosGatewayInfo, error) {
-	log := logging.L().With("component", "microceph-rgw", "port", port, "nodes", len(osdNodes))
+// Hostname precedence: overlay hostname > overlay IP > private hostname > private IP.
+func (p *MicroCephProvider) EnableRadosGateway(ctx context.Context, sshPool *ssh.Pool, osdNodes []string, port int, overlayProvider string) (*RadosGatewayInfo, error) {
+	log := logging.L().With("component", "microceph-rgw", "port", port, "nodes", len(osdNodes), "overlayProvider", overlayProvider)
 
 	if len(osdNodes) == 0 {
 		return nil, fmt.Errorf("no OSD nodes provided for RGW")
@@ -548,10 +549,12 @@ func (p *MicroCephProvider) EnableRadosGateway(ctx context.Context, sshPool *ssh
 		return nil, fmt.Errorf("failed to parse S3 user credentials: %w", err)
 	}
 
-	// Build endpoint list using hostnames (with precedence)
+	// Build endpoint list using hostname precedence:
+	// overlay hostname > overlay IP > private hostname > private IP
 	var endpoints []string
 	for _, node := range osdNodes {
-		endpoint := fmt.Sprintf("http://%s:%d", node, port)
+		addr := resolveNodeAddress(ctx, sshPool, node, overlayProvider)
+		endpoint := fmt.Sprintf("http://%s:%d", addr, port)
 		endpoints = append(endpoints, endpoint)
 	}
 
@@ -566,6 +569,76 @@ func (p *MicroCephProvider) EnableRadosGateway(ctx context.Context, sshPool *ssh
 		SecretKey: secretKey,
 		UserID:    userID,
 	}, nil
+}
+
+// resolveNodeAddress resolves the best address for a node with precedence:
+// 1. Overlay hostname (netbird FQDN / tailscale DNSName)
+// 2. Overlay IP (100.x.x.x)
+// 3. Private hostname (system hostname)
+// 4. Private IP (RFC 1918)
+func resolveNodeAddress(ctx context.Context, sshPool *ssh.Pool, node, overlayProvider string) string {
+	log := logging.L().With("component", "resolve-address", "node", node)
+	overlayProvider = strings.ToLower(strings.TrimSpace(overlayProvider))
+
+	// Try overlay hostname first
+	if overlayProvider == "netbird" {
+		stdout, _, err := sshPool.Run(ctx, node, "netbird status --json")
+		if err == nil {
+			var status struct {
+				FQDN      string `json:"fqdn"`
+				NetbirdIP string `json:"netbirdIp"`
+			}
+			if json.Unmarshal([]byte(stdout), &status) == nil {
+				// 1. Overlay hostname
+				if status.FQDN != "" {
+					log.Debugw("using overlay hostname", "node", node, "fqdn", status.FQDN)
+					return status.FQDN
+				}
+				// 2. Overlay IP
+				if status.NetbirdIP != "" {
+					ip := strings.Split(status.NetbirdIP, "/")[0]
+					log.Debugw("using overlay IP", "node", node, "ip", ip)
+					return ip
+				}
+			}
+		}
+	} else if overlayProvider == "tailscale" {
+		stdout, _, err := sshPool.Run(ctx, node, "tailscale status --json")
+		if err == nil {
+			var status struct {
+				Self struct {
+					DNSName      string   `json:"DNSName"`
+					TailscaleIPs []string `json:"TailscaleIPs"`
+				} `json:"Self"`
+			}
+			if json.Unmarshal([]byte(stdout), &status) == nil {
+				// 1. Overlay hostname
+				if status.Self.DNSName != "" {
+					log.Debugw("using overlay hostname", "node", node, "dnsName", status.Self.DNSName)
+					return status.Self.DNSName
+				}
+				// 2. Overlay IP
+				if len(status.Self.TailscaleIPs) > 0 {
+					log.Debugw("using overlay IP", "node", node, "ip", status.Self.TailscaleIPs[0])
+					return status.Self.TailscaleIPs[0]
+				}
+			}
+		}
+	}
+
+	// 3. Private hostname
+	stdout, _, err := sshPool.Run(ctx, node, "hostname -f 2>/dev/null || hostname")
+	if err == nil {
+		hostname := strings.TrimSpace(stdout)
+		if hostname != "" {
+			log.Debugw("using private hostname", "node", node, "hostname", hostname)
+			return hostname
+		}
+	}
+
+	// 4. Private IP (fallback to node as-is, which is typically SSH hostname/IP)
+	log.Debugw("using SSH node address as fallback", "node", node)
+	return node
 }
 
 // parseRadosGWUserKeys extracts access_key and secret_key from radosgw-admin user JSON output.
