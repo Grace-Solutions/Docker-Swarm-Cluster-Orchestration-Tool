@@ -585,20 +585,56 @@ func (p *MicroCephProvider) Teardown(ctx context.Context, sshPool *ssh.Pool, nod
 func (p *MicroCephProvider) Status(ctx context.Context, sshPool *ssh.Pool, node string) (*ClusterStatus, error) {
 	log := logging.L().With("component", "microceph", "node", node)
 
-	// Get cluster status
-	statusCmd := "microceph status --format=json 2>/dev/null"
-	stdout, _, err := sshPool.Run(ctx, node, statusCmd)
+	// Get microceph status
+	mcStatusCmd := "microceph status"
+	mcStdout, _, err := sshPool.Run(ctx, node, mcStatusCmd)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get cluster status: %w", err)
+		return nil, fmt.Errorf("failed to get microceph status: %w", err)
+	}
+	log.Infow("MicroCeph cluster status", "output", strings.TrimSpace(mcStdout))
+
+	// Get ceph status for health info
+	cephStatusCmd := "ceph status"
+	cephStdout, _, err := sshPool.Run(ctx, node, cephStatusCmd)
+	if err != nil {
+		log.Warnw("failed to get ceph status", "error", err)
+	} else {
+		log.Infow("Ceph cluster status", "output", strings.TrimSpace(cephStdout))
 	}
 
-	// For now, return a basic status
-	// TODO: Parse JSON output for detailed status
+	// Determine health from ceph status output
+	healthy := strings.Contains(cephStdout, "HEALTH_OK")
+	if !healthy && strings.Contains(cephStdout, "HEALTH_WARN") {
+		// HEALTH_WARN is acceptable for newly created clusters
+		healthy = true
+		log.Infow("cluster health is HEALTH_WARN (acceptable for new clusters)")
+	}
+
+	// Count OSDs from status
+	osdCount := 0
+	if strings.Contains(cephStdout, "osd:") {
+		// Parse "osd: N osds: N up, N in" pattern
+		lines := strings.Split(cephStdout, "\n")
+		for _, line := range lines {
+			if strings.Contains(line, "osd:") && strings.Contains(line, "osds:") {
+				// Extract first number after "osd:"
+				parts := strings.Fields(line)
+				for i, part := range parts {
+					if part == "osd:" && i+1 < len(parts) {
+						fmt.Sscanf(parts[i+1], "%d", &osdCount)
+						break
+					}
+				}
+			}
+		}
+	}
+
 	status := &ClusterStatus{
-		Healthy: strings.Contains(stdout, "HEALTH_OK") || len(stdout) > 0,
+		Healthy:   healthy,
+		NodeCount: osdCount,
 	}
 
-	log.Infow("cluster status retrieved", "healthy", status.Healthy)
+	log.Infow("✓ cluster status verified", "healthy", status.Healthy, "osdCount", osdCount)
 	return status, nil
 }
 

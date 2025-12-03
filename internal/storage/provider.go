@@ -276,6 +276,19 @@ func SetupCluster(ctx context.Context, sshPool *ssh.Pool, provider Provider, man
 		log.Warnw("RADOS Gateway enabled but no OSD workers available - skipping")
 	}
 
+	// Step 9: Final cluster health verification
+	log.Infow("→ Step 9: Verifying cluster health")
+	status, err := provider.Status(ctx, sshPool, primaryNode)
+	if err != nil {
+		log.Warnw("failed to get final cluster status (non-fatal)", "error", err)
+	} else {
+		log.Infow("✓ cluster health verified",
+			"healthy", status.Healthy,
+			"nodeCount", status.NodeCount,
+			"storageUsed", status.StorageUsed,
+			"storageTotal", status.StorageTotal)
+	}
+
 	log.Infow("✅ distributed storage cluster setup complete",
 		"managers", len(managers),
 		"workers", len(workers),

@@ -17,7 +17,7 @@
       },
       "providers": {
         "microceph": {
-          "snapChannel": "squid/stable",
+          "snapChannel": "reef/stable",
           "enableUpdates": false,
           "mountPath": "/mnt/MicroCephFS/docker-swarm-0001",
           "allowLoopDevices": true,
@@ -25,7 +25,9 @@
           "loopDeviceSizeGB": 16,
           "loopDeviceThinProvision": true,
           "enableRadosGateway": false,
-          "radosGatewayPort": 8080
+          "radosGatewayPort": 7480,
+          "s3BucketName": "",
+          "s3CredentialsFile": ""
         }
       }
     },
