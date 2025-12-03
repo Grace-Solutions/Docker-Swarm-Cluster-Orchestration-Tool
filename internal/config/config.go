@@ -27,9 +27,9 @@ const (
 // and workers as OSD nodes (data storage).
 type MicroCephProviderConfig struct {
 	// SnapChannel is the snap channel to install MicroCeph from.
-	// Available channels: "squid/stable" (default, recommended), "reef/stable", "quincy/stable", "latest/stable", "latest/edge"
-	// Squid is the current LTS release (Ceph 19.x), Reef is 18.x, Quincy is 17.x
-	// Default: "squid/stable"
+	// Available channels: "reef/stable" (default, recommended), "squid/stable", "quincy/stable", "latest/stable", "latest/edge"
+	// Reef is 18.x (stable LTS), Squid is 19.x (newer), Quincy is 17.x (older)
+	// Default: "reef/stable"
 	SnapChannel string `json:"snapChannel"`
 
 	// EnableUpdates enables automatic snap updates for MicroCeph.
@@ -320,10 +320,7 @@ func (c *Config) ApplyDefaults() {
 	// MicroCeph provider defaults
 	mc := &ds.Providers.MicroCeph
 	if mc.SnapChannel == "" {
-		mc.SnapChannel = "latest/stable"
-	}
-	if mc.SnapChannel == "" {
-		mc.SnapChannel = "squid/stable"
+		mc.SnapChannel = "reef/stable"
 	}
 	if mc.MountPath == "" {
 		mc.MountPath = "/mnt/cephfs"
