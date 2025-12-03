@@ -43,7 +43,7 @@
         "source": "https://example.com/scripts/manager-pre-check.sh",
         "parameters": "--verbose",
         "conditions": [
-          { "property": "role", "operator": "=", "value": "manager", "negate": false }
+          { "property": "role", "operator": "=", "value": "tester", "negate": false }
         ]
       }
     ],
@@ -55,8 +55,8 @@
         "source": "https://example.com/scripts/worker-post-setup.sh",
         "parameters": "--environment production",
         "conditions": [
-          { "property": "role", "operator": "=", "value": "worker", "negate": false },
-          { "property": "label.environment", "operator": "=", "value": "production", "negate": false }
+          { "property": "role", "operator": "=", "value": "tester", "negate": false },
+          { "property": "label.environment", "operator": "=", "value": "tester", "negate": false }
         ]
       }
     ]

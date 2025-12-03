@@ -209,10 +209,11 @@ func EnsureKeyPair(keyDir string) (*KeyPair, error) {
 	}
 
 	// Marshal private key to OpenSSH format with password encryption
-	// ssh.MarshalPrivateKey returns a *pem.Block with the private key in OpenSSH format
-	privateKeyPEM, err := ssh.MarshalPrivateKey(crypto.PrivateKey(privateKey), password)
+	// ssh.MarshalPrivateKeyWithPassphrase encrypts the key with the given passphrase
+	// The second parameter is a comment (empty here), third is the passphrase
+	privateKeyPEM, err := ssh.MarshalPrivateKeyWithPassphrase(crypto.PrivateKey(privateKey), "", []byte(password))
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal private key: %w", err)
+		return nil, fmt.Errorf("failed to marshal private key with passphrase: %w", err)
 	}
 
 	// Encode the PEM block to bytes
