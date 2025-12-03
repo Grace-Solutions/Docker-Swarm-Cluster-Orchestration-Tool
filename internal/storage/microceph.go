@@ -60,8 +60,13 @@ func (p *MicroCephProvider) Install(ctx context.Context, sshPool *ssh.Pool, node
 		}
 	}
 
-	// Wait for snap to be ready
-	time.Sleep(2 * time.Second)
+	// Wait for MicroCeph daemon to be ready
+	// The snap needs time to start the microceph.daemon service
+	log.Infow("waiting for MicroCeph daemon to initialize")
+	waitCmd := `for i in $(seq 1 15); do systemctl is-active snap.microceph.daemon.service >/dev/null 2>&1 && exit 0; sleep 2; done; exit 1`
+	if _, _, err := sshPool.Run(ctx, node, waitCmd); err != nil {
+		log.Warnw("MicroCeph daemon may not be active yet (will retry during bootstrap)")
+	}
 
 	log.Infow("✓ MicroCeph installed", "channel", channel, "updatesEnabled", mcCfg.EnableUpdates)
 	return nil
@@ -71,16 +76,43 @@ func (p *MicroCephProvider) Install(ctx context.Context, sshPool *ssh.Pool, node
 func (p *MicroCephProvider) Bootstrap(ctx context.Context, sshPool *ssh.Pool, primaryNode string) error {
 	log := logging.L().With("component", "microceph", "node", primaryNode)
 
-	// Bootstrap the cluster
+	// Wait for MicroCeph daemon to be ready before bootstrapping
+	// The daemon needs time to initialize after snap install
+	log.Infow("waiting for MicroCeph daemon to be ready")
+	waitCmd := `for i in $(seq 1 30); do microceph status >/dev/null 2>&1 && exit 0; echo "waiting for microceph daemon... ($i/30)"; sleep 2; done; exit 1`
+	if _, stderr, err := sshPool.Run(ctx, primaryNode, waitCmd); err != nil {
+		log.Warnw("MicroCeph daemon may not be fully ready, attempting bootstrap anyway", "stderr", stderr)
+	}
+
+	// Bootstrap the cluster with retry logic
+	// The control.socket can take time to become responsive
 	bootstrapCmd := "microceph cluster bootstrap"
 	log.Infow("bootstrapping MicroCeph cluster", "command", bootstrapCmd)
-	if _, stderr, err := sshPool.Run(ctx, primaryNode, bootstrapCmd); err != nil {
+
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		_, stderr, err := sshPool.Run(ctx, primaryNode, bootstrapCmd)
+		if err == nil {
+			break
+		}
 		// Check if already bootstrapped
 		if strings.Contains(stderr, "already") || strings.Contains(stderr, "exists") {
 			log.Infow("cluster already bootstrapped, continuing")
-		} else {
-			return fmt.Errorf("failed to bootstrap cluster: %w (stderr: %s)", err, stderr)
+			lastErr = nil
+			break
 		}
+		// Check for context deadline - this means daemon needs more time
+		if strings.Contains(stderr, "context deadline exceeded") || strings.Contains(stderr, "control.socket") {
+			log.Warnw("MicroCeph daemon not ready, retrying", "attempt", attempt, "maxAttempts", 3)
+			time.Sleep(10 * time.Second)
+			lastErr = fmt.Errorf("failed to bootstrap cluster: %w (stderr: %s)", err, stderr)
+			continue
+		}
+		lastErr = fmt.Errorf("failed to bootstrap cluster: %w (stderr: %s)", err, stderr)
+		break
+	}
+	if lastErr != nil {
+		return lastErr
 	}
 
 	// Configure Ceph network CIDR using overlay/private network detection
