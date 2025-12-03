@@ -97,22 +97,28 @@ func (p *MicroCephProvider) Bootstrap(ctx context.Context, sshPool *ssh.Pool, pr
 		log.Warnw("MicroCeph daemon service not running")
 	}
 
-	// Verify MicroCeph database is ready (microceph status succeeds)
-	log.Infow("verifying MicroCeph database is ready")
-	dbCheckCmd := "microceph status >/dev/null 2>&1 && echo 'ready' || echo 'not ready'"
-	stdout, _, _ = sshPool.Run(ctx, primaryNode, dbCheckCmd)
-	if strings.Contains(stdout, "not ready") {
-		// Wait a bit more for database
-		log.Infow("waiting for MicroCeph database to initialize")
-		waitDbCmd := `for i in $(seq 1 15); do microceph status >/dev/null 2>&1 && exit 0; sleep 2; done; exit 1`
-		if _, _, err := sshPool.Run(ctx, primaryNode, waitDbCmd); err != nil {
-			log.Warnw("MicroCeph database may not be ready, attempting bootstrap anyway")
-		}
+	// Detect the best network for Ceph BEFORE bootstrap
+	// Priority: RFC 6598 overlay (Netbird/Tailscale 100.x.x.x) > RFC 1918 private
+	// This is critical - without --mon-ip, Ceph may bind to wrong interface causing TLS handshake failures
+	log.Infow("detecting network for Ceph cluster binding")
+	netInfo := p.detectNetworkInfo(ctx, sshPool, primaryNode)
+	if netInfo == nil {
+		log.Warnw("could not detect overlay/private network, bootstrap may bind to wrong interface")
+	} else {
+		log.Infow("detected network for Ceph binding", "monIP", netInfo.IP, "clusterNetwork", netInfo.CIDR)
 	}
 
-	// Bootstrap the cluster with retry logic
-	// Use 'microceph cluster bootstrap' for reef/stable channel
+	// Build bootstrap command with network binding options
+	// --mon-ip: IP address for MON service binding
+	// --cluster-network: CIDR for OSD replication traffic
 	bootstrapCmd := "microceph cluster bootstrap"
+	if netInfo != nil {
+		// --microceph-ip: Network address microceph daemon binds to (internal cluster communication)
+		// --mon-ip: Public address for bootstrapping ceph mon service
+		// --cluster-network: Cluster network CIDR for Ceph daemons (OSD replication)
+		bootstrapCmd = fmt.Sprintf("microceph cluster bootstrap --microceph-ip %s --mon-ip %s --cluster-network %s",
+			netInfo.IP, netInfo.IP, netInfo.CIDR)
+	}
 	log.Infow("bootstrapping MicroCeph cluster", "command", bootstrapCmd)
 
 	var lastErr error
@@ -177,9 +183,16 @@ func (p *MicroCephProvider) Bootstrap(ctx context.Context, sshPool *ssh.Pool, pr
 	return nil
 }
 
-// detectNetworkCIDR detects the appropriate network CIDR for Ceph cluster communication.
+// NetworkInfo contains detected network information for Ceph binding
+type NetworkInfo struct {
+	IP   string // The best IP address (e.g., "100.76.132.128")
+	CIDR string // The network CIDR (e.g., "100.76.132.128/16")
+}
+
+// detectNetworkInfo detects the appropriate network IP and CIDR for Ceph cluster communication.
 // Priority: RFC 6598 overlay (100.64.0.0/10) > RFC 1918 private > none
-func (p *MicroCephProvider) detectNetworkCIDR(ctx context.Context, sshPool *ssh.Pool, node string) string {
+// Returns both the IP (for --mon-ip) and CIDR (for --cluster-network)
+func (p *MicroCephProvider) detectNetworkInfo(ctx context.Context, sshPool *ssh.Pool, node string) *NetworkInfo {
 	log := logging.L().With("component", "microceph", "node", node)
 
 	// Get all IPv4 addresses with their CIDR notation
@@ -188,10 +201,10 @@ func (p *MicroCephProvider) detectNetworkCIDR(ctx context.Context, sshPool *ssh.
 	stdout, _, err := sshPool.Run(ctx, node, cmd)
 	if err != nil {
 		log.Warnw("failed to detect network addresses", "error", err)
-		return ""
+		return nil
 	}
 
-	var cgnatCIDR, rfc1918CIDR string
+	var cgnatInfo, rfc1918Info *NetworkInfo
 	lines := strings.Split(strings.TrimSpace(stdout), "\n")
 
 	for _, line := range lines {
@@ -208,41 +221,52 @@ func (p *MicroCephProvider) detectNetworkCIDR(ctx context.Context, sshPool *ssh.
 		// Check RFC 6598 (CGNAT - overlay networks like Netbird/Tailscale)
 		// 100.64.0.0/10
 		if ip[0] == 100 && ip[1] >= 64 && ip[1] <= 127 {
-			cgnatCIDR = cidr
-			log.Debugw("found RFC 6598 overlay network", "cidr", cidr)
+			cgnatInfo = &NetworkInfo{IP: ip.String(), CIDR: cidr}
+			log.Debugw("found RFC 6598 overlay network", "ip", ip.String(), "cidr", cidr)
 			continue
 		}
 
 		// Check RFC 1918 private networks
 		// Priority: 10.0.0.0/8 (Class A) > 172.16.0.0/12 (Class B) > 192.168.0.0/16 (Class C)
 		if ip[0] == 10 {
-			if rfc1918CIDR == "" || !strings.HasPrefix(rfc1918CIDR, "10.") {
-				rfc1918CIDR = cidr
-				log.Debugw("found RFC 1918 Class A network", "cidr", cidr)
+			if rfc1918Info == nil || !strings.HasPrefix(rfc1918Info.CIDR, "10.") {
+				rfc1918Info = &NetworkInfo{IP: ip.String(), CIDR: cidr}
+				log.Debugw("found RFC 1918 Class A network", "ip", ip.String(), "cidr", cidr)
 			}
 		} else if ip[0] == 172 && ip[1] >= 16 && ip[1] <= 31 {
-			if rfc1918CIDR == "" || strings.HasPrefix(rfc1918CIDR, "192.168.") {
-				rfc1918CIDR = cidr
-				log.Debugw("found RFC 1918 Class B network", "cidr", cidr)
+			if rfc1918Info == nil || strings.HasPrefix(rfc1918Info.CIDR, "192.168.") {
+				rfc1918Info = &NetworkInfo{IP: ip.String(), CIDR: cidr}
+				log.Debugw("found RFC 1918 Class B network", "ip", ip.String(), "cidr", cidr)
 			}
 		} else if ip[0] == 192 && ip[1] == 168 {
-			if rfc1918CIDR == "" {
-				rfc1918CIDR = cidr
-				log.Debugw("found RFC 1918 Class C network", "cidr", cidr)
+			if rfc1918Info == nil {
+				rfc1918Info = &NetworkInfo{IP: ip.String(), CIDR: cidr}
+				log.Debugw("found RFC 1918 Class C network", "ip", ip.String(), "cidr", cidr)
 			}
 		}
 	}
 
 	// Priority: RFC 6598 (overlay) > RFC 1918 (private)
-	if cgnatCIDR != "" {
-		log.Infow("using RFC 6598 overlay network for Ceph", "cidr", cgnatCIDR)
-		return cgnatCIDR
+	if cgnatInfo != nil {
+		log.Infow("using RFC 6598 overlay network for Ceph", "ip", cgnatInfo.IP, "cidr", cgnatInfo.CIDR)
+		return cgnatInfo
 	}
-	if rfc1918CIDR != "" {
-		log.Infow("using RFC 1918 private network for Ceph", "cidr", rfc1918CIDR)
-		return rfc1918CIDR
+	if rfc1918Info != nil {
+		log.Infow("using RFC 1918 private network for Ceph", "ip", rfc1918Info.IP, "cidr", rfc1918Info.CIDR)
+		return rfc1918Info
 	}
 
+	return nil
+}
+
+// detectNetworkCIDR detects the appropriate network CIDR for Ceph cluster communication.
+// Priority: RFC 6598 overlay (100.64.0.0/10) > RFC 1918 private > none
+// Wrapper for backward compatibility
+func (p *MicroCephProvider) detectNetworkCIDR(ctx context.Context, sshPool *ssh.Pool, node string) string {
+	info := p.detectNetworkInfo(ctx, sshPool, node)
+	if info != nil {
+		return info.CIDR
+	}
 	return ""
 }
 
