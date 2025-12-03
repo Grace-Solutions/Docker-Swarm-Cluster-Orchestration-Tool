@@ -40,8 +40,16 @@ $CmdDir = Join-Path $RepoRoot "cmd\dswrmctl"
 $IconPath = Join-Path $ResourcesDir "0001.ico"
 
 # Dynamic version based on current datetime (yyyy-MM-dd-HHmm)
-$Version = Get-Date -Format "yyyy-MM-dd-HHmm"
-$BuildTime = Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ"
+$Now = Get-Date
+$Version = $Now.ToString("yyyy-MM-dd-HHmm")
+$BuildTime = $Now.ToString("yyyy-MM-ddTHH:mm:ssZ")
+
+# Version components for Windows resource (yyyy.MM.dd.HHmm)
+$VerMajor = [int]$Now.ToString("yyyy")
+$VerMinor = [int]$Now.ToString("MM")
+$VerPatch = [int]$Now.ToString("dd")
+$VerBuild = [int]$Now.ToString("HHmm")
+$VersionString = "$VerMajor.$VerMinor.$VerPatch.$VerBuild"
 
 Write-Verbose "============================================"
 Write-Verbose "  dswrmctl Build Script"
@@ -109,13 +117,26 @@ foreach ($Target in $Targets) {
         if ($GOOS -eq "windows" -and $HasVersionInfo) {
             Push-Location $CmdDir
             try {
-                # Generate architecture-specific .syso file
+                # Generate architecture-specific .syso file with dynamic version
                 # Go looks for resource.syso or resource_windows_<arch>.syso
                 $SysoFile = "resource.syso"
+                $VerArgs = @(
+                    "-ver-major", $VerMajor,
+                    "-ver-minor", $VerMinor,
+                    "-ver-patch", $VerPatch,
+                    "-ver-build", $VerBuild,
+                    "-product-ver-major", $VerMajor,
+                    "-product-ver-minor", $VerMinor,
+                    "-product-ver-patch", $VerPatch,
+                    "-product-ver-build", $VerBuild,
+                    "-file-version", $VersionString,
+                    "-product-version", $VersionString,
+                    "-o", $SysoFile
+                )
                 if ($GOARCH -eq "amd64") {
-                    $Result = & goversioninfo -64 -o $SysoFile 2>&1
+                    $Result = & goversioninfo -64 @VerArgs 2>&1
                 } elseif ($GOARCH -eq "arm64") {
-                    $Result = & goversioninfo -arm -64 -o $SysoFile 2>&1
+                    $Result = & goversioninfo -arm -64 @VerArgs 2>&1
                 }
                 if ($LASTEXITCODE -ne 0) {
                     Write-Verbose "    Warning: Failed to generate resource: $Result"
