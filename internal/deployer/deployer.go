@@ -571,7 +571,6 @@ func installDependencies(ctx context.Context, cfg *config.Config, sshPool *ssh.P
 	log := logging.L().With("phase", "dependencies")
 
 	enabledNodes := getEnabledNodes(cfg)
-	ds := cfg.GetDistributedStorage()
 	log.Infow("installing dependencies on all nodes", "totalNodes", len(enabledNodes))
 
 	for i, node := range enabledNodes {
@@ -594,14 +593,8 @@ func installDependencies(ctx context.Context, cfg *config.Config, sshPool *ssh.P
 		}
 		nodeLog.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "Docker installed"))
 
-		// Install MicroCeph if storage is enabled on this node
-		if ds.Enabled && node.StorageEnabled {
-			nodeLog.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "installing MicroCeph"))
-			if err := installMicroCeph(ctx, sshPool, node.Hostname, cfg); err != nil {
-				return fmt.Errorf("failed to install MicroCeph on %s: %w", node.Hostname, err)
-			}
-			nodeLog.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "MicroCeph installed"))
-		}
+		// Note: MicroCeph installation is handled in Phase 6 (storage setup) by the provider
+		// to avoid duplicate installation and ensure proper cluster formation
 
 		nodeLog.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "all dependencies installed"))
 	}
@@ -628,68 +621,6 @@ func installDocker(ctx context.Context, sshPool *ssh.Pool, host string) error {
 		}
 		return nil
 	})
-}
-
-// installMicroCeph installs MicroCeph on a node via SSH.
-func installMicroCeph(ctx context.Context, sshPool *ssh.Pool, host string, cfg *config.Config) error {
-	log := logging.L().With("component", "install-microceph", "host", host)
-
-	// Check if MicroCeph is already installed
-	_, _, err := sshPool.Run(ctx, host, "microceph version")
-	if err == nil {
-		log.Infow("MicroCeph already installed")
-		return nil
-	}
-
-	// Get channel from config, default to squid/stable
-	ds := cfg.GetDistributedStorage()
-	mcCfg := ds.Providers.MicroCeph
-	channel := mcCfg.SnapChannel
-	if channel == "" {
-		channel = "squid/stable"
-	}
-
-	log.Infow("installing MicroCeph via snap", "channel", channel)
-
-	// Install MicroCeph using snap (the official installation method)
-	// MicroCeph requires snapd which should be available on Ubuntu
-	installCmd := fmt.Sprintf(`
-# Ensure snapd is installed and running
-apt-get update && apt-get install -y snapd
-systemctl enable snapd
-systemctl start snapd
-
-# Wait for snapd to be ready
-snap wait system seed.loaded
-
-# Install microceph
-snap install microceph --channel=%s
-`, channel)
-
-	// Install with retry logic (snap downloads can be flaky)
-	retryCfg := retry.PackageManagerConfig(fmt.Sprintf("install-microceph-%s", host))
-	err = retry.Do(ctx, retryCfg, func() error {
-		_, stderr, err := sshPool.Run(ctx, host, installCmd)
-		if err != nil {
-			return fmt.Errorf("microceph install failed: %w (stderr: %s)", err, stderr)
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-
-	// Hold snap updates if EnableUpdates is false (default)
-	if !mcCfg.EnableUpdates {
-		holdCmd := "snap refresh --hold microceph"
-		log.Infow("holding MicroCeph updates", "command", holdCmd)
-		if _, stderr, err := sshPool.Run(ctx, host, holdCmd); err != nil {
-			log.Warnw("failed to hold snap updates (non-fatal)", "error", err, "stderr", stderr)
-		}
-	}
-
-	log.Infow("✓ MicroCeph installed", "channel", channel, "updatesHeld", !mcCfg.EnableUpdates)
-	return nil
 }
 
 // configureOverlay configures the overlay network on all enabled nodes idempotently.
@@ -1882,8 +1813,9 @@ func verifyStorageTeardown(ctx context.Context, sshPool *ssh.Pool, node string, 
 		allClean = false
 	}
 
-	// Check 2: No ceph processes should be running
-	procCheck := "pgrep -la ceph 2>/dev/null || true"
+	// Check 2: No ceph processes should be running (excluding kernel worker threads)
+	// Kernel worker threads like [kworker/R-ceph-] are normal and should be ignored
+	procCheck := "pgrep -la ceph 2>/dev/null | grep -v '\\[kworker' || true"
 	stdout, _, _ = sshPool.Run(ctx, node, procCheck)
 	if strings.TrimSpace(stdout) != "" {
 		log.Warnw("Ceph processes still running", "output", strings.TrimSpace(stdout))

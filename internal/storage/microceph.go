@@ -435,6 +435,14 @@ func (p *MicroCephProvider) Unmount(ctx context.Context, sshPool *ssh.Pool, node
 	mountPath := p.GetMountPath()
 	log := logging.L().With("component", "microceph", "node", node, "mountPath", mountPath)
 
+	// Check if mount path is actually mounted
+	checkCmd := fmt.Sprintf("mountpoint -q %s 2>/dev/null && echo 'mounted' || echo 'not mounted'", mountPath)
+	stdout, _, _ := sshPool.Run(ctx, node, checkCmd)
+	if strings.Contains(stdout, "not mounted") {
+		log.Infow("CephFS not mounted, skipping unmount")
+		return nil
+	}
+
 	// Unmount
 	unmountCmd := fmt.Sprintf("umount %s 2>/dev/null || umount -l %s 2>/dev/null || true", mountPath, mountPath)
 	log.Infow("unmounting CephFS", "command", unmountCmd)
@@ -455,6 +463,14 @@ func (p *MicroCephProvider) Unmount(ctx context.Context, sshPool *ssh.Pool, node
 // Teardown removes MicroCeph from a node.
 func (p *MicroCephProvider) Teardown(ctx context.Context, sshPool *ssh.Pool, node string) error {
 	log := logging.L().With("component", "microceph", "node", node)
+
+	// Check if MicroCeph is installed
+	checkCmd := "snap list microceph 2>/dev/null"
+	stdout, _, _ := sshPool.Run(ctx, node, checkCmd)
+	if !strings.Contains(stdout, "microceph") {
+		log.Infow("MicroCeph not installed, skipping removal")
+		return nil
+	}
 
 	// Remove microceph snap with purge
 	removeCmd := "snap remove microceph --purge 2>/dev/null || true"
