@@ -254,18 +254,31 @@ func (p *MicroCephProvider) detectNetworkCIDR(ctx context.Context, sshPool *ssh.
 
 // GenerateJoinToken adds a node to the cluster and returns a join token.
 // For reef/stable MicroCeph, this uses 'microceph cluster add <hostname>'.
+// The hostname is fetched from the joining node to ensure it matches.
 func (p *MicroCephProvider) GenerateJoinToken(ctx context.Context, sshPool *ssh.Pool, primaryNode, joiningNode string) (string, error) {
 	log := logging.L().With("component", "microceph", "primaryNode", primaryNode, "joiningNode", joiningNode)
 
+	// Get the actual hostname from the joining node (microceph uses system hostname)
+	hostnameCmd := "hostname"
+	hostname, _, err := sshPool.Run(ctx, joiningNode, hostnameCmd)
+	if err != nil {
+		return "", fmt.Errorf("failed to get hostname from joining node: %w", err)
+	}
+	hostname = strings.TrimSpace(hostname)
+	if hostname == "" {
+		return "", fmt.Errorf("empty hostname returned from joining node")
+	}
+	log.Infow("resolved joining node hostname", "sshHost", joiningNode, "hostname", hostname)
+
 	// Add node to cluster using 'microceph cluster add' (reef/stable channel)
 	// This returns a join token that must be used on the joining node
-	addCmd := fmt.Sprintf("microceph cluster add %s", joiningNode)
-	log.Infow("generating join token for node", "command", addCmd)
+	addCmd := fmt.Sprintf("microceph cluster add %s", hostname)
+	log.Infow("generating join token for node", "command", addCmd, "hostname", hostname)
 	stdout, stderr, err := sshPool.Run(ctx, primaryNode, addCmd)
 	if err != nil {
 		// Check if node already exists
 		if strings.Contains(stderr, "already") || strings.Contains(stderr, "exists") || strings.Contains(stderr, "is already a cluster member") {
-			log.Infow("node already added to cluster, continuing")
+			log.Infow("node already added to cluster, continuing", "hostname", hostname)
 			// Return empty token - join will be skipped
 			return "", nil
 		}
@@ -276,7 +289,12 @@ func (p *MicroCephProvider) GenerateJoinToken(ctx context.Context, sshPool *ssh.
 	if token == "" {
 		return "", fmt.Errorf("no join token returned from 'microceph cluster add'")
 	}
-	log.Infow("✓ join token generated for node")
+
+	// Log the token for visibility
+	log.Infow("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Infow("JOIN TOKEN GENERATED", "hostname", hostname, "token", token)
+	log.Infow("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
 	return token, nil
 }
 
