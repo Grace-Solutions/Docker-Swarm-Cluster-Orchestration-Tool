@@ -370,6 +370,11 @@ func (p *MicroCephProvider) AddStorage(ctx context.Context, sshPool *ssh.Pool, n
 	// Add physical disks first
 	addedDisks := 0
 	for _, disk := range eligibleDisks {
+		// Best-effort preparation: ensure the disk is not mounted/in-use and is read-write
+		// before asking MicroCeph/Ceph to claim it. This helps avoid bluestore
+		// "Device or resource busy" / malformed label errors on re-runs.
+		p.prepareDiskForMicroCeph(ctx, sshPool, node, disk)
+
 		addCmd := fmt.Sprintf("microceph disk add %s --wipe", disk)
 		log.Infow("adding disk", "disk", disk, "command", addCmd)
 		if _, stderr, err := sshPool.Run(ctx, node, addCmd); err != nil {
@@ -409,6 +414,65 @@ func (p *MicroCephProvider) AddStorage(ctx context.Context, sshPool *ssh.Pool, n
 	}
 
 	return nil
+}
+
+// prepareDiskForMicroCeph performs best-effort cleanup on a disk before running
+// `microceph disk add` against it. The goal is to get the device back to a
+// clean, read-write state by:
+//   - refusing to touch the root filesystem disk
+//   - disabling swap on the disk/its partitions
+//   - unmounting any mountpoints on the disk/its partitions
+//   - forcing the block device back to read-write
+//
+// This function is intentionally forgiving: failures in the preparation script
+// are logged but do not abort the storage add flow.
+func (p *MicroCephProvider) prepareDiskForMicroCeph(ctx context.Context, sshPool *ssh.Pool, node, disk string) {
+	log := logging.L().With("component", "microceph", "node", node)
+
+	script := fmt.Sprintf(`DISK="%s"
+
+echo "preparing disk ${DISK} for MicroCeph (resetting to RW and releasing mounts if any)"
+
+# Show current disk state for diagnostics
+lsblk -dpno NAME,RO,MOUNTPOINT,FSTYPE "${DISK}" 2>/dev/null || true
+lsblk -dpno NAME,RO,MOUNTPOINT,FSTYPE "${DISK}"?* 2>/dev/null || true
+
+# Do not operate on the root filesystem disk even if misconfigured
+ROOT_DEV=$(findmnt -n -o SOURCE / 2>/dev/null || echo "")
+case "${ROOT_DEV}" in
+  "${DISK}"|${DISK}[0-9]*)
+    echo "disk ${DISK} appears to contain the root filesystem - skipping preparation"
+    exit 0
+    ;;
+esac
+
+# Disable swap on this disk or its partitions (if any)
+if [ -f /proc/swaps ]; then
+  awk 'NR>1 {print $1}' /proc/swaps | while read SWAPDEV; do
+    case "${SWAPDEV}" in
+      "${DISK}"|${DISK}[0-9]*)
+        swapoff "${SWAPDEV}" 2>/dev/null || true
+        ;;
+    esac
+  done
+fi
+
+# Unmount any mountpoints on this disk or its partitions (avoids "device busy")
+lsblk -lnpo NAME,MOUNTPOINT "${DISK}" "${DISK}"?* 2>/dev/null | awk '$2 != "" {print $1 " " $2}' | while read DEV MNT; do
+  if [ "${MNT}" != "/" ]; then
+    umount -f "${DEV}" 2>/dev/null || umount -f "${MNT}" 2>/dev/null || true
+  fi
+done
+
+# Ensure the block device is marked read-write
+blockdev --setrw "${DISK}" 2>/dev/null || true
+`, disk)
+
+	cmd := fmt.Sprintf("sh -s << 'EOF'\n%s\nEOF", script)
+	log.Infow("preparing disk before MicroCeph disk add", "disk", disk)
+	if _, stderr, err := sshPool.Run(ctx, node, cmd); err != nil {
+		log.Warnw("disk preparation encountered errors (continuing to microceph disk add)", "disk", disk, "error", err, "stderr", stderr)
+	}
 }
 
 // getEligibleDisks returns disks that match inclusion patterns and don't match exclusion patterns.
