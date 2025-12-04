@@ -150,6 +150,11 @@ func (p *MicroCephProvider) Bootstrap(ctx context.Context, sshPool *ssh.Pool, pr
 	}
 
 	log.Infow("✓ MicroCeph cluster bootstrapped")
+
+	// Show current disk state after bootstrap so operators can see what
+	// MicroCeph thinks is configured/available. Use JSON output so we can
+	// reliably parse and log it.
+	p.logDiskListJSON(ctx, sshPool, primaryNode, "post-bootstrap")
 	return nil
 }
 
@@ -396,13 +401,58 @@ func (p *MicroCephProvider) AddStorage(ctx context.Context, sshPool *ssh.Pool, n
 		// "Device or resource busy" / malformed label errors on re-runs.
 		p.prepareDiskForMicroCeph(ctx, sshPool, node, disk)
 
-		addCmd := fmt.Sprintf("microceph disk add %s --wipe", disk)
-		log.Infow("adding disk", "disk", disk, "command", addCmd)
-		if _, stderr, err := sshPool.Run(ctx, node, addCmd); err != nil {
-			log.Warnw("failed to add disk (may already be in use)", "disk", disk, "error", err, "stderr", stderr)
-		} else {
-			addedDisks++
-		}
+			// Give udev a chance to settle after destructive operations so that
+			// subsequent ceph-osd mkfs does not immediately hit a busy device.
+			settleCmd := "command -v udevadm >/dev/null 2>&1 && udevadm settle || true"
+			if _, stderr, err := sshPool.Run(ctx, node, settleCmd); err != nil {
+				log.Warnw("udevadm settle failed before disk add (continuing)", "disk", disk, "error", err, "stderr", strings.TrimSpace(stderr))
+			}
+
+			// Add the disk with a small retry/backoff window. In practice we've seen
+			// that unmounting and immediately adding can still race with the kernel
+			// or Ceph releasing prior state; a short retry window makes this robust
+			// without requiring manual sleeps between commands.
+			const maxAttempts = 3
+			var lastErr error
+			for attempt := 1; attempt <= maxAttempts; attempt++ {
+				addCmd := fmt.Sprintf("microceph disk add %s --wipe", disk)
+				log.Infow("adding disk", "disk", disk, "command", addCmd, "attempt", attempt, "maxAttempts", maxAttempts)
+				if _, stderr, err := sshPool.Run(ctx, node, addCmd); err != nil {
+					lastErr = err
+
+					// Only retry on errors that are very likely to be transient after
+					// a wipe/unmount sequence. This mirrors the errors observed when
+					// reusing GlusterFS bricks too quickly.
+					trimmed := strings.TrimSpace(stderr)
+					transient := strings.Contains(trimmed, "Device or resource busy") ||
+						strings.Contains(trimmed, "unable to decode label") ||
+						strings.Contains(trimmed, "Malformed input") ||
+						strings.Contains(trimmed, "End of buffer")
+
+					if attempt < maxAttempts && transient {
+						log.Warnw("disk add failed with transient error, will retry after delay",
+							"disk", disk, "attempt", attempt, "maxAttempts", maxAttempts, "stderr", trimmed)
+						// Empirically a short delay (on the order of ~15s) is
+						// sufficient between manual unmount and disk add. Two
+						// retries at ~7s each gives us a similar window without
+						// over-sleeping per disk.
+						time.Sleep(7 * time.Second)
+						continue
+					}
+
+					log.Warnw("failed to add disk (not retrying)", "disk", disk, "error", err, "stderr", trimmed)
+					break
+				}
+
+				// Success
+				lastErr = nil
+				addedDisks++
+				break
+			}
+
+			if lastErr != nil {
+				log.Warnw("failed to add disk after retries", "disk", disk, "error", lastErr)
+			}
 	}
 
 	// If no physical disks were added and loop devices are allowed, add a loop device
@@ -423,18 +473,23 @@ func (p *MicroCephProvider) AddStorage(ctx context.Context, sshPool *ssh.Pool, n
 		// The --data-dir flag specifies where to store the loop file
 		loopSpec := fmt.Sprintf("loop,%dG,1", mcCfg.LoopDeviceSizeGB)
 		addCmd := fmt.Sprintf("microceph disk add %s --data-dir %s", loopSpec, mcCfg.LoopDeviceDirectory)
-		log.Infow("adding loop device", "command", addCmd)
-		if _, stderr, err := sshPool.Run(ctx, node, addCmd); err != nil {
-			return fmt.Errorf("failed to add loop device: %w (stderr: %s)", err, stderr)
+			log.Infow("adding loop device", "command", addCmd)
+			if _, stderr, err := sshPool.Run(ctx, node, addCmd); err != nil {
+				return fmt.Errorf("failed to add loop device: %w (stderr: %s)", err, stderr)
+			}
+			log.Infow("✓ loop device added", "directory", mcCfg.LoopDeviceDirectory, "sizeGB", mcCfg.LoopDeviceSizeGB)
+		} else if addedDisks > 0 {
+			log.Infow("✓ physical disks added", "count", addedDisks)
+		} else {
+			log.Warnw("no storage added - no eligible disks and loop devices not allowed")
 		}
-		log.Infow("✓ loop device added", "directory", mcCfg.LoopDeviceDirectory, "sizeGB", mcCfg.LoopDeviceSizeGB)
-	} else if addedDisks > 0 {
-		log.Infow("✓ physical disks added", "count", addedDisks)
-	} else {
-		log.Warnw("no storage added - no eligible disks and loop devices not allowed")
-	}
 
-	return nil
+		// Always show the current disk state after attempting to add storage so
+		// operators can see which OSDs were actually configured and which disks
+		// remain available.
+		p.logDiskListJSON(ctx, sshPool, node, "post-add-storage")
+
+		return nil
 }
 
 // prepareDiskForMicroCeph performs best-effort OS-level cleanup on a disk
@@ -455,57 +510,74 @@ func (p *MicroCephProvider) AddStorage(ctx context.Context, sshPool *ssh.Pool, n
 func (p *MicroCephProvider) prepareDiskForMicroCeph(ctx context.Context, sshPool *ssh.Pool, node, disk string) {
 	log := logging.L().With("component", "microceph", "node", node)
 
-	script := fmt.Sprintf(`DISK="%s"
+		script := fmt.Sprintf(`DISK="%s"
 
-# Do not operate on the root filesystem disk even if misconfigured
-ROOT_DEV=$(findmnt -n -o SOURCE / 2>/dev/null || echo "")
-case "${ROOT_DEV}" in
-  "${DISK}"|${DISK}[0-9]*)
-	exit 0
-	;;
-esac
+		# Do not operate on the root filesystem disk even if misconfigured
+		ROOT_DEV=$(findmnt -n -o SOURCE / 2>/dev/null || echo "")
+		case "${ROOT_DEV}" in
+		  "${DISK}"|${DISK}[0-9]*)
+			exit 0
+			;;
+		esac
 
-# Disable swap on this disk or its partitions (if any)
-if [ -f /proc/swaps ]; then
-  awk 'NR>1 {print $1}' /proc/swaps | while read SWAPDEV; do
-    case "${SWAPDEV}" in
-      "${DISK}"|${DISK}[0-9]*)
-	swapoff "${SWAPDEV}" 2>/dev/null || true
-	;;
-    esac
-  done
-fi
+		# Disable swap on this disk or its partitions (if any)
+		if [ -f /proc/swaps ]; then
+		  awk 'NR>1 {print $1}' /proc/swaps | while read SWAPDEV; do
+		    case "${SWAPDEV}" in
+		      "${DISK}"|${DISK}[0-9]*)
+			swapoff "${SWAPDEV}" 2>/dev/null || true
+			;;
+		    esac
+		  done
+		fi
 
-# Unmount any mountpoints on this disk or its partitions (avoids "device busy")
-lsblk -lnpo NAME,MOUNTPOINT "${DISK}" "${DISK}"?* 2>/dev/null | awk '$2 != "" {print $1 " " $2}' | while read DEV MNT; do
-  if [ "${MNT}" != "/" ]; then
-	umount -f "${DEV}" 2>/dev/null || umount -f "${MNT}" 2>/dev/null || true
-  fi
-done
+		# Unmount any mountpoints on this disk or its partitions (avoids "device busy").
+		# This is fully dynamic and does not rely on hard-coded mount paths (e.g. GlusterFS bricks).
+		lsblk -lnpo NAME,MOUNTPOINT "${DISK}" "${DISK}"?* 2>/dev/null \
+		  | awk '$2 != "" {print $1 " " $2}' \
+		  | while read DEV MNT; do
+		    if [ "${MNT}" != "/" ]; then
+		      # Try device and mountpoint, with lazy-unmount fallback.
+		      umount -f "${DEV}" 2>/dev/null || \
+		      umount -f "${MNT}" 2>/dev/null || \
+		      umount -fl "${DEV}" 2>/dev/null || \
+		      umount -fl "${MNT}" 2>/dev/null || true
+		    fi
+		  done
 
-# Ensure the block device is marked read-write
-blockdev --setrw "${DISK}" 2>/dev/null || true
+		# As an extra safety net, use findmnt (if available) to detach any remaining mounts
+		# that still reference this block device.
+		if command -v findmnt >/dev/null 2>&1; then
+		  findmnt -Rn -S "${DISK}" 2>/dev/null | awk '{print $1}' | while read MNT; do
+		    if [ "${MNT}" != "/" ]; then
+		      umount -f "${MNT}" 2>/dev/null || umount -fl "${MNT}" 2>/dev/null || true
+		    fi
+		  done
+		fi
 
-# If ceph-volume is available, try to zap any existing Ceph/LVM metadata.
-if command -v ceph-volume >/dev/null 2>&1; then
-  ceph-volume lvm zap --destroy "${DISK}" 2>/dev/null || \
-  ceph-volume raw zap --destroy "${DISK}" 2>/dev/null || true
-fi
+		# Ensure the block device is marked read-write
+		blockdev --setrw "${DISK}" 2>/dev/null || true
 
-# Wipe filesystem signatures and RAID superblocks
-if command -v wipefs >/dev/null 2>&1; then
-  wipefs -af "${DISK}" 2>/dev/null || true
-fi
+		# If ceph-volume is available, try to zap any existing Ceph/LVM metadata.
+		if command -v ceph-volume >/dev/null 2>&1; then
+		  ceph-volume lvm zap --destroy "${DISK}" 2>/dev/null || \
+		  ceph-volume raw zap --destroy "${DISK}" 2>/dev/null || true
+		fi
 
-# Zap partition table / GPT if sgdisk is available
-if command -v sgdisk >/dev/null 2>&1; then
-  sgdisk --zap-all "${DISK}" 2>/dev/null || true
-fi
+		# Wipe filesystem signatures and RAID superblocks
+		if command -v wipefs >/dev/null 2>&1; then
+		  wipefs -af "${DISK}" 2>/dev/null || true
+		fi
 
-# Finally, zero the beginning of the device to clear any remaining labels
-dd if=/dev/zero of="${DISK}" bs=1M count=10 conv=fsync,notrunc oflag=direct 2>/dev/null || true
-sync || true
-`, disk)
+		# Zap partition table / GPT if sgdisk is available
+		if command -v sgdisk >/dev/null 2>&1; then
+		  sgdisk --zap-all "${DISK}" 2>/dev/null || true
+		fi
+
+		# Finally, zero the beginning of the device to clear any remaining labels
+		dd if=/dev/zero of="${DISK}" bs=1M count=10 conv=fsync,notrunc oflag=direct 2>/dev/null || true
+		sync || true
+		`, disk)
 
 	cmd := fmt.Sprintf("sh -s << 'EOF'\n%s\nEOF", script)
 	log.Infow("preparing disk before MicroCeph disk add", "disk", disk)
@@ -749,6 +821,154 @@ func (p *MicroCephProvider) Unmount(ctx context.Context, sshPool *ssh.Pool, node
 	return nil
 }
 
+// microcephDiskList models the JSON output from `microceph disk list --json`.
+type microcephDiskList struct {
+	ConfiguredDisks []microcephConfiguredDisk `json:"ConfiguredDisks"`
+	AvailableDisks  []microcephAvailableDisk  `json:"AvailableDisks"`
+}
+
+type microcephConfiguredDisk struct {
+	OSD      int    `json:"OSD"`
+	Location string `json:"Location"`
+	Path     string `json:"Path"`
+}
+
+type microcephAvailableDisk struct {
+	Model string `json:"Model"`
+	Size  string `json:"Size"`
+	Type  string `json:"Type"`
+	Path  string `json:"Path"`
+}
+
+// cephStatusJSON models the subset of `ceph status --format json` we care
+// about for health and OSD counts. The structure matches Ceph's nested
+// osdmap layout while remaining tolerant of minor version differences.
+type cephStatusJSON struct {
+	Health struct {
+		Status        string `json:"status"`
+		OverallStatus string `json:"overall_status"`
+	} `json:"health"`
+	OSDMap struct {
+		// Some versions nest the actual map under "osdmap".
+		Nested struct {
+			NumOSDs   int `json:"num_osds"`
+			NumUpOSDs int `json:"num_up_osds"`
+			NumInOSDs int `json:"num_in_osds"`
+		} `json:"osdmap"`
+
+		// Other versions expose the counts directly at this level.
+		NumOSDs   int `json:"num_osds"`
+		NumUpOSDs int `json:"num_up_osds"`
+		NumInOSDs int `json:"num_in_osds"`
+	} `json:"osdmap"`
+}
+
+// logDiskListJSON fetches and logs the MicroCeph disk list in JSON form so
+// we have a consistent, machine-readable view of configured and available
+// disks at important points in the lifecycle (post-bootstrap, post-add, etc).
+func (p *MicroCephProvider) logDiskListJSON(ctx context.Context, sshPool *ssh.Pool, node, phase string) {
+	log := logging.L().With("component", "microceph", "node", node)
+
+	cmd := "microceph disk list --json"
+	stdout, stderr, err := sshPool.Run(ctx, node, cmd)
+	if err != nil {
+		log.Warnw("failed to get microceph disk list", "phase", phase, "error", err, "stderr", strings.TrimSpace(stderr))
+		return
+	}
+
+	output := strings.TrimSpace(stdout)
+	if output == "" {
+		log.Warnw("microceph disk list returned empty JSON", "phase", phase)
+		return
+	}
+
+	var dl microcephDiskList
+	if err := json.Unmarshal([]byte(output), &dl); err != nil {
+		log.Warnw("failed to parse microceph disk list JSON", "phase", phase, "error", err, "raw", output)
+		return
+	}
+
+	log.Infow("MicroCeph disk list",
+		"phase", phase,
+		"configuredCount", len(dl.ConfiguredDisks),
+		"availableCount", len(dl.AvailableDisks),
+		"configured", dl.ConfiguredDisks,
+		"available", dl.AvailableDisks,
+	)
+}
+
+// removeOSDsForNode removes any configured OSDs whose LOCATION matches this
+// node. This is used during teardown so that OSDs are cleanly removed from
+// the MicroCeph cluster before the snap and data directories are purged.
+func (p *MicroCephProvider) removeOSDsForNode(ctx context.Context, sshPool *ssh.Pool, node string) {
+	log := logging.L().With("component", "microceph", "node", node)
+
+	// Determine the node's hostname as MicroCeph sees it in the LOCATION
+	// column. We match against both the FQDN and the short hostname.
+	hostnameCmd := "hostname -f 2>/dev/null || hostname"
+	hostnameOut, _, err := sshPool.Run(ctx, node, hostnameCmd)
+	if err != nil {
+		log.Warnw("failed to determine hostname for OSD removal (will fall back to SSH node name)", "error", err)
+	}
+	fullHostname := strings.TrimSpace(hostnameOut)
+	shortHostname := fullHostname
+	if idx := strings.Index(fullHostname, "."); idx > 0 {
+		shortHostname = fullHostname[:idx]
+	}
+
+	cmd := "microceph disk list --json"
+	stdout, stderr, err := sshPool.Run(ctx, node, cmd)
+	if err != nil {
+		log.Warnw("failed to get microceph disk list before OSD removal", "error", err, "stderr", strings.TrimSpace(stderr))
+		return
+	}
+
+	var dl microcephDiskList
+	if err := json.Unmarshal([]byte(stdout), &dl); err != nil {
+		log.Warnw("failed to parse microceph disk list JSON before OSD removal", "error", err)
+		return
+	}
+
+	if len(dl.ConfiguredDisks) == 0 {
+		log.Infow("no configured OSD disks found for removal")
+		return
+	}
+
+	var osdsForNode []microcephConfiguredDisk
+	for _, d := range dl.ConfiguredDisks {
+		if d.Location == "" {
+			continue
+		}
+
+		if fullHostname != "" && d.Location == fullHostname {
+			osdsForNode = append(osdsForNode, d)
+			continue
+		}
+		if shortHostname != "" && d.Location == shortHostname {
+			osdsForNode = append(osdsForNode, d)
+			continue
+		}
+		if d.Location == node {
+			osdsForNode = append(osdsForNode, d)
+		}
+	}
+
+	if len(osdsForNode) == 0 {
+		log.Infow("no configured OSDs associated with this node", "fullHostname", fullHostname, "shortHostname", shortHostname)
+		return
+	}
+
+	for _, d := range osdsForNode {
+		removeCmd := fmt.Sprintf("microceph disk remove %d --bypass-safety-checks", d.OSD)
+		log.Infow("removing MicroCeph OSD disk for node", "osd", d.OSD, "location", d.Location, "path", d.Path, "command", removeCmd)
+		if _, stderr, err := sshPool.Run(ctx, node, removeCmd); err != nil {
+			// If the OSD was already removed or the cluster has been torn
+			// down, treat this as best-effort and continue.
+			log.Warnw("failed to remove OSD disk (continuing)", "osd", d.OSD, "error", err, "stderr", strings.TrimSpace(stderr))
+		}
+	}
+}
+
 // Teardown removes MicroCeph from a node.
 func (p *MicroCephProvider) Teardown(ctx context.Context, sshPool *ssh.Pool, node string) error {
 	log := logging.L().With("component", "microceph", "node", node)
@@ -760,6 +980,12 @@ func (p *MicroCephProvider) Teardown(ctx context.Context, sshPool *ssh.Pool, nod
 		log.Infow("MicroCeph not installed, skipping removal")
 		return nil
 	}
+
+	// Before tearing down the snap and data directories, cleanly remove any
+	// OSDs that are hosted on this node. This uses `microceph disk remove
+	// <OSD> --bypass-safety-checks` with the OSD IDs discovered from the
+	// JSON disk list so we always associate the correct IDs with each node.
+	p.removeOSDsForNode(ctx, sshPool, node)
 
 	// Remove microceph snap with purge
 	removeCmd := "snap remove microceph --purge 2>/dev/null || true"
@@ -785,44 +1011,105 @@ func (p *MicroCephProvider) Teardown(ctx context.Context, sshPool *ssh.Pool, nod
 func (p *MicroCephProvider) Status(ctx context.Context, sshPool *ssh.Pool, node string) (*ClusterStatus, error) {
 	log := logging.L().With("component", "microceph", "node", node)
 
-	// Get microceph status
+	// Always log the human-readable MicroCeph status for operators.
 	mcStatusCmd := "microceph status"
-	mcStdout, _, err := sshPool.Run(ctx, node, mcStatusCmd)
+	mcStdout, mcStderr, err := sshPool.Run(ctx, node, mcStatusCmd)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get microceph status: %w", err)
+		return nil, fmt.Errorf("failed to get microceph status: %w (stderr: %s)", err, strings.TrimSpace(mcStderr))
 	}
 	log.Infow("MicroCeph cluster status", "output", strings.TrimSpace(mcStdout))
 
-	// Get ceph status for health info
-	cephStatusCmd := "ceph status"
-	cephStdout, _, err := sshPool.Run(ctx, node, cephStatusCmd)
-	if err != nil {
-		log.Warnw("failed to get ceph status", "error", err)
+	// Prefer structured JSON from Ceph wherever possible so we do not rely on
+	// brittle text parsing. We fall back to the old text-based approach only if
+	// JSON is unavailable or cannot be parsed.
+	var (
+		healthy  bool
+		osdCount int
+	)
+
+	cephStatusJSONCmd := "ceph status --format json"
+	cephJSONOut, cephJSONErr, err := sshPool.Run(ctx, node, cephStatusJSONCmd)
+	if err == nil && strings.TrimSpace(cephJSONOut) != "" {
+		var cs cephStatusJSON
+		if jsonErr := json.Unmarshal([]byte(cephJSONOut), &cs); jsonErr == nil {
+			// Determine health from JSON
+			healthStatus := strings.TrimSpace(cs.Health.Status)
+			if healthStatus == "" {
+				healthStatus = strings.TrimSpace(cs.Health.OverallStatus)
+			}
+
+			// HEALTH_OK is obviously fine; we also continue to treat HEALTH_WARN as
+			// acceptable for freshly created clusters, matching previous behaviour.
+			switch healthStatus {
+			case "HEALTH_OK":
+				healthy = true
+			case "HEALTH_WARN":
+				healthy = true
+				log.Infow("cluster health is HEALTH_WARN (acceptable for new clusters)")
+			default:
+				healthy = false
+			}
+
+			// Prefer nested OSD map counts when available, fall back to the top
+			// level otherwise.
+			if cs.OSDMap.Nested.NumOSDs > 0 {
+				osdCount = cs.OSDMap.Nested.NumOSDs
+			} else {
+				osdCount = cs.OSDMap.NumOSDs
+			}
+
+			log.Infow("Ceph cluster status (json)",
+				"health", healthStatus,
+				"osdCount", osdCount,
+				"osdsUp", cs.OSDMap.Nested.NumUpOSDs+cs.OSDMap.NumUpOSDs,
+				"osdsIn", cs.OSDMap.Nested.NumInOSDs+cs.OSDMap.NumInOSDs,
+			)
+		} else {
+			log.Warnw("failed to parse ceph status JSON; falling back to text status",
+				"error", jsonErr,
+			)
+		}
 	} else {
-		log.Infow("Ceph cluster status", "output", strings.TrimSpace(cephStdout))
+		if err != nil {
+			log.Warnw("failed to get ceph status JSON; falling back to text status",
+				"error", err, "stderr", strings.TrimSpace(cephJSONErr))
+		} else {
+			log.Warnw("empty ceph status JSON output; falling back to text status")
+		}
 	}
 
-	// Determine health from ceph status output
-	healthy := strings.Contains(cephStdout, "HEALTH_OK")
-	if !healthy && strings.Contains(cephStdout, "HEALTH_WARN") {
-		// HEALTH_WARN is acceptable for newly created clusters
-		healthy = true
-		log.Infow("cluster health is HEALTH_WARN (acceptable for new clusters)")
-	}
+	// If JSON-based parsing did not yield anything (older Ceph or unexpected
+	// output), fall back to the existing text-based approach so we still return
+	// a useful status.
+	if !healthy && osdCount == 0 {
+		cephStatusCmd := "ceph status"
+		cephStdout, cephStderr, err := sshPool.Run(ctx, node, cephStatusCmd)
+		if err != nil {
+			log.Warnw("failed to get ceph status (text)", "error", err, "stderr", strings.TrimSpace(cephStderr))
+		} else {
+			log.Infow("Ceph cluster status (text)", "output", strings.TrimSpace(cephStdout))
 
-	// Count OSDs from status
-	osdCount := 0
-	if strings.Contains(cephStdout, "osd:") {
-		// Parse "osd: N osds: N up, N in" pattern
-		lines := strings.Split(cephStdout, "\n")
-		for _, line := range lines {
-			if strings.Contains(line, "osd:") && strings.Contains(line, "osds:") {
-				// Extract first number after "osd:"
-				parts := strings.Fields(line)
-				for i, part := range parts {
-					if part == "osd:" && i+1 < len(parts) {
-						fmt.Sscanf(parts[i+1], "%d", &osdCount)
-						break
+			// Determine health from ceph status output
+			if strings.Contains(cephStdout, "HEALTH_OK") {
+				healthy = true
+			} else if strings.Contains(cephStdout, "HEALTH_WARN") {
+				// HEALTH_WARN is acceptable for newly created clusters
+				healthy = true
+				log.Infow("cluster health is HEALTH_WARN (acceptable for new clusters)")
+			}
+
+			// Count OSDs from status: parse "osd: N osds: N up, N in" pattern
+			if strings.Contains(cephStdout, "osd:") {
+				lines := strings.Split(cephStdout, "\n")
+				for _, line := range lines {
+					if strings.Contains(line, "osd:") && strings.Contains(line, "osds:") {
+						parts := strings.Fields(line)
+						for i, part := range parts {
+							if part == "osd:" && i+1 < len(parts) {
+								fmt.Sscanf(parts[i+1], "%d", &osdCount)
+								break
+							}
+						}
 					}
 				}
 			}
