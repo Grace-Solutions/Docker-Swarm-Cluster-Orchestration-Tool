@@ -946,30 +946,31 @@ func (p *MicroCephProvider) MountWithCredentials(ctx context.Context, sshPool *s
 		return nil
 	}
 
-	// Mount CephFS using provided credentials. Keep fs=<poolName> so we target
-	// the correct filesystem by name.
-	mountCmd := fmt.Sprintf("mount -t ceph %s:/ %s -o name=admin,secret=%s,fs=%s,_netdev",
-		creds.MonAddrs, mountPath, creds.AdminKey, poolName)
-	log.Infow("mounting CephFS", "monAddrs", creds.MonAddrs, "fs", poolName, "mountPath", mountPath)
+		// Mount CephFS using provided credentials. Follow the user-specified
+		// recipe closely and rely on Ceph's default filesystem selection (when a
+		// single filesystem exists) instead of passing an explicit fs=<name>
+		// option. This keeps the mount options compatible with a wider range of
+		// Ceph client versions and matches the documented fstab format:
+		//   <MON_IPS>:/ <mountPath> ceph name=admin,secret=<KEY>,_netdev 0 0
+		mountCmd := fmt.Sprintf("sudo mount -t ceph %s:/ %s -o name=admin,secret=%s,_netdev",
+			creds.MonAddrs, mountPath, creds.AdminKey)
+		log.Infow("mounting CephFS", "monAddrs", creds.MonAddrs, "mountPath", mountPath)
 	if _, stderr, err := sshPool.Run(ctx, node, mountCmd); err != nil {
+			// Capture recent kernel messages to aid in diagnosing mount failures
+			// such as "wrong fs type, bad option, bad superblock" without requiring
+			// an additional manual test cycle.
+			dmesgCmd := "dmesg | tail -n 50 || true"
+			if dmesgOut, _, dmesgErr := sshPool.Run(ctx, node, dmesgCmd); dmesgErr == nil {
+				log.Warnw("dmesg output after CephFS mount failure", "dmesgTail", strings.TrimSpace(dmesgOut))
+			} else {
+				log.Warnw("failed to collect dmesg after CephFS mount failure", "error", dmesgErr)
+			}
+			
 		return fmt.Errorf("failed to mount CephFS: %w (stderr: %s)", err, stderr)
 	}
-
-	// Add to fstab for persistence
-	fstabEntry := fmt.Sprintf("%s:/ %s ceph name=admin,secret=%s,fs=%s,_netdev 0 0",
-		creds.MonAddrs, mountPath, creds.AdminKey, poolName)
-	fstabCmd := fmt.Sprintf("grep -q '%s' /etc/fstab || echo '%s' >> /etc/fstab", mountPath, fstabEntry)
-	if _, _, err := sshPool.Run(ctx, node, fstabCmd); err != nil {
-		log.Warnw("failed to add fstab entry", "error", err)
-	}
-
-	// Reload systemd to pick up fstab changes (legacy behaviour)
-	if _, _, err := sshPool.Run(ctx, node, "systemctl daemon-reload"); err != nil {
-		log.Warnw("failed to reload systemd daemon", "error", err)
-	}
-
-	log.Infow("✓ CephFS mounted", "mountPath", mountPath)
-	return nil
+		
+		log.Infow("✓ CephFS mounted", "mountPath", mountPath)
+		return nil
 }
 
 // ensureFstabAndReload ensures that the correct CephFS entry is present in
@@ -984,9 +985,12 @@ func (p *MicroCephProvider) ensureFstabAndReload(
 ) error {
 	log := logging.L().With("component", "microceph", "node", node, "mountPath", mountPath)
 
-	// Build the fstab line using MON IPs and the admin key, as requested.
-	fstabEntry := fmt.Sprintf("%s:/ %s ceph name=admin,secret=%s,fs=%s,_netdev 0 0",
-		creds.MonAddrs, mountPath, creds.AdminKey, poolName)
+	// Build the fstab line using MON IPs and the admin key, following the
+	// documented format and relying on Ceph's default filesystem selection
+	// when only a single filesystem exists:
+	//   <MON_IPS>:/ <mountPath> ceph name=admin,secret=<KEY>,_netdev 0 0
+	fstabEntry := fmt.Sprintf("%s:/ %s ceph name=admin,secret=%s,_netdev 0 0",
+		creds.MonAddrs, mountPath, creds.AdminKey)
 
 	// Check if the exact line already exists; if not, append it.
 	checkCmd := fmt.Sprintf("grep -Fxq '%s' /etc/fstab", fstabEntry)
@@ -1007,7 +1011,15 @@ func (p *MicroCephProvider) ensureFstabAndReload(
 	if _, stderr, err := sshPool.Run(ctx, node, "sudo mount -a"); err != nil {
 		combined := strings.TrimSpace(stderr)
 		if !strings.Contains(combined, "already mounted") {
-			log.Warnw("mount -a reported an error", "error", err, "stderr", combined)
+				log.Warnw("mount -a reported an error", "error", err, "stderr", combined)
+				// Capture recent kernel messages to make debugging mount issues easier
+				// without requiring a separate manual dmesg collection step.
+				dmesgCmd := "dmesg | tail -n 50 || true"
+				if dmesgOut, _, dmesgErr := sshPool.Run(ctx, node, dmesgCmd); dmesgErr == nil {
+					log.Warnw("dmesg output after mount -a failure", "dmesgTail", strings.TrimSpace(dmesgOut))
+				} else {
+					log.Warnw("failed to collect dmesg after mount -a failure", "error", dmesgErr)
+				}
 			return fmt.Errorf("mount -a failed: %w (stderr: %s)", err, stderr)
 		}
 		log.Infow("mount -a reported filesystem already mounted", "stderr", combined)
