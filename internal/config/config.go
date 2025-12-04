@@ -192,7 +192,10 @@ type NodeConfig struct {
 	Enabled *bool `json:"enabled"` // Enable this node for deployment (default: true if nil)
 
 	// SSH Connection Settings
-	Hostname              string `json:"hostname"`              // Hostname or IP address (required)
+	// SSHFQDNorIP is the hostname/IP used ONLY for SSH connections.
+	// Infrastructure setup (Docker Swarm, MicroCeph, etc.) uses overlay hostname precedence:
+	// overlay hostname > overlay IP > private hostname > private IP
+	SSHFQDNorIP           string `json:"sshFQDNorIP"`           // SSH connection hostname or IP (required)
 	Username              string `json:"username"`              // SSH username (required, default: "root")
 	Password              string `json:"password"`              // SSH password (optional, use privateKeyPath instead)
 	PrivateKeyPath        string `json:"privateKeyPath"`        // Path to SSH private key (optional, use password instead)
@@ -278,11 +281,11 @@ func (c *Config) Validate() error {
 
 	managerCount := 0
 	for i, node := range c.Nodes {
-		if node.Hostname == "" {
-			return fmt.Errorf("node %d: hostname is required", i)
+		if node.SSHFQDNorIP == "" {
+			return fmt.Errorf("node %d: sshFQDNorIP is required", i)
 		}
 		if node.Role != "manager" && node.Role != "worker" {
-			return fmt.Errorf("node %d (%s): role must be 'manager' or 'worker'", i, node.Hostname)
+			return fmt.Errorf("node %d (%s): role must be 'manager' or 'worker'", i, node.SSHFQDNorIP)
 		}
 		if node.Role == "manager" {
 			managerCount++
@@ -290,7 +293,7 @@ func (c *Config) Validate() error {
 
 		// If not using automatic key pair, require password or privateKeyPath
 		if !node.UseSSHAutomaticKeyPair && node.Password == "" && node.PrivateKeyPath == "" {
-			return fmt.Errorf("node %d (%s): either password, privateKeyPath, or useSSHAutomaticKeyPair must be specified", i, node.Hostname)
+			return fmt.Errorf("node %d (%s): either password, privateKeyPath, or useSSHAutomaticKeyPair must be specified", i, node.SSHFQDNorIP)
 		}
 	}
 

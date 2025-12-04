@@ -109,7 +109,7 @@ type NodeStatus struct {
 
 // NodeInfo contains node metadata for formatted logging.
 type NodeInfo struct {
-	Hostname    string // SSH hostname/IP
+	SSHFQDNorIP string // SSH connection hostname/IP (for display)
 	NewHostname string // Friendly hostname (if set)
 	Role        string // "manager" or "worker"
 }
@@ -155,7 +155,7 @@ func SetupCluster(ctx context.Context, sshPool *ssh.Pool, provider Provider, man
 	fmtNode := func(prefix, node, message string) string {
 		if nodeInfoMap != nil {
 			if info, ok := nodeInfoMap[node]; ok {
-				return logging.FormatNodeMessage(prefix, info.Hostname, info.NewHostname, info.Role, message)
+				return logging.FormatNodeMessage(prefix, info.SSHFQDNorIP, info.NewHostname, info.Role, message)
 			}
 		}
 		return logging.FormatNodeMessage(prefix, node, "", "", message)

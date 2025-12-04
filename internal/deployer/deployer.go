@@ -443,13 +443,13 @@ func prepareSSHKeys(cfg *config.Config) (*sshkeys.KeyPair, error) {
 
 		nodeLog := log.With(
 			"server", fmt.Sprintf("%d/%d", nodeNum, len(nodesToInstall)),
-			"hostname", node.Hostname,
+			"hostname", node.SSHFQDNorIP,
 			"user", node.Username,
 			"port", node.SSHPort,
 			"authMethod", authMethod,
 		)
 
-		nodeLog.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "installing public key for future automatic authentication"))
+		nodeLog.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "installing public key for future automatic authentication"))
 
 		authConfig := ssh.AuthConfig{
 			Username:       node.Username,
@@ -459,7 +459,7 @@ func prepareSSHKeys(cfg *config.Config) (*sshkeys.KeyPair, error) {
 		}
 
 		tempPool := ssh.NewPool(map[string]ssh.AuthConfig{
-			node.Hostname: authConfig,
+			node.SSHFQDNorIP: authConfig,
 		})
 
 		// Install public key
@@ -471,10 +471,10 @@ func prepareSSHKeys(cfg *config.Config) (*sshkeys.KeyPair, error) {
 			strings.TrimSpace(keyPair.PublicKey),
 		)
 
-		if _, stderr, err := tempPool.Run(ctx, node.Hostname, installCmd); err != nil {
-			nodeLog.Warnw(formatNodeMessage("✗", node.Hostname, node.NewHostname, node.Role, "failed to install public key"), "error", err, "stderr", stderr)
+		if _, stderr, err := tempPool.Run(ctx, node.SSHFQDNorIP, installCmd); err != nil {
+			nodeLog.Warnw(formatNodeMessage("✗", node.SSHFQDNorIP, node.NewHostname, node.Role, "failed to install public key"), "error", err, "stderr", stderr)
 		} else {
-			nodeLog.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "public key installed successfully"))
+			nodeLog.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "public key installed successfully"))
 		}
 	}
 
@@ -507,13 +507,13 @@ func createSSHPool(cfg *config.Config, keyPair *sshkeys.KeyPair) (*ssh.Pool, err
 
 		nodeLog := log.With(
 			"server", fmt.Sprintf("%d/%d", nodeNum, len(enabledNodes)),
-			"hostname", node.Hostname,
+			"hostname", node.SSHFQDNorIP,
 			"user", node.Username,
 			"port", node.SSHPort,
 			"authMethod", authMethod,
 		)
 
-		nodeLog.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "configuring SSH connection"))
+		nodeLog.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "configuring SSH connection"))
 
 		authConfig := ssh.AuthConfig{
 			Username: node.Username,
@@ -531,7 +531,7 @@ func createSSHPool(cfg *config.Config, keyPair *sshkeys.KeyPair) (*ssh.Pool, err
 			// Note: User-provided private keys don't use the auto-generated password
 		}
 
-		authConfigs[node.Hostname] = authConfig
+		authConfigs[node.SSHFQDNorIP] = authConfig
 	}
 
 	// Log summary once instead of per-node
@@ -561,25 +561,25 @@ func installDependencies(ctx context.Context, cfg *config.Config, sshPool *ssh.P
 
 		nodeLog := log.With(
 			"server", fmt.Sprintf("%d/%d", nodeNum, len(enabledNodes)),
-			"hostname", node.Hostname,
+			"hostname", node.SSHFQDNorIP,
 			"role", node.Role,
 			"user", node.Username,
 			"port", node.SSHPort,
 		)
 
-		nodeLog.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "starting dependency installation"))
+		nodeLog.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "starting dependency installation"))
 
 		// Install Docker
-		nodeLog.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "installing Docker"))
-		if err := installDocker(ctx, sshPool, node.Hostname); err != nil {
-			return fmt.Errorf("failed to install Docker on %s: %w", node.Hostname, err)
+		nodeLog.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "installing Docker"))
+		if err := installDocker(ctx, sshPool, node.SSHFQDNorIP); err != nil {
+			return fmt.Errorf("failed to install Docker on %s: %w", node.SSHFQDNorIP, err)
 		}
-		nodeLog.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "Docker installed"))
+		nodeLog.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "Docker installed"))
 
 		// Note: MicroCeph installation is handled in Phase 6 (storage setup) by the provider
 		// to avoid duplicate installation and ensure proper cluster formation
 
-		nodeLog.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "all dependencies installed"))
+		nodeLog.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "all dependencies installed"))
 	}
 
 	return nil
@@ -626,17 +626,17 @@ func configureOverlay(ctx context.Context, cfg *config.Config, sshPool *ssh.Pool
 
 		nodeLog := log.With(
 			"server", fmt.Sprintf("%d/%d", nodeNum, len(enabledNodes)),
-			"hostname", node.Hostname,
+			"hostname", node.SSHFQDNorIP,
 			"provider", provider,
 			"user", node.Username,
 			"port", node.SSHPort,
 		)
 
-		nodeLog.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "configuring overlay network"))
+		nodeLog.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "configuring overlay network"))
 		if err := configureOverlayOnNode(ctx, sshPool, node, provider, overlayConfig); err != nil {
-			return fmt.Errorf("failed to configure %s overlay on %s: %w", provider, node.Hostname, err)
+			return fmt.Errorf("failed to configure %s overlay on %s: %w", provider, node.SSHFQDNorIP, err)
 		}
-		nodeLog.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "overlay network configured"))
+		nodeLog.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "overlay network configured"))
 	}
 
 	log.Infow("✅ overlay network configured", "provider", provider)
@@ -708,52 +708,52 @@ func maskSetupKey(fullConfig string) string {
 
 // configureNetbirdOnNode configures Netbird on a single node idempotently.
 func configureNetbirdOnNode(ctx context.Context, sshPool *ssh.Pool, node config.NodeConfig, overlayConfig string) error {
-	log := logging.L().With("node", node.Hostname, "provider", "netbird")
+	log := logging.L().With("node", node.SSHFQDNorIP, "provider", "netbird")
 
 	// Check if netbird is already running
-	log.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "checking netbird status"))
+	log.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "checking netbird status"))
 	checkCmd := "netbird status 2>/dev/null | grep -q 'Status: Connected' && echo 'CONNECTED' || echo 'NOT_CONNECTED'"
-	stdout, _, err := sshPool.Run(ctx, node.Hostname, checkCmd)
+	stdout, _, err := sshPool.Run(ctx, node.SSHFQDNorIP, checkCmd)
 	if err == nil && stdout == "CONNECTED\n" {
-		log.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "netbird already connected, skipping installation"))
+		log.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "netbird already connected, skipping installation"))
 		return nil
 	}
 
 	// Check if netbird is installed
-	log.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "checking if netbird is installed"))
+	log.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "checking if netbird is installed"))
 	checkInstallCmd := "command -v netbird &> /dev/null && echo 'INSTALLED' || echo 'NOT_INSTALLED'"
-	stdout, _, _ = sshPool.Run(ctx, node.Hostname, checkInstallCmd)
+	stdout, _, _ = sshPool.Run(ctx, node.SSHFQDNorIP, checkInstallCmd)
 
 	if stdout != "INSTALLED\n" {
 		// Install netbird if not present (with retry)
 		installURL := "https://pkgs.netbird.io/install.sh"
 		installCmd := fmt.Sprintf("curl -fsSL %s | sh", installURL)
 
-		log.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "netbird not found, downloading and installing"))
-		log.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, fmt.Sprintf("download URL: %s", installURL)))
-		log.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, fmt.Sprintf("install command: %s", installCmd)))
-		log.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "executing installation (this may take 30-60 seconds)..."))
+		log.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "netbird not found, downloading and installing"))
+		log.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, fmt.Sprintf("download URL: %s", installURL)))
+		log.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, fmt.Sprintf("install command: %s", installCmd)))
+		log.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "executing installation (this may take 30-60 seconds)..."))
 
-		retryCfg := retry.NetworkConfig(fmt.Sprintf("install-netbird-%s", node.Hostname))
+		retryCfg := retry.NetworkConfig(fmt.Sprintf("install-netbird-%s", node.SSHFQDNorIP))
 		err = retry.Do(ctx, retryCfg, func() error {
-			_, stderr, err := sshPool.Run(ctx, node.Hostname, installCmd)
+			_, stderr, err := sshPool.Run(ctx, node.SSHFQDNorIP, installCmd)
 			if err != nil {
-				log.Warnw(formatNodeMessage("✗", node.Hostname, node.NewHostname, node.Role, "netbird installation failed"), "error", err, "stderr", stderr)
+				log.Warnw(formatNodeMessage("✗", node.SSHFQDNorIP, node.NewHostname, node.Role, "netbird installation failed"), "error", err, "stderr", stderr)
 				return fmt.Errorf("failed to install netbird: %w (stderr: %s)", err, stderr)
 			}
 			if stderr != "" {
-				log.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "netbird installation completed"), "stderr", stderr)
+				log.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "netbird installation completed"), "stderr", stderr)
 			} else {
-				log.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "netbird installation completed"))
+				log.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "netbird installation completed"))
 			}
 			return nil
 		})
 		if err != nil {
 			return err
 		}
-		log.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "netbird installed successfully"))
+		log.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "netbird installed successfully"))
 	} else {
-		log.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "netbird already installed"))
+		log.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "netbird already installed"))
 	}
 
 	// Start netbird with setup key and flags if provided (with retry)
@@ -766,21 +766,21 @@ func configureNetbirdOnNode(ctx context.Context, sshPool *ssh.Pool, node config.
 		maskedCmd = fmt.Sprintf("netbird up %s", maskSetupKey(overlayConfig))
 	}
 
-	log.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "starting netbird and connecting to network"))
-	log.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, fmt.Sprintf("command: %s", maskedCmd)))
-	log.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "executing netbird up..."))
+	log.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "starting netbird and connecting to network"))
+	log.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, fmt.Sprintf("command: %s", maskedCmd)))
+	log.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "executing netbird up..."))
 
-	retryCfg := retry.NetworkConfig(fmt.Sprintf("start-netbird-%s", node.Hostname))
+	retryCfg := retry.NetworkConfig(fmt.Sprintf("start-netbird-%s", node.SSHFQDNorIP))
 	err = retry.Do(ctx, retryCfg, func() error {
-		_, stderr, err := sshPool.Run(ctx, node.Hostname, upCmd)
+		_, stderr, err := sshPool.Run(ctx, node.SSHFQDNorIP, upCmd)
 		if err != nil {
-			log.Warnw(formatNodeMessage("✗", node.Hostname, node.NewHostname, node.Role, "netbird up failed"), "error", err, "stderr", stderr)
+			log.Warnw(formatNodeMessage("✗", node.SSHFQDNorIP, node.NewHostname, node.Role, "netbird up failed"), "error", err, "stderr", stderr)
 			return fmt.Errorf("failed to start netbird: %w (stderr: %s)", err, stderr)
 		}
 		if stderr != "" {
-			log.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "netbird up completed"), "stderr", stderr)
+			log.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "netbird up completed"), "stderr", stderr)
 		} else {
-			log.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "netbird up completed"))
+			log.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "netbird up completed"))
 		}
 		return nil
 	})
@@ -789,67 +789,67 @@ func configureNetbirdOnNode(ctx context.Context, sshPool *ssh.Pool, node config.
 	}
 
 	// Verify connection
-	log.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "verifying netbird connection"))
+	log.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "verifying netbird connection"))
 	verifyCmd := "netbird status"
-	verifyStdout, verifyStderr, verifyErr := sshPool.Run(ctx, node.Hostname, verifyCmd)
+	verifyStdout, verifyStderr, verifyErr := sshPool.Run(ctx, node.SSHFQDNorIP, verifyCmd)
 	if verifyErr != nil {
-		log.Warnw(formatNodeMessage("⚠", node.Hostname, node.NewHostname, node.Role, "failed to verify netbird status"), "error", verifyErr, "stderr", verifyStderr)
+		log.Warnw(formatNodeMessage("⚠", node.SSHFQDNorIP, node.NewHostname, node.Role, "failed to verify netbird status"), "error", verifyErr, "stderr", verifyStderr)
 	} else {
-		log.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "netbird status"), "status", verifyStdout)
+		log.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "netbird status"), "status", verifyStdout)
 	}
 
-	log.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "netbird connected successfully"))
+	log.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "netbird connected successfully"))
 	return nil
 }
 
 // configureTailscaleOnNode configures Tailscale on a single node idempotently.
 func configureTailscaleOnNode(ctx context.Context, sshPool *ssh.Pool, node config.NodeConfig, overlayConfig string) error {
-	log := logging.L().With("node", node.Hostname, "provider", "tailscale")
+	log := logging.L().With("node", node.SSHFQDNorIP, "provider", "tailscale")
 
 	// Check if tailscale is already running
-	log.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "checking tailscale status"))
+	log.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "checking tailscale status"))
 	checkCmd := "tailscale status --json 2>/dev/null | grep -q '\"BackendState\":\"Running\"' && echo 'RUNNING' || echo 'NOT_RUNNING'"
-	stdout, _, err := sshPool.Run(ctx, node.Hostname, checkCmd)
+	stdout, _, err := sshPool.Run(ctx, node.SSHFQDNorIP, checkCmd)
 	if err == nil && stdout == "RUNNING\n" {
-		log.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "tailscale already running, skipping installation"))
+		log.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "tailscale already running, skipping installation"))
 		return nil
 	}
 
 	// Check if tailscale is installed
-	log.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "checking if tailscale is installed"))
+	log.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "checking if tailscale is installed"))
 	checkInstallCmd := "command -v tailscale &> /dev/null && echo 'INSTALLED' || echo 'NOT_INSTALLED'"
-	stdout, _, _ = sshPool.Run(ctx, node.Hostname, checkInstallCmd)
+	stdout, _, _ = sshPool.Run(ctx, node.SSHFQDNorIP, checkInstallCmd)
 
 	if stdout != "INSTALLED\n" {
 		// Install tailscale if not present (with retry)
 		installURL := "https://tailscale.com/install.sh"
 		installCmd := fmt.Sprintf("curl -fsSL %s | sh", installURL)
 
-		log.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "tailscale not found, downloading and installing"))
-		log.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, fmt.Sprintf("download URL: %s", installURL)))
-		log.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, fmt.Sprintf("install command: %s", installCmd)))
-		log.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "executing installation (this may take 30-60 seconds)..."))
+		log.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "tailscale not found, downloading and installing"))
+		log.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, fmt.Sprintf("download URL: %s", installURL)))
+		log.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, fmt.Sprintf("install command: %s", installCmd)))
+		log.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "executing installation (this may take 30-60 seconds)..."))
 
-		retryCfg := retry.NetworkConfig(fmt.Sprintf("install-tailscale-%s", node.Hostname))
+		retryCfg := retry.NetworkConfig(fmt.Sprintf("install-tailscale-%s", node.SSHFQDNorIP))
 		err = retry.Do(ctx, retryCfg, func() error {
-			_, stderr, err := sshPool.Run(ctx, node.Hostname, installCmd)
+			_, stderr, err := sshPool.Run(ctx, node.SSHFQDNorIP, installCmd)
 			if err != nil {
-				log.Warnw(formatNodeMessage("✗", node.Hostname, node.NewHostname, node.Role, "tailscale installation failed"), "error", err, "stderr", stderr)
+				log.Warnw(formatNodeMessage("✗", node.SSHFQDNorIP, node.NewHostname, node.Role, "tailscale installation failed"), "error", err, "stderr", stderr)
 				return fmt.Errorf("failed to install tailscale: %w (stderr: %s)", err, stderr)
 			}
 			if stderr != "" {
-				log.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "tailscale installation completed"), "stderr", stderr)
+				log.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "tailscale installation completed"), "stderr", stderr)
 			} else {
-				log.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "tailscale installation completed"))
+				log.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "tailscale installation completed"))
 			}
 			return nil
 		})
 		if err != nil {
 			return err
 		}
-		log.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "tailscale installed successfully"))
+		log.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "tailscale installed successfully"))
 	} else {
-		log.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "tailscale already installed"))
+		log.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "tailscale already installed"))
 	}
 
 	// Start tailscale with auth key if provided (with retry)
@@ -861,21 +861,21 @@ func configureTailscaleOnNode(ctx context.Context, sshPool *ssh.Pool, node confi
 		maskedCmd = fmt.Sprintf("tailscale up --authkey='%s'", maskSetupKey(overlayConfig))
 	}
 
-	log.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "starting tailscale and connecting to network"))
-	log.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, fmt.Sprintf("command: %s", maskedCmd)))
-	log.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "executing tailscale up..."))
+	log.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "starting tailscale and connecting to network"))
+	log.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, fmt.Sprintf("command: %s", maskedCmd)))
+	log.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "executing tailscale up..."))
 
-	retryCfg := retry.NetworkConfig(fmt.Sprintf("start-tailscale-%s", node.Hostname))
+	retryCfg := retry.NetworkConfig(fmt.Sprintf("start-tailscale-%s", node.SSHFQDNorIP))
 	err = retry.Do(ctx, retryCfg, func() error {
-		_, stderr, err := sshPool.Run(ctx, node.Hostname, upCmd)
+		_, stderr, err := sshPool.Run(ctx, node.SSHFQDNorIP, upCmd)
 		if err != nil {
-			log.Warnw(formatNodeMessage("✗", node.Hostname, node.NewHostname, node.Role, "tailscale up failed"), "error", err, "stderr", stderr)
+			log.Warnw(formatNodeMessage("✗", node.SSHFQDNorIP, node.NewHostname, node.Role, "tailscale up failed"), "error", err, "stderr", stderr)
 			return fmt.Errorf("failed to start tailscale: %w (stderr: %s)", err, stderr)
 		}
 		if stderr != "" {
-			log.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "tailscale up completed"), "stderr", stderr)
+			log.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "tailscale up completed"), "stderr", stderr)
 		} else {
-			log.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "tailscale up completed"))
+			log.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "tailscale up completed"))
 		}
 		return nil
 	})
@@ -884,22 +884,22 @@ func configureTailscaleOnNode(ctx context.Context, sshPool *ssh.Pool, node confi
 	}
 
 	// Verify connection
-	log.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "verifying tailscale connection"))
+	log.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "verifying tailscale connection"))
 	verifyCmd := "tailscale status"
-	verifyStdout, verifyStderr, verifyErr := sshPool.Run(ctx, node.Hostname, verifyCmd)
+	verifyStdout, verifyStderr, verifyErr := sshPool.Run(ctx, node.SSHFQDNorIP, verifyCmd)
 	if verifyErr != nil {
-		log.Warnw(formatNodeMessage("⚠", node.Hostname, node.NewHostname, node.Role, "failed to verify tailscale status"), "error", verifyErr, "stderr", verifyStderr)
+		log.Warnw(formatNodeMessage("⚠", node.SSHFQDNorIP, node.NewHostname, node.Role, "failed to verify tailscale status"), "error", verifyErr, "stderr", verifyStderr)
 	} else {
-		log.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "tailscale status"), "status", verifyStdout)
+		log.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "tailscale status"), "status", verifyStdout)
 	}
 
-	log.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "tailscale connected successfully"))
+	log.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "tailscale connected successfully"))
 	return nil
 }
 
 // configureWireGuardOnNode configures WireGuard on a single node idempotently.
 func configureWireGuardOnNode(ctx context.Context, sshPool *ssh.Pool, node config.NodeConfig, overlayConfig string) error {
-	log := logging.L().With("node", node.Hostname, "provider", "wireguard")
+	log := logging.L().With("node", node.SSHFQDNorIP, "provider", "wireguard")
 
 	// WireGuard requires a config file path in overlayConfig
 	if overlayConfig == "" {
@@ -918,7 +918,7 @@ func configureWireGuardOnNode(ctx context.Context, sshPool *ssh.Pool, node confi
 
 	// Check if interface is already up
 	checkCmd := fmt.Sprintf("wg show %s 2>/dev/null && echo 'UP' || echo 'DOWN'", iface)
-	stdout, _, err := sshPool.Run(ctx, node.Hostname, checkCmd)
+	stdout, _, err := sshPool.Run(ctx, node.SSHFQDNorIP, checkCmd)
 	if err == nil && stdout == "UP\n" {
 		log.Infow("wireguard interface already up", "interface", iface)
 		return nil
@@ -931,13 +931,13 @@ if ! command -v wg &> /dev/null; then
     apt-get update && apt-get install -y wireguard wireguard-tools
 fi
 `
-	if _, stderr, err := sshPool.Run(ctx, node.Hostname, installCmd); err != nil {
+	if _, stderr, err := sshPool.Run(ctx, node.SSHFQDNorIP, installCmd); err != nil {
 		return fmt.Errorf("failed to install wireguard: %w (stderr: %s)", err, stderr)
 	}
 
 	// Start wireguard interface
 	upCmd := fmt.Sprintf("wg-quick up %s", overlayConfig)
-	if _, stderr, err := sshPool.Run(ctx, node.Hostname, upCmd); err != nil {
+	if _, stderr, err := sshPool.Run(ctx, node.SSHFQDNorIP, upCmd); err != nil {
 		return fmt.Errorf("failed to start wireguard: %w (stderr: %s)", err, stderr)
 	}
 
@@ -962,7 +962,7 @@ func getStorageNodes(cfg *config.Config) []string {
 	enabledNodes := getEnabledNodes(cfg)
 	for _, node := range enabledNodes {
 		if node.StorageEnabled {
-			nodes = append(nodes, node.Hostname)
+			nodes = append(nodes, node.SSHFQDNorIP)
 		}
 	}
 	return nodes
@@ -977,9 +977,9 @@ func getStorageNodesByRole(cfg *config.Config) (managers []string, workers []str
 			continue
 		}
 		if node.Role == "manager" {
-			managers = append(managers, node.Hostname)
+			managers = append(managers, node.SSHFQDNorIP)
 		} else if node.Role == "worker" {
-			workers = append(workers, node.Hostname)
+			workers = append(workers, node.SSHFQDNorIP)
 		}
 	}
 	return
@@ -990,9 +990,9 @@ func categorizeNodes(cfg *config.Config) (managers []string, workers []string) {
 	enabledNodes := getEnabledNodes(cfg)
 	for _, node := range enabledNodes {
 		if node.Role == "manager" {
-			managers = append(managers, node.Hostname)
+			managers = append(managers, node.SSHFQDNorIP)
 		} else if node.Role == "worker" {
-			workers = append(workers, node.Hostname)
+			workers = append(workers, node.SSHFQDNorIP)
 		}
 	}
 	return
@@ -1023,30 +1023,30 @@ func setHostnames(ctx context.Context, cfg *config.Config, sshPool *ssh.Pool) er
 
 		nodeLog := log.With(
 			"server", fmt.Sprintf("%d/%d", nodeNum, len(nodesToUpdate)),
-			"hostname", node.Hostname,
+			"hostname", node.SSHFQDNorIP,
 			"newHostname", node.NewHostname,
 			"user", node.Username,
 			"port", node.SSHPort,
 		)
 
-		nodeLog.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "checking current hostname"))
+		nodeLog.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "checking current hostname"))
 
 		// Check current hostname
-		stdout, _, err := sshPool.Run(ctx, node.Hostname, "hostname")
+		stdout, _, err := sshPool.Run(ctx, node.SSHFQDNorIP, "hostname")
 		if err == nil && stdout == node.NewHostname+"\n" {
-			nodeLog.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "hostname already set, skipping"))
+			nodeLog.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "hostname already set, skipping"))
 			continue
 		}
 
 		// Set hostname idempotently
 		setCmd := fmt.Sprintf("hostnamectl set-hostname %s", node.NewHostname)
-		nodeLog.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, fmt.Sprintf("executing hostname change (command: %s)", setCmd)))
+		nodeLog.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, fmt.Sprintf("executing hostname change (command: %s)", setCmd)))
 
-		if _, stderr, err := sshPool.Run(ctx, node.Hostname, setCmd); err != nil {
-			return fmt.Errorf("failed to set hostname on %s: %w (stderr: %s)", node.Hostname, err, stderr)
+		if _, stderr, err := sshPool.Run(ctx, node.SSHFQDNorIP, setCmd); err != nil {
+			return fmt.Errorf("failed to set hostname on %s: %w (stderr: %s)", node.SSHFQDNorIP, err, stderr)
 		}
 
-		nodeLog.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "hostname set successfully"))
+		nodeLog.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "hostname set successfully"))
 	}
 
 	return nil
@@ -1069,22 +1069,22 @@ func setRootPassword(ctx context.Context, cfg *config.Config, sshPool *ssh.Pool)
 		nodeNum := i + 1
 		nodeLog := log.With(
 			"server", fmt.Sprintf("%d/%d", nodeNum, len(enabledNodes)),
-			"hostname", node.Hostname,
+			"hostname", node.SSHFQDNorIP,
 			"user", node.Username,
 			"port", node.SSHPort,
 		)
 
-		nodeLog.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "setting root password"))
+		nodeLog.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "setting root password"))
 
 		// Use chpasswd to set password
 		// Format: username:password
 		setCmd := fmt.Sprintf("echo 'root:%s' | chpasswd", password)
 
-		if _, stderr, err := sshPool.Run(ctx, node.Hostname, setCmd); err != nil {
-			return fmt.Errorf("failed to set root password on %s: %w (stderr: %s)", node.Hostname, err, stderr)
+		if _, stderr, err := sshPool.Run(ctx, node.SSHFQDNorIP, setCmd); err != nil {
+			return fmt.Errorf("failed to set root password on %s: %w (stderr: %s)", node.SSHFQDNorIP, err, stderr)
 		}
 
-		nodeLog.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "root password set successfully"))
+		nodeLog.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "root password set successfully"))
 	}
 
 	return nil
@@ -1148,7 +1148,7 @@ func executeScripts(ctx context.Context, cfg *config.Config, sshPool *ssh.Pool, 
 			// Evaluate script conditions
 			matches, err := config.EvaluateScriptConditions(node, script.Conditions)
 			if err != nil {
-				return fmt.Errorf("failed to evaluate conditions for script %s on node %s: %w", script.Name, node.Hostname, err)
+				return fmt.Errorf("failed to evaluate conditions for script %s on node %s: %w", script.Name, node.SSHFQDNorIP, err)
 			}
 
 			if matches {
@@ -1169,20 +1169,20 @@ func executeScripts(ctx context.Context, cfg *config.Config, sshPool *ssh.Pool, 
 			nodeNum := j + 1
 			nodeLog := scriptLog.With(
 				"server", fmt.Sprintf("%d/%d", nodeNum, len(targetNodes)),
-				"hostname", node.Hostname,
+				"hostname", node.SSHFQDNorIP,
 				"user", node.Username,
 				"port", node.SSHPort,
 			)
 
-			nodeLog.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "executing script on node"))
+			nodeLog.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "executing script on node"))
 			if err := executeScriptOnNode(ctx, sshPool, node, script); err != nil {
 				if script.ContinueOnError {
-					nodeLog.Warnw(formatNodeMessage("✗", node.Hostname, node.NewHostname, node.Role, "script failed but continuing (continueOnError=true)"), "error", err)
+					nodeLog.Warnw(formatNodeMessage("✗", node.SSHFQDNorIP, node.NewHostname, node.Role, "script failed but continuing (continueOnError=true)"), "error", err)
 				} else {
-					return fmt.Errorf("failed to execute script %s on %s: %w", script.Name, node.Hostname, err)
+					return fmt.Errorf("failed to execute script %s on %s: %w", script.Name, node.SSHFQDNorIP, err)
 				}
 			} else {
-				nodeLog.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "script executed successfully on node"))
+				nodeLog.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "script executed successfully on node"))
 			}
 		}
 
@@ -1194,7 +1194,7 @@ func executeScripts(ctx context.Context, cfg *config.Config, sshPool *ssh.Pool, 
 
 // executeScriptOnNode executes a single script on a single node.
 func executeScriptOnNode(ctx context.Context, sshPool *ssh.Pool, node config.NodeConfig, script config.ScriptConfig) error {
-	log := logging.L().With("node", node.Hostname, "script", script.Name)
+	log := logging.L().With("node", node.SSHFQDNorIP, "script", script.Name)
 
 	// Determine if script is local or remote
 	isRemote := len(script.Source) > 7 && (script.Source[:7] == "http://" || script.Source[:8] == "https://")
@@ -1204,7 +1204,7 @@ func executeScriptOnNode(ctx context.Context, sshPool *ssh.Pool, node config.Nod
 		// Download remote script
 		scriptPath = fmt.Sprintf("/tmp/clusterctl-script-%s.sh", script.Name)
 		downloadCmd := fmt.Sprintf("curl -fsSL -o %s %s", scriptPath, script.Source)
-		if _, stderr, err := sshPool.Run(ctx, node.Hostname, downloadCmd); err != nil {
+		if _, stderr, err := sshPool.Run(ctx, node.SSHFQDNorIP, downloadCmd); err != nil {
 			return fmt.Errorf("failed to download script: %w (stderr: %s)", err, stderr)
 		}
 		log.Infow("downloaded remote script", "url", script.Source)
@@ -1217,7 +1217,7 @@ func executeScriptOnNode(ctx context.Context, sshPool *ssh.Pool, node config.Nod
 
 	// Make script executable
 	chmodCmd := fmt.Sprintf("chmod +x %s", scriptPath)
-	if _, stderr, err := sshPool.Run(ctx, node.Hostname, chmodCmd); err != nil {
+	if _, stderr, err := sshPool.Run(ctx, node.SSHFQDNorIP, chmodCmd); err != nil {
 		return fmt.Errorf("failed to make script executable: %w (stderr: %s)", err, stderr)
 	}
 
@@ -1227,7 +1227,7 @@ func executeScriptOnNode(ctx context.Context, sshPool *ssh.Pool, node config.Nod
 		execCmd = fmt.Sprintf("%s %s", scriptPath, script.Parameters)
 	}
 
-	stdout, stderr, err := sshPool.Run(ctx, node.Hostname, execCmd)
+	stdout, stderr, err := sshPool.Run(ctx, node.SSHFQDNorIP, execCmd)
 	if err != nil {
 		return fmt.Errorf("script execution failed: %w (stderr: %s)", err, stderr)
 	}
@@ -1245,16 +1245,16 @@ func rebootNodes(ctx context.Context, cfg *config.Config, sshPool *ssh.Pool) err
 			continue
 		}
 
-		nodeLog := log.With("node", node.Hostname)
-		nodeLog.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "initiating reboot with 15 second delay"))
+		nodeLog := log.With("node", node.SSHFQDNorIP)
+		nodeLog.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "initiating reboot with 15 second delay"))
 
 		// Initiate reboot with 15 second delay and terminate SSH connection cleanly
 		rebootCmd := "nohup sh -c 'sleep 15 && reboot' > /dev/null 2>&1 &"
-		if _, stderr, err := sshPool.Run(ctx, node.Hostname, rebootCmd); err != nil {
+		if _, stderr, err := sshPool.Run(ctx, node.SSHFQDNorIP, rebootCmd); err != nil {
 			// Ignore errors as the connection may be terminated
-			nodeLog.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "reboot initiated (connection may have terminated)"), "stderr", stderr)
+			nodeLog.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "reboot initiated (connection may have terminated)"), "stderr", stderr)
 		} else {
-			nodeLog.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "reboot scheduled successfully"))
+			nodeLog.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "reboot scheduled successfully"))
 		}
 	}
 
@@ -1270,14 +1270,14 @@ func applyNodeLabels(ctx context.Context, cfg *config.Config, sshPool *ssh.Pool,
 	log.Infow("detecting geolocation for all nodes")
 	hostnames := make([]string, 0, len(cfg.Nodes))
 	for _, node := range cfg.Nodes {
-		hostnames = append(hostnames, node.Hostname)
+		hostnames = append(hostnames, node.SSHFQDNorIP)
 	}
 	geoInfoMap := geolocation.DetectGeoLocationBatch(ctx, sshPool, hostnames)
 
 	// Apply labels to each node
 	for _, node := range cfg.Nodes {
-		nodeLog := log.With("node", node.Hostname)
-		geoInfo := geoInfoMap[node.Hostname]
+		nodeLog := log.With("node", node.SSHFQDNorIP)
+		geoInfo := geoInfoMap[node.SSHFQDNorIP]
 
 		// Build automatic labels
 		labels := make(map[string]string)
@@ -1343,21 +1343,21 @@ func applyNodeLabels(ctx context.Context, cfg *config.Config, sshPool *ssh.Pool,
 		}
 
 		// Apply labels to the node
-		nodeLog.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "applying labels"), "count", len(labels))
+		nodeLog.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "applying labels"), "count", len(labels))
 		for key, value := range labels {
 			// Escape special characters in label values
 			escapedValue := strings.ReplaceAll(value, `"`, `\"`)
 			labelCmd := fmt.Sprintf(`docker node update --label-add "%s=%s" $(docker node ls --filter "name=%s" -q)`,
-				key, escapedValue, node.Hostname)
+				key, escapedValue, node.SSHFQDNorIP)
 
 			if _, stderr, err := sshPool.Run(ctx, primaryMaster, labelCmd); err != nil {
-				nodeLog.Warnw(formatNodeMessage("✗", node.Hostname, node.NewHostname, node.Role, "failed to apply label"), "key", key, "value", value, "error", err, "stderr", stderr)
+				nodeLog.Warnw(formatNodeMessage("✗", node.SSHFQDNorIP, node.NewHostname, node.Role, "failed to apply label"), "key", key, "value", value, "error", err, "stderr", stderr)
 			} else {
-				nodeLog.Debugw(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "label applied"), "key", key, "value", value)
+				nodeLog.Debugw(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "label applied"), "key", key, "value", value)
 			}
 		}
 
-		nodeLog.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "labels applied successfully"), "total", len(labels))
+		nodeLog.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "labels applied successfully"), "total", len(labels))
 	}
 
 	log.Infow("all node labels applied")
@@ -1373,8 +1373,8 @@ func removeSSHPublicKeyFromNodes(ctx context.Context, cfg *config.Config, sshPoo
 	log := logging.L().With("phase", "ssh-key-removal")
 
 	for _, node := range cfg.Nodes {
-		nodeLog := log.With("node", node.Hostname)
-		nodeLog.Infow(formatNodeMessage("→", node.Hostname, node.NewHostname, node.Role, "removing public key from node"))
+		nodeLog := log.With("node", node.SSHFQDNorIP)
+		nodeLog.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "removing public key from node"))
 
 		// Remove the public key from authorized_keys
 		removeCmd := fmt.Sprintf(
@@ -1382,10 +1382,10 @@ func removeSSHPublicKeyFromNodes(ctx context.Context, cfg *config.Config, sshPoo
 			strings.TrimSpace(keyPair.PublicKey),
 		)
 
-		if _, stderr, err := sshPool.Run(ctx, node.Hostname, removeCmd); err != nil {
-			nodeLog.Warnw(formatNodeMessage("✗", node.Hostname, node.NewHostname, node.Role, "failed to remove public key"), "error", err, "stderr", stderr)
+		if _, stderr, err := sshPool.Run(ctx, node.SSHFQDNorIP, removeCmd); err != nil {
+			nodeLog.Warnw(formatNodeMessage("✗", node.SSHFQDNorIP, node.NewHostname, node.Role, "failed to remove public key"), "error", err, "stderr", stderr)
 		} else {
-			nodeLog.Infow(formatNodeMessage("✓", node.Hostname, node.NewHostname, node.Role, "public key removed successfully"))
+			nodeLog.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "public key removed successfully"))
 		}
 	}
 
@@ -1701,7 +1701,7 @@ func setupDistributedStorage(ctx context.Context, sshPool *ssh.Pool, managers []
 	return nil
 }
 
-// buildStorageNodeInfoMap creates a map of hostname to NodeInfo for storage logging.
+// buildStorageNodeInfoMap creates a map of SSH hostname/IP to NodeInfo for storage logging.
 func buildStorageNodeInfoMap(cfg *config.Config) map[string]storage.NodeInfo {
 	nodeInfoMap := make(map[string]storage.NodeInfo)
 	for i := range cfg.Nodes {
@@ -1709,8 +1709,8 @@ func buildStorageNodeInfoMap(cfg *config.Config) map[string]storage.NodeInfo {
 		if !node.IsEnabled() || !node.StorageEnabled {
 			continue
 		}
-		nodeInfoMap[node.Hostname] = storage.NodeInfo{
-			Hostname:    node.Hostname,
+		nodeInfoMap[node.SSHFQDNorIP] = storage.NodeInfo{
+			SSHFQDNorIP: node.SSHFQDNorIP,
 			NewHostname: node.NewHostname,
 			Role:        node.Role,
 		}
@@ -1733,7 +1733,7 @@ func teardownDistributedStorage(ctx context.Context, sshPool *ssh.Pool, nodes []
 	// Helper to format node messages
 	fmtNode := func(prefix, node, message string) string {
 		if info, ok := nodeInfoMap[node]; ok {
-			return logging.FormatNodeMessage(prefix, info.Hostname, info.NewHostname, info.Role, message)
+			return logging.FormatNodeMessage(prefix, info.SSHFQDNorIP, info.NewHostname, info.Role, message)
 		}
 		return logging.FormatNodeMessage(prefix, node, "", "", message)
 	}
@@ -1784,7 +1784,7 @@ func basicStorageTeardown(ctx context.Context, sshPool *ssh.Pool, nodes []string
 	// Helper to format node messages
 	fmtNode := func(prefix, node, message string) string {
 		if info, ok := nodeInfoMap[node]; ok {
-			return logging.FormatNodeMessage(prefix, info.Hostname, info.NewHostname, info.Role, message)
+			return logging.FormatNodeMessage(prefix, info.SSHFQDNorIP, info.NewHostname, info.Role, message)
 		}
 		return logging.FormatNodeMessage(prefix, node, "", "", message)
 	}
@@ -1836,7 +1836,7 @@ func verifyStorageTeardown(ctx context.Context, sshPool *ssh.Pool, node string, 
 	// Helper to format node messages
 	fmtNode := func(prefix, message string) string {
 		if info, ok := nodeInfoMap[node]; ok {
-			return logging.FormatNodeMessage(prefix, info.Hostname, info.NewHostname, info.Role, message)
+			return logging.FormatNodeMessage(prefix, info.SSHFQDNorIP, info.NewHostname, info.Role, message)
 		}
 		return logging.FormatNodeMessage(prefix, node, "", "", message)
 	}

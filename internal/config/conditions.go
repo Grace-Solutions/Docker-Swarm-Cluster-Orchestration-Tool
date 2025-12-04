@@ -79,8 +79,8 @@ func evaluateCondition(node NodeConfig, condition ScriptCondition) (bool, error)
 // getNodeProperty retrieves a property value from a node by name.
 func getNodeProperty(node NodeConfig, property string) (string, error) {
 	switch strings.ToLower(property) {
-	case "hostname":
-		return node.Hostname, nil
+	case "sshfqdnorip", "hostname": // hostname kept for backwards compatibility
+		return node.SSHFQDNorIP, nil
 	case "username":
 		return node.Username, nil
 	case "role":

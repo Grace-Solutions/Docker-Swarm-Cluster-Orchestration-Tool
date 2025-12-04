@@ -66,7 +66,7 @@
   "nodes": [
     {
       "enabled": true,
-      "hostname": "manager1.example.com",
+      "sshFQDNorIP": "manager1.example.com",
       "newHostname": "swarm-manager-01",
       "username": "root",
       "password": "",
@@ -82,7 +82,7 @@
     },
     {
       "enabled": true,
-      "hostname": "worker1.example.com",
+      "sshFQDNorIP": "worker1.example.com",
       "newHostname": "swarm-worker-01",
       "username": "root",
       "password": "",
