@@ -263,6 +263,23 @@ func (p *MicroCephProvider) detectNetworkCIDR(ctx context.Context, sshPool *ssh.
 func (p *MicroCephProvider) GenerateJoinToken(ctx context.Context, sshPool *ssh.Pool, primaryNode, joiningNode string) (string, error) {
 	log := logging.L().With("component", "microceph", "primaryNode", primaryNode, "joiningNode", joiningNode)
 
+	// Fast path: if the joining node already appears to be part of a MicroCeph
+	// cluster, do not generate a new token. This keeps the operation idempotent
+	// when rerunning against an existing cluster.
+	if stdout, stderr, err := sshPool.Run(ctx, joiningNode, "microceph status"); err == nil {
+		log.Infow("joining node already in MicroCeph cluster; skipping cluster add/join",
+			"joiningNode", joiningNode,
+			"status", strings.TrimSpace(stdout))
+		return "", nil
+	} else {
+		// On fresh nodes this is expected; log at debug level only so we do not
+		// spam logs while still having enough detail for troubleshooting.
+		log.Debugw("microceph status on joining node failed (proceeding with join)",
+			"joiningNode", joiningNode,
+			"error", err,
+			"stderr", strings.TrimSpace(stderr))
+	}
+
 	// Determine the join address using the configured overlay provider (if any).
 	overlayProvider := ""
 	if p.cfg != nil {
@@ -307,20 +324,26 @@ func (p *MicroCephProvider) GenerateJoinToken(ctx context.Context, sshPool *ssh.
 func (p *MicroCephProvider) Join(ctx context.Context, sshPool *ssh.Pool, node, token string) error {
 	log := logging.L().With("component", "microceph", "node", node)
 
-	// If no token provided, check if node is already in cluster
+	// First, check if this node already appears to be part of a MicroCeph
+	// cluster. If `microceph status` succeeds, we treat the node as joined and
+	// skip the join operation entirely.
+	statusStdout, statusStderr, statusErr := sshPool.Run(ctx, node, "microceph status")
+	if statusErr == nil {
+		log.Infow("node already appears to be in MicroCeph cluster; skipping join",
+			"status", strings.TrimSpace(statusStdout))
+		return nil
+	}
+
+	// If we do not have a token and `microceph status` failed, there is no safe
+	// way to join this node.
 	if token == "" {
-		log.Infow("no join token provided, checking if node already in cluster")
-		if _, _, err := sshPool.Run(ctx, node, "microceph status"); err == nil {
-			log.Infow("node already in cluster")
-			return nil
-		}
-		return fmt.Errorf("no join token and node not in cluster")
+		return fmt.Errorf("no join token and node not in cluster: %w (stderr: %s)", statusErr, strings.TrimSpace(statusStderr))
 	}
 
 	// Verify MicroCeph daemon service is running on joining node
 	statusCmd := `systemctl status snap.microceph.daemon.service --no-pager 2>/dev/null | grep -q "active (running)" && echo "running" || echo "not running"`
-	stdout, _, _ := sshPool.Run(ctx, node, statusCmd)
-	if !strings.Contains(stdout, "running") || strings.Contains(stdout, "not running") {
+	svcStatus, _, _ := sshPool.Run(ctx, node, statusCmd)
+	if !strings.Contains(svcStatus, "running") || strings.Contains(svcStatus, "not running") {
 		log.Warnw("MicroCeph daemon service not running on joining node")
 	}
 
@@ -363,9 +386,15 @@ func (p *MicroCephProvider) Join(ctx context.Context, sshPool *ssh.Pool, node, t
 		}
 		log.Infow("joining MicroCeph cluster", "node", node, "joinAddress", preferredAddr, "joinIP", joinIP, "command", joinCmd)
 	if _, stderr, err := sshPool.Run(ctx, node, joinCmd); err != nil {
-		// Check if already joined
-		if strings.Contains(stderr, "already") || strings.Contains(stderr, "member") {
-			log.Infow("node already joined to cluster")
+		// Check if this is an idempotent "already joined" style error. MicroCeph
+		// may report conditions such as "Remote with address ... exists" when a
+		// node has already joined previously. Treat these as success so reruns do
+		// not fail the whole deployment.
+		lower := strings.ToLower(stderr)
+		if strings.Contains(lower, "already") || strings.Contains(lower, "member") ||
+			strings.Contains(lower, "remote with address") || strings.Contains(lower, "already exists") {
+			log.Infow("node already appears to be joined to cluster; ignoring join error",
+				"stderr", strings.TrimSpace(stderr))
 			return nil
 		}
 		return fmt.Errorf("failed to join cluster: %w (stderr: %s)", err, stderr)
