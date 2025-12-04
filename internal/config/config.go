@@ -195,12 +195,13 @@ type NodeConfig struct {
 	// SSHFQDNorIP is the hostname/IP used ONLY for SSH connections.
 	// Infrastructure setup (Docker Swarm, MicroCeph, etc.) uses overlay hostname precedence:
 	// overlay hostname > overlay IP > private hostname > private IP
-	SSHFQDNorIP           string `json:"sshFQDNorIP"`           // SSH connection hostname or IP (required)
-	Username              string `json:"username"`              // SSH username (required, default: "root")
-	Password              string `json:"password"`              // SSH password (optional, use privateKeyPath instead)
-	PrivateKeyPath        string `json:"privateKeyPath"`        // Path to SSH private key (optional, use password instead)
+	SSHFQDNorIP            string `json:"sshFQDNorIP"`            // SSH connection hostname or IP (required)
+	Username               string `json:"username"`               // SSH username (required, default: "root")
+	Password               string `json:"password"`               // SSH password (optional, use privateKeyPath instead)
+	PrivateKeyPath         string `json:"privateKeyPath"`         // Path to SSH private key (optional, use password instead)
+	PrivateKeyPassword     string `json:"privateKeyPassword"`     // Password for encrypted private key (optional, blank = no passphrase)
 	UseSSHAutomaticKeyPair bool   `json:"useSSHAutomaticKeyPair"` // Use automatically generated SSH key pair (default: false)
-	SSHPort               int    `json:"sshPort"`               // SSH port (default: 22)
+	SSHPort                int    `json:"sshPort"`                // SSH port (default: 22)
 
 	// Node Role Settings
 	Role string `json:"role"` // "manager" or "worker" (required)

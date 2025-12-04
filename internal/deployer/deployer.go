@@ -452,10 +452,11 @@ func prepareSSHKeys(cfg *config.Config) (*sshkeys.KeyPair, error) {
 		nodeLog.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "installing public key for future automatic authentication"))
 
 		authConfig := ssh.AuthConfig{
-			Username:       node.Username,
-			Password:       node.Password,
-			PrivateKeyPath: node.PrivateKeyPath,
-			Port:           node.SSHPort,
+			Username:           node.Username,
+			Password:           node.Password,
+			PrivateKeyPath:     node.PrivateKeyPath,
+			PrivateKeyPassword: node.PrivateKeyPassword,
+			Port:               node.SSHPort,
 		}
 
 		tempPool := ssh.NewPool(map[string]ssh.AuthConfig{
@@ -528,7 +529,7 @@ func createSSHPool(cfg *config.Config, keyPair *sshkeys.KeyPair) (*ssh.Pool, err
 			// Use configured credentials
 			authConfig.Password = node.Password
 			authConfig.PrivateKeyPath = node.PrivateKeyPath
-			// Note: User-provided private keys don't use the auto-generated password
+			authConfig.PrivateKeyPassword = node.PrivateKeyPassword
 		}
 
 		authConfigs[node.SSHFQDNorIP] = authConfig
