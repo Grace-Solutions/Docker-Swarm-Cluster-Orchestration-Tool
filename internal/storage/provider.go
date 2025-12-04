@@ -44,8 +44,10 @@ type Provider interface {
 	CreatePool(ctx context.Context, sshPool *ssh.Pool, primaryNode, poolName string) error
 
 	// GetClusterCredentials retrieves cluster credentials (admin key, mon addresses) from the primary node.
-	// These credentials can be distributed to other nodes for mounting.
-	GetClusterCredentials(ctx context.Context, sshPool *ssh.Pool, primaryNode string) (*ClusterCredentials, error)
+	// Uses overlay hostname precedence: overlay hostname > overlay IP > private hostname > private IP.
+	// monNodes is the list of MON node SSH hostnames (for resolving overlay addresses).
+	// overlayProvider is "netbird", "tailscale", or empty.
+	GetClusterCredentials(ctx context.Context, sshPool *ssh.Pool, primaryNode string, monNodes []string, overlayProvider string) (*ClusterCredentials, error)
 
 	// Mount mounts the storage filesystem on a node (fetches credentials from node itself).
 	Mount(ctx context.Context, sshPool *ssh.Pool, node, poolName string) error
@@ -318,7 +320,9 @@ func SetupCluster(ctx context.Context, sshPool *ssh.Pool, provider Provider, man
 	log.Infow("✓ storage pool created", "poolName", ds.PoolName)
 
 	// Get cluster credentials from primary (admin key, mon addresses) for mounting
-	clusterCreds, err := provider.GetClusterCredentials(ctx, sshPool, primaryNode)
+	// Uses overlay hostname precedence: overlay hostname > overlay IP > private
+	overlayProvider := strings.ToLower(strings.TrimSpace(cfg.GlobalSettings.OverlayProvider))
+	clusterCreds, err := provider.GetClusterCredentials(ctx, sshPool, primaryNode, managers, overlayProvider)
 	if err != nil {
 		return fmt.Errorf("failed to get cluster credentials from primary: %w", err)
 	}

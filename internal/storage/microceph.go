@@ -502,8 +502,9 @@ func (p *MicroCephProvider) CreatePool(ctx context.Context, sshPool *ssh.Pool, p
 }
 
 // GetClusterCredentials retrieves the admin key and monitor addresses from the primary node.
-// These credentials can be distributed to other nodes for mounting.
-func (p *MicroCephProvider) GetClusterCredentials(ctx context.Context, sshPool *ssh.Pool, primaryNode string) (*ClusterCredentials, error) {
+// Uses overlay hostname precedence for MON addresses: overlay hostname > overlay IP > private.
+// monNodes is the list of MON node SSH hostnames (for resolving overlay addresses).
+func (p *MicroCephProvider) GetClusterCredentials(ctx context.Context, sshPool *ssh.Pool, primaryNode string, monNodes []string, overlayProvider string) (*ClusterCredentials, error) {
 	log := logging.L().With("component", "microceph", "node", primaryNode)
 
 	// Get admin key
@@ -517,19 +518,24 @@ func (p *MicroCephProvider) GetClusterCredentials(ctx context.Context, sshPool *
 		return nil, fmt.Errorf("empty admin key returned")
 	}
 
-	// Get the monitor addresses
-	monCmd := "ceph mon dump --format=json 2>/dev/null | jq -r '.mons[].addr' | cut -d'/' -f1 | paste -sd','"
-	monAddrs, _, err := sshPool.Run(ctx, primaryNode, monCmd)
-	if err != nil {
-		// Fallback to localhost
-		monAddrs = "127.0.0.1:6789"
-	}
-	monAddrs = strings.TrimSpace(monAddrs)
-	if monAddrs == "" {
-		monAddrs = "127.0.0.1:6789"
+	// Build monitor addresses using overlay hostname precedence
+	// Format: hostname1:6789,hostname2:6789,hostname3:6789
+	const monPort = 6789
+	var monAddrList []string
+
+	for _, monNode := range monNodes {
+		// Resolve overlay hostname/IP for each MON node
+		addr := resolveNodeAddress(ctx, sshPool, monNode, overlayProvider)
+		monAddrList = append(monAddrList, fmt.Sprintf("%s:%d", addr, monPort))
+		log.Debugw("resolved MON address", "node", monNode, "addr", addr, "port", monPort)
 	}
 
-	log.Infow("retrieved cluster credentials", "monAddrs", monAddrs, "adminKeyLen", len(adminKey))
+	monAddrs := strings.Join(monAddrList, ",")
+	if monAddrs == "" {
+		return nil, fmt.Errorf("no MON addresses resolved")
+	}
+
+	log.Infow("retrieved cluster credentials", "monAddrs", monAddrs, "adminKeyLen", len(adminKey), "monCount", len(monAddrList))
 	return &ClusterCredentials{
 		AdminKey: adminKey,
 		MonAddrs: monAddrs,
@@ -579,9 +585,11 @@ func (p *MicroCephProvider) MountWithCredentials(ctx context.Context, sshPool *s
 
 // Mount mounts the CephFS filesystem on a node (fetches credentials from node itself).
 // Prefer MountWithCredentials when mounting multiple nodes.
+// Note: This falls back to using the node's own address without overlay precedence.
 func (p *MicroCephProvider) Mount(ctx context.Context, sshPool *ssh.Pool, node, poolName string) error {
-	// Get credentials from this node and mount
-	creds, err := p.GetClusterCredentials(ctx, sshPool, node)
+	// Get credentials from this node - uses the node as its own MON with no overlay provider
+	// This is a fallback; prefer MountWithCredentials with proper overlay resolution
+	creds, err := p.GetClusterCredentials(ctx, sshPool, node, []string{node}, "")
 	if err != nil {
 		return fmt.Errorf("failed to get cluster credentials: %w", err)
 	}
