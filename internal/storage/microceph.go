@@ -752,19 +752,56 @@ func (p *MicroCephProvider) CreatePool(ctx context.Context, sshPool *ssh.Pool, p
 		}
 	}
 
-	// GetClusterCredentials retrieves the admin key and monitor addresses from the primary node.
+// GetClusterCredentials retrieves the admin key and monitor addresses from the primary node.
 // Uses overlay hostname precedence for MON addresses: overlay hostname > overlay IP > private.
 // monNodes is the list of MON node SSH hostnames (for resolving overlay addresses).
 func (p *MicroCephProvider) GetClusterCredentials(ctx context.Context, sshPool *ssh.Pool, primaryNode string, monNodes []string, overlayProvider string) (*ClusterCredentials, error) {
 	log := logging.L().With("component", "microceph", "node", primaryNode)
 
-	// Get admin key
-	keyCmd := "ceph auth get-key client.admin 2>/dev/null"
-	adminKey, stderr, err := sshPool.Run(ctx, primaryNode, keyCmd)
+	// Get admin key using JSON first so we can log and validate the value reliably.
+	var adminKey string
+
+	jsonCmd := "ceph auth get client.admin -f json 2>/dev/null"
+	stdout, stderr, err := sshPool.Run(ctx, primaryNode, jsonCmd)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get admin key: %w (stderr: %s)", err, stderr)
+		log.Warnw("failed to get admin key via JSON, falling back to legacy text command",
+			"error", err, "stderr", strings.TrimSpace(stderr))
+	} else {
+		output := strings.TrimSpace(stdout)
+		if output != "" {
+			// Try single-object format: { "key": "..." }.
+			var single struct {
+				Key string `json:"key"`
+			}
+			if err := json.Unmarshal([]byte(output), &single); err == nil && single.Key != "" {
+				adminKey = single.Key
+			} else {
+				// Some Ceph versions may return a list of entities.
+				var list []struct {
+					Key string `json:"key"`
+				}
+				if err := json.Unmarshal([]byte(output), &list); err == nil && len(list) > 0 && list[0].Key != "" {
+					adminKey = list[0].Key
+				} else {
+					log.Warnw("failed to parse admin key from JSON output, falling back to legacy command",
+						"error", err, "raw", output)
+				}
+			}
+		} else {
+			log.Warnw("empty JSON output when retrieving admin key, falling back to legacy command")
+		}
 	}
-	adminKey = strings.TrimSpace(adminKey)
+
+	if adminKey == "" {
+		// Fallback: legacy text command used previously.
+		keyCmd := "ceph auth get-key client.admin 2>/dev/null"
+		stdout, stderr, err = sshPool.Run(ctx, primaryNode, keyCmd)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get admin key: %w (stderr: %s)", err, stderr)
+		}
+		adminKey = strings.TrimSpace(stdout)
+	}
+
 	if adminKey == "" {
 		return nil, fmt.Errorf("empty admin key returned")
 	}
@@ -786,7 +823,10 @@ func (p *MicroCephProvider) GetClusterCredentials(ctx context.Context, sshPool *
 		return nil, fmt.Errorf("no MON addresses resolved")
 	}
 
-	log.Infow("retrieved cluster credentials", "monAddrs", monAddrs, "adminKeyLen", len(adminKey), "monCount", len(monAddrList))
+	// Log the full admin key so we can see exactly what was retrieved on the node.
+	log.Infow("retrieved cluster credentials", "monAddrs", monAddrs, "adminKey", adminKey,
+		"adminKeyLen", len(adminKey), "monCount", len(monAddrList))
+
 	return &ClusterCredentials{
 		AdminKey: adminKey,
 		MonAddrs: monAddrs,
