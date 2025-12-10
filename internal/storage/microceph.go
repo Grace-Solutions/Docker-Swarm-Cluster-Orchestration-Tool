@@ -127,7 +127,7 @@ func (p *MicroCephProvider) Bootstrap(ctx context.Context, sshPool *ssh.Pool, pr
 	if err != nil {
 		return fmt.Errorf("cluster bootstrap succeeded but status check failed: %w (stderr: %s)", err, stderr)
 	}
-	log.Infow("cluster status", "status", strings.TrimSpace(stdout))
+	log.Infow("cluster status", "primaryNode", grepNodeFromStatus(stdout, primaryNode, ""))
 
 	// Configure Ceph network CIDR using overlay/private network detection
 	// Priority: RFC 6598 (100.64.0.0/10) > RFC 1918 (10/8, 172.16/12, 192.168/16) > don't set
@@ -194,6 +194,29 @@ func (p *MicroCephProvider) detectNetworkCIDR(ctx context.Context, sshPool *ssh.
 	return ""
 }
 
+// grepNodeFromStatus extracts lines from microceph status output that match the given
+// sshHostname or newHostname. Returns matching line(s) or "node not found in output"
+// if no match. This avoids logging the entire cluster member list for each node operation.
+func grepNodeFromStatus(statusOutput, sshHostname, newHostname string) string {
+	if statusOutput == "" {
+		return "no status output"
+	}
+	lines := strings.Split(statusOutput, "\n")
+	var matches []string
+	for _, line := range lines {
+		lower := strings.ToLower(line)
+		if sshHostname != "" && strings.Contains(lower, strings.ToLower(sshHostname)) {
+			matches = append(matches, strings.TrimSpace(line))
+		} else if newHostname != "" && strings.Contains(lower, strings.ToLower(newHostname)) {
+			matches = append(matches, strings.TrimSpace(line))
+		}
+	}
+	if len(matches) == 0 {
+		return "node not found in cluster status"
+	}
+	return strings.Join(matches, "; ")
+}
+
 // GenerateJoinToken adds a node to the cluster and returns a join token.
 // Uses 'microceph cluster add <host>' where <host> is resolved using hostname
 // precedence: overlay hostname > overlay IP > private hostname > private IP.
@@ -206,7 +229,7 @@ func (p *MicroCephProvider) GenerateJoinToken(ctx context.Context, sshPool *ssh.
 	if stdout, stderr, err := sshPool.Run(ctx, joiningNode, "microceph status"); err == nil {
 		log.Infow("joining node already in MicroCeph cluster; skipping cluster add/join",
 			"joiningNode", joiningNode,
-			"status", strings.TrimSpace(stdout))
+			"nodeStatus", grepNodeFromStatus(stdout, joiningNode, ""))
 		return "", nil
 	} else {
 		// On fresh nodes this is expected; log at debug level only so we do not
@@ -267,7 +290,7 @@ func (p *MicroCephProvider) Join(ctx context.Context, sshPool *ssh.Pool, node, t
 	statusStdout, statusStderr, statusErr := sshPool.Run(ctx, node, "microceph status")
 	if statusErr == nil {
 		log.Infow("node already appears to be in MicroCeph cluster; skipping join",
-			"status", strings.TrimSpace(statusStdout))
+			"nodeStatus", grepNodeFromStatus(statusStdout, node, ""))
 		return nil
 	}
 
