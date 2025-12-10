@@ -495,7 +495,7 @@ func writeS3CredentialsFile(path string, info *RadosGatewayInfo) error {
 }
 
 // createMountHelperScript creates a shell script on the shared storage that can be
-// copied to any node to mount the CephFS filesystem. All values are expanded inline.
+// copied to any node to mount the CephFS filesystem via fstab. All values are expanded inline.
 func createMountHelperScript(ctx context.Context, sshPool *ssh.Pool, node, mountPath string, creds *ClusterCredentials) error {
 	scriptsDir := mountPath + "/scripts"
 	scriptPath := scriptsDir + "/mount-cephfs.sh"
@@ -506,17 +506,18 @@ func createMountHelperScript(ctx context.Context, sshPool *ssh.Pool, node, mount
 		return fmt.Errorf("failed to create scripts directory: %w", err)
 	}
 
-	// Build the script content with all values expanded
+	// Build the script content with fstab approach
 	script := fmt.Sprintf(`#!/bin/bash
 MOUNT_PATH="%s"
 ADMIN_KEY="%s"
 FSID="%s"
 FSNAME="%s"
 MON_ADDRS="%s"
-
+FSTAB_ENTRY="admin@${FSID}.${FSNAME}=/ ${MOUNT_PATH} ceph mon_addr=${MON_ADDRS},secret=${ADMIN_KEY},_netdev,x-systemd.mount-timeout=45s,x-systemd.device-timeout=45s 0 0"
 mkdir -p "$MOUNT_PATH"
-mount -t ceph "admin@${FSID}.${FSNAME}=/" "$MOUNT_PATH" -o mon_addr=${MON_ADDRS},secret=${ADMIN_KEY},_netdev
-echo "Mounted CephFS at $MOUNT_PATH"
+grep -qF "$MOUNT_PATH" /etc/fstab || echo "$FSTAB_ENTRY" >> /etc/fstab
+systemctl daemon-reload
+mount -a
 df -h "$MOUNT_PATH"
 `, mountPath, creds.AdminKey, creds.FSID, creds.FSName, creds.MonAddrOpt)
 

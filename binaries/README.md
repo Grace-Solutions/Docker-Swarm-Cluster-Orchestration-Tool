@@ -1,14 +1,14 @@
 # Binaries
 
-This directory contains pre-built `dswrmctl` (Docker Swarm Control) binaries for Linux, macOS, and Windows.
+This directory contains pre-built `dscotctl` (Docker Swarm Cluster Orchestration Tool Control) binaries for Linux, macOS, and Windows.
 
 ## Available Binaries
 
-- **`dswrmctl-linux-amd64`**: Linux binary for x86_64 / amd64 systems
-- **`dswrmctl-linux-arm64`**: Linux binary for aarch64 / arm64 systems
-- **`dswrmctl-darwin-amd64`**: macOS binary for Intel systems
-- **`dswrmctl-darwin-arm64`**: macOS binary for Apple Silicon (M1/M2/M3)
-- **`dswrmctl-windows-amd64.exe`**: Windows binary for x86_64 / amd64 systems
+- **`dscotctl-linux-amd64`**: Linux binary for x86_64 / amd64 systems
+- **`dscotctl-linux-arm64`**: Linux binary for aarch64 / arm64 systems
+- **`dscotctl-darwin-amd64`**: macOS binary for Intel systems
+- **`dscotctl-darwin-arm64`**: macOS binary for Apple Silicon (M1/M2/M3)
+- **`dscotctl-windows-amd64.exe`**: Windows binary for x86_64 / amd64 systems
 
 All binaries are:
 - ✅ **Statically linked** (CGO_ENABLED=0) - no external dependencies
@@ -22,37 +22,37 @@ All binaries are:
 
 ``bash
 # Deploy cluster from configuration file
-./dswrmctl-linux-amd64 -config dswrmctl.json
+./dscotctl-linux-amd64 -config dscotctl.json
 
 # Validate configuration without deploying
-./dswrmctl-linux-amd64 -config dswrmctl.json -dry-run
+./dscotctl-linux-amd64 -config dscotctl.json -dry-run
 
 # Show version
-./dswrmctl-linux-amd64 -version
+./dscotctl-linux-amd64 -version
 
 # Show help
-./dswrmctl-linux-amd64 -help
+./dscotctl-linux-amd64 -help
 ``
 
 ### Windows
 
 ``powershell
 # Deploy cluster from configuration file
-.\dswrmctl-windows-amd64.exe -config dswrmctl.json
+.\dscotctl-windows-amd64.exe -config dscotctl.json
 
 # Validate configuration without deploying
-.\dswrmctl-windows-amd64.exe -config dswrmctl.json -dry-run
+.\dscotctl-windows-amd64.exe -config dscotctl.json -dry-run
 
 # Show version
-.\dswrmctl-windows-amd64.exe -version
+.\dscotctl-windows-amd64.exe -version
 
 # Show help
-.\dswrmctl-windows-amd64.exe -help
+.\dscotctl-windows-amd64.exe -help
 ``
 
 ## Configuration
 
-Create a JSON configuration file (see `dswrmctl.json.example` in this directory) that defines:
+Create a JSON configuration file (see `dscotctl.json.example` in this directory) that defines:
 
 - **Global settings**: Cluster name, overlay provider, distributed storage, scripts
 - **Node definitions**: SSH connection details, roles (manager/worker), hostnames, labels
@@ -236,7 +236,7 @@ The `setRootPassword` parameter allows you to set a consistent root password acr
 
 **Security recommendations:**
 - Use strong, unique passwords
-- Protect config file: `chmod 600 dswrmctl.json`
+- Protect config file: `chmod 600 dscotctl.json`
 - Consider using SSH keys instead of passwords for authentication
 - Rotate passwords regularly
 - Use a password manager or secrets management system
@@ -279,23 +279,23 @@ The tool automatically generates and manages ED25519 SSH keys for passwordless a
 
 **Basic deployment:**
 ``bash
-./dswrmctl-linux-amd64 -config production.json
+./dscotctl-linux-amd64 -config production.json
 ``
 
 **Test configuration:**
 ``bash
-./dswrmctl-linux-amd64 -config staging.json -dry-run
+./dscotctl-linux-amd64 -config staging.json -dry-run
 ``
 
 **Deploy from Windows to Linux nodes:**
 ``powershell
-.\dswrmctl-windows-amd64.exe -config cluster.json
+.\dscotctl-windows-amd64.exe -config cluster.json
 ``
 
 ## Repository Clone Command
 
 ``bash
-git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-Service.git && \
-  cd ./Docker-Swarm-Cluster-Configuration-Service && \
+git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Orchestration-Tool.git && \
+  cd ./Docker-Swarm-Cluster-Orchestration-Tool && \
   chmod -R -v +x ./
 ``

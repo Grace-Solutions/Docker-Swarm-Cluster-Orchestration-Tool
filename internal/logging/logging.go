@@ -40,13 +40,13 @@ func Init() error {
 		return nil
 	}
 
-	lvl := parseLevel(os.Getenv("DSWRMCTL_LOG_LEVEL"))
+	lvl := parseLevel(os.Getenv("DSCOTCTL_LOG_LEVEL"))
 
 	// Default to a local log file so operators can review history even when
-	// stderr is ephemeral. The path can be overridden via DSWRMCTL_LOG_FILE.
-	logPath := strings.TrimSpace(os.Getenv("DSWRMCTL_LOG_FILE"))
+	// stderr is ephemeral. The path can be overridden via DSCOTCTL_LOG_FILE.
+	logPath := strings.TrimSpace(os.Getenv("DSCOTCTL_LOG_FILE"))
 	if logPath == "" {
-		logPath = "dswrmctl.log"
+		logPath = "dscotctl.log"
 	}
 
 	var f *os.File

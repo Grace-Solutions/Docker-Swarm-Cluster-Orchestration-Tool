@@ -1,6 +1,6 @@
 # Docker Swarm Cluster Orchestration Tool
 
-`dswrmctl` (Docker Swarm Control) is a Go-based orchestrator that automates Docker Swarm cluster deployment, management, and teardown with MicroCeph distributed storage integration via SSH.
+`dscotctl` (Docker Swarm Cluster Orchestration Tool Control) is a Go-based orchestrator that automates Docker Swarm cluster deployment, management, and teardown with MicroCeph distributed storage integration via SSH.
 
 ## Features
 
@@ -55,29 +55,29 @@ graph TB
 ### Deploy a Cluster
 
 ```bash
-# 1. Create a configuration file (see binaries/dswrmctl.json.example)
-cp binaries/dswrmctl.json.example dswrmctl.json
+# 1. Create a configuration file (see binaries/dscotctl.json.example)
+cp binaries/dscotctl.json.example dscotctl.json
 
 # 2. Edit the configuration with your nodes and credentials
-nano dswrmctl.json
+nano dscotctl.json
 
 # 3. Deploy the cluster
-./binaries/dswrmctl-linux-amd64 -config dswrmctl.json
+./binaries/dscotctl-linux-amd64 -config dscotctl.json
 ```
 
 ### Teardown a Cluster
 
 ```bash
 # Teardown cluster (keeps networks and data for connectivity)
-./binaries/dswrmctl-linux-amd64 -config dswrmctl.json -teardown
+./binaries/dscotctl-linux-amd64 -config dscotctl.json -teardown
 
 # Full teardown (removes everything including data - WARNING: destructive)
-./binaries/dswrmctl-linux-amd64 -config dswrmctl.json -teardown -remove-overlays
+./binaries/dscotctl-linux-amd64 -config dscotctl.json -teardown -remove-overlays
 ```
 
 ### Deployment Phases
 
-When you run `dswrmctl -config dswrmctl.json`, the following phases execute:
+When you run `dscotctl -config dscotctl.json`, the following phases execute:
 
 1. **Phase 1**: SSH Connection Pool - Establish SSH connections to all nodes
 2. **Phase 2**: Set Hostnames - Idempotently set new hostnames (if configured)
@@ -94,7 +94,7 @@ When you run `dswrmctl -config dswrmctl.json`, the following phases execute:
 
 ### Teardown Phases
 
-When you run `dswrmctl -config dswrmctl.json -teardown`, the following phases execute:
+When you run `dscotctl -config dscotctl.json -teardown`, the following phases execute:
 
 1. **Phase 1**: SSH Connection Pool - Establish SSH connections to all nodes
 2. **Phase 2**: Remove Stacks - Remove all deployed Docker stacks
@@ -111,7 +111,7 @@ When you run `dswrmctl -config dswrmctl.json -teardown`, the following phases ex
 
 ### Configuration File Format
 
-See `binaries/dswrmctl.json.example` for a complete example. The configuration has two main sections:
+See `binaries/dscotctl.json.example` for a complete example. The configuration has two main sections:
 
 #### Global Settings
 
@@ -338,7 +338,7 @@ The SSH pool (`internal/ssh/pool.go`) manages connections efficiently:
 
 **Note:** This mode is deprecated. Use the `deploy` command with JSON config instead.
 
-The legacy mode used wrapper scripts (`cluster-master-init.sh`, `cluster-node-join.sh`) for node-agent style deployment. These scripts are still available but the recommended approach is to use the JSON configuration file with the `dswrmctl` binary directly.
+The legacy mode used wrapper scripts (`cluster-master-init.sh`, `cluster-node-join.sh`) for node-agent style deployment. These scripts are still available but the recommended approach is to use the JSON configuration file with the `dscotctl` binary directly.
 
 **Note**: Services are deployed via the generic service deployment system from YAML files in the `binaries/services/` directory.
 
@@ -346,27 +346,27 @@ The legacy mode used wrapper scripts (`cluster-master-init.sh`, `cluster-node-jo
 
 The main entry points are:
 
-- `dswrmctl -config <config.json>` - Deploy cluster from JSON configuration
-- `dswrmctl -config <config.json> -teardown` - Teardown cluster
-- `dswrmctl -version` - Show version information
+- `dscotctl -config <config.json>` - Deploy cluster from JSON configuration
+- `dscotctl -config <config.json> -teardown` - Teardown cluster
+- `dscotctl -version` - Show version information
 
-Run `dswrmctl -help` for detailed flags.
+Run `dscotctl -help` for detailed flags.
 
 ## Linux wrapper scripts
 
 For convenience, Linux wrapper scripts live under `./binaries` and execute
-pre-built `dswrmctl` binaries relative to the script directory:
+pre-built `dscotctl` binaries relative to the script directory:
 
-- `cluster-master-init.sh` wraps `dswrmctl master init`.
-- `cluster-master-serve.sh` wraps `dswrmctl master serve` (listen/server mode).
-- `cluster-node-join.sh` wraps `dswrmctl node join` (node/client mode).
+- `cluster-master-init.sh` wraps `dscotctl master init`.
+- `cluster-master-serve.sh` wraps `dscotctl master serve` (listen/server mode).
+- `cluster-node-join.sh` wraps `dscotctl node join` (node/client mode).
 
 Each script:
 
 - Detects the architecture via `uname -m`.
-- Selects `dswrmctl-linux-amd64` or `dswrmctl-linux-arm64` from the
+- Selects `dscotctl-linux-amd64` or `dscotctl-linux-arm64` from the
   `binaries/` directory.
-- Passes through all additional arguments to the underlying `dswrmctl`
+- Passes through all additional arguments to the underlying `dscotctl`
   subcommand.
 
 See `binaries/README.md` for examples and usage notes.
@@ -386,25 +386,25 @@ Or build manually from the repository root:
 - Linux/amd64:
 
   ```bash
-  GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o binaries/dswrmctl-linux-amd64 ./cmd/clusterctl
+  GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o binaries/dscotctl-linux-amd64 ./cmd/dscotctl
   ```
 
 - Linux/arm64:
 
   ```bash
-  GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o binaries/dswrmctl-linux-arm64 ./cmd/clusterctl
+  GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o binaries/dscotctl-linux-arm64 ./cmd/dscotctl
   ```
 
 - macOS/arm64 (Apple Silicon):
 
   ```bash
-  GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o binaries/dswrmctl-darwin-arm64 ./cmd/clusterctl
+  GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o binaries/dscotctl-darwin-arm64 ./cmd/dscotctl
   ```
 
 - Windows/amd64:
 
   ```bash
-  GOOS=windows GOARCH=amd64 go build -o binaries/dswrmctl-windows-amd64.exe ./cmd/clusterctl
+  GOOS=windows GOARCH=amd64 go build -o binaries/dscotctl-windows-amd64.exe ./cmd/dscotctl
   ```
 
 Pre-built binaries for these targets are tracked under `./binaries`.
@@ -417,16 +417,16 @@ Pre-built binaries for these targets are tracked under `./binaries`.
 
 ## Logging
 
-`dswrmctl` writes plain-text log lines in the format:
+`dscotctl` writes plain-text log lines in the format:
 
 ```text
 [2025-01-01T12:00:00Z] - [INFO] - message
 ```
 
-- Logs are emitted to **stderr** and to a log file named `dswrmctl.log` in the
+- Logs are emitted to **stderr** and to a log file named `dscotctl.log` in the
   current working directory by default.
-- Override the log file path via `DSWRMCTL_LOG_FILE`.
-- Control the minimum log level via `DSWRMCTL_LOG_LEVEL`
+- Override the log file path via `DSCOTCTL_LOG_FILE`.
+- Control the minimum log level via `DSCOTCTL_LOG_LEVEL`
   (e.g. `debug`, `info`, `warn`, `error`; default is `info`).
 
 Controller and node logs include detailed Swarm and storage events after each

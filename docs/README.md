@@ -1,6 +1,6 @@
-# Docker Swarm Cluster Configuration Service – Documentation
+# Docker Swarm Cluster Orchestration Tool – Documentation
 
-This folder contains documentation for the `dswrmctl` (Docker Swarm Control) Go-based orchestrator
+This folder contains documentation for the `dscotctl` (Docker Swarm Cluster Orchestration Tool Control) Go-based orchestrator
 and its Linux wrapper scripts.
 
 ## Contents
@@ -13,17 +13,17 @@ and its Linux wrapper scripts.
 
 ## High-level architecture
 
-The orchestrator is a **single Go binary** (`dswrmctl`) with the primary mode being
+The orchestrator is a **single Go binary** (`dscotctl`) with the primary mode being
 JSON configuration-based deployment:
 
-- `dswrmctl -config <config.json>` – deploy a complete Docker Swarm cluster with
+- `dscotctl -config <config.json>` – deploy a complete Docker Swarm cluster with
   MicroCeph distributed storage from a JSON configuration file.
-- `dswrmctl -config <config.json> -teardown` – teardown the cluster.
+- `dscotctl -config <config.json> -teardown` – teardown the cluster.
 
 Legacy modes (deprecated):
-- `dswrmctl master init` – prepare a host as the initial Swarm manager.
-- `dswrmctl master serve` – run the controller server.
-- `dswrmctl node join` – register a node and converge it onto the desired state.
+- `dscotctl master init` – prepare a host as the initial Swarm manager.
+- `dscotctl master serve` – run the controller server.
+- `dscotctl node join` – register a node and converge it onto the desired state.
 
 Key internal packages:
 
@@ -37,7 +37,7 @@ Key internal packages:
 - `internal/deps` – helper functions to ensure Docker, docker-compose,
   Netbird, Tailscale, WireGuard, and MicroCeph are installed.
 - `internal/ipdetect` – IP auto-detection with CGNAT and RFC1918 preference.
-- `internal/logging` – simple text logger that writes `[utc-timestamp] - [LEVEL] - message` lines to stderr and an optional log file, with level controlled by `DSWRMCTL_LOG_LEVEL` and file path by `DSWRMCTL_LOG_FILE`.
+- `internal/logging` – simple text logger that writes `[utc-timestamp] - [LEVEL] - message` lines to stderr and an optional log file, with level controlled by `DSCOTCTL_LOG_LEVEL` and file path by `DSCOTCTL_LOG_FILE`.
 
 ## Quickstart
 
@@ -45,18 +45,18 @@ The recommended approach is to use JSON configuration-based deployment:
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Configuration-Service.git
-cd Docker-Swarm-Cluster-Configuration-Service
+git clone https://github.com/Grace-Solutions/Docker-Swarm-Cluster-Orchestration-Tool.git
+cd Docker-Swarm-Cluster-Orchestration-Tool
 
 # 2. Create your configuration file
-cp binaries/dswrmctl.json.example dswrmctl.json
-# Edit dswrmctl.json with your nodes and settings
+cp binaries/dscotctl.json.example dscotctl.json
+# Edit dscotctl.json with your nodes and settings
 
 # 3. Deploy the cluster
-./binaries/dswrmctl-linux-amd64 -config dswrmctl.json
+./binaries/dscotctl-linux-amd64 -config dscotctl.json
 ```
 
-See `binaries/dswrmctl.json.example` for a complete configuration example with:
+See `binaries/dscotctl.json.example` for a complete configuration example with:
 - Node definitions (managers and workers)
 - Overlay network configuration (Netbird, Tailscale, WireGuard)
 - MicroCeph distributed storage settings
@@ -66,27 +66,27 @@ See `binaries/dswrmctl.json.example` for a complete configuration example with:
 
 Main commands:
 
-- `dswrmctl -config <config.json>` – deploy cluster from JSON configuration
-- `dswrmctl -config <config.json> -teardown` – teardown cluster
-- `dswrmctl -config <config.json> -dry-run` – validate configuration without deploying
-- `dswrmctl -version` – show version information
-- `dswrmctl -help` – show help
+- `dscotctl -config <config.json>` – deploy cluster from JSON configuration
+- `dscotctl -config <config.json> -teardown` – teardown cluster
+- `dscotctl -config <config.json> -dry-run` – validate configuration without deploying
+- `dscotctl -version` – show version information
+- `dscotctl -help` – show help
 
 For full behaviour and field-level semantics, see
 `../GO-IMPLEMENTATION-SPEC.md`.
 
 ## Logging and troubleshooting
 
-`dswrmctl` logs are plain text lines in the format:
+`dscotctl` logs are plain text lines in the format:
 
 ```text
 [2025-01-01T12:00:00Z] - [INFO] - message
 ```
 
-- By default, logs go to **stderr** and to a log file named `dswrmctl.log` in the
+- By default, logs go to **stderr** and to a log file named `dscotctl.log` in the
   current working directory.
-- You can override the log file path via `DSWRMCTL_LOG_FILE`.
-- You can control the minimum log level via `DSWRMCTL_LOG_LEVEL`
+- You can override the log file path via `DSCOTCTL_LOG_FILE`.
+- You can control the minimum log level via `DSCOTCTL_LOG_LEVEL`
   (e.g. `debug`, `info`, `warn`, `error`; default is `info`).
 
 Controller and node logs include detailed Swarm and storage events so you can
@@ -98,15 +98,15 @@ storage status is.
 For convenience, Linux wrapper scripts live under `../binaries` and execute
 pre-built binaries relative to the script directory:
 
-- `cluster-master-init.sh` – wraps `dswrmctl master init`.
-- `cluster-master-serve.sh` – wraps `dswrmctl master serve`.
-- `cluster-node-join.sh` – wraps `dswrmctl node join`.
+- `cluster-master-init.sh` – wraps `dscotctl master init`.
+- `cluster-master-serve.sh` – wraps `dscotctl master serve`.
+- `cluster-node-join.sh` – wraps `dscotctl node join`.
 
 Each script:
 
-- Detects `uname -m` and selects `dswrmctl-linux-amd64` or
-  `dswrmctl-linux-arm64` accordingly.
-- Runs the appropriate `dswrmctl` subcommand, passing through any
+- Detects `uname -m` and selects `dscotctl-linux-amd64` or
+  `dscotctl-linux-arm64` accordingly.
+- Runs the appropriate `dscotctl` subcommand, passing through any
   additional CLI flags.
 
 Refer to `../binaries/README.md` for usage examples and notes about

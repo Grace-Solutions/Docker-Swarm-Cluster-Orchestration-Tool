@@ -4,7 +4,7 @@ This directory contains Docker Stack YAML files that will be automatically deplo
 
 ## How It Works
 
-1. **Automatic Discovery**: `dswrmctl` scans this directory for `.yml` and `.yaml` files
+1. **Automatic Discovery**: `dscotctl` scans this directory for `.yml` and `.yaml` files
 2. **Metadata Parsing**: Each file's metadata is read from comment headers
 3. **Selective Deployment**: Only enabled services are deployed
 4. **Progress Tracking**: Detailed logging shows discovery, deployment progress, and metrics
@@ -37,7 +37,7 @@ services:
 1. Create a new `.yml` or `.yaml` file in this directory
 2. Add metadata headers at the top
 3. Define your Docker Stack services
-4. Run `dswrmctl -config your-config.json`
+4. Run `dscotctl -config your-config.json`
 
 The service will be automatically discovered and deployed if enabled.
 
@@ -114,7 +114,7 @@ volumes:
 
 ## Deployment Logs
 
-During deployment, `dswrmctl` logs:
+During deployment, `dscotctl` logs:
 - Total services found
 - Enabled vs disabled count
 - Processing progress (e.g., "deploying service 2/5")
@@ -132,7 +132,7 @@ During deployment, `dswrmctl` logs:
 ## Troubleshooting
 
 If a service fails to deploy:
-1. Check the `dswrmctl` logs for error details
+1. Check the `dscotctl` logs for error details
 2. Verify the YAML syntax is valid
 3. Ensure required networks exist
 4. Check node constraints match your cluster
@@ -150,7 +150,7 @@ You can maintain different service directories for different environments:
 
 ```bash
 # Production
-dswrmctl -config prod.json  # Uses binaries/services/
+dscotctl -config prod.json  # Uses binaries/services/
 
 # Staging (copy services to different location)
 # Modify config to point to different services directory

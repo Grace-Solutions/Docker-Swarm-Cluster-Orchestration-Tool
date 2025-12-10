@@ -1,9 +1,9 @@
 <#
 .SYNOPSIS
-    Build script for dswrmctl (Docker Swarm Control) binaries.
+    Build script for dscotctl (Docker Swarm Cluster Orchestration Tool Control) binaries.
 
 .DESCRIPTION
-    Builds dswrmctl for Linux (amd64, arm64), Windows (amd64, arm64), and macOS (amd64, arm64).
+    Builds dscotctl for Linux (amd64, arm64), Windows (amd64, arm64), and macOS (amd64, arm64).
     Embeds version information (yyyy-MM-dd-HHmm format) and metadata into binaries.
 
 .PARAMETER Clean
@@ -27,7 +27,7 @@ $ErrorActionPreference = "Stop"
 $VerbosePreference = "Continue"
 
 # Configuration
-$BinaryName = "dswrmctl"
+$BinaryName = "dscotctl"
 # Get repo root - if PSScriptRoot is set, go one level up; otherwise use current directory
 if ($PSScriptRoot) {
     $RepoRoot = Split-Path -Parent $PSScriptRoot
@@ -36,7 +36,7 @@ if ($PSScriptRoot) {
 }
 $OutputDir = Join-Path $RepoRoot "binaries"
 $ResourcesDir = Join-Path $RepoRoot "resources"
-$CmdDir = Join-Path $RepoRoot "cmd\dswrmctl"
+$CmdDir = Join-Path $RepoRoot "cmd\dscotctl"
 $IconPath = Join-Path $ResourcesDir "0001.ico"
 
 # Dynamic version based on current datetime (yyyy-MM-dd-HHmm)
@@ -52,7 +52,7 @@ $VerBuild = [int]$Now.ToString("HHmm")
 $VersionString = "$VerMajor.$VerMinor.$VerPatch.$VerBuild"
 
 Write-Verbose "============================================"
-Write-Verbose "  dswrmctl Build Script"
+Write-Verbose "  dscotctl Build Script"
 Write-Verbose "  Version: $Version"
 Write-Verbose "============================================"
 
@@ -152,7 +152,7 @@ foreach ($Target in $Targets) {
             "build",
             "-ldflags", $LdFlags,
             "-o", $OutputPath,
-            "./cmd/dswrmctl"
+            "./cmd/dscotctl"
         )
 
         $Result = & go @BuildArgs 2>&1
