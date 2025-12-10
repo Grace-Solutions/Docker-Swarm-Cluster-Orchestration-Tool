@@ -1908,8 +1908,9 @@ func (p *MicroCephProvider) Status(ctx context.Context, sshPool *ssh.Pool, node 
 }
 
 // EnableRadosGateway enables RADOS Gateway (S3-compatible) on the specified OSD nodes.
-// RGW is enabled on workers (OSD nodes) only, with placement for HA across multiple nodes.
-// Hostname precedence: overlay hostname > overlay IP > private hostname > private IP.
+// RGW is enabled on workers (OSD nodes) only. Each node runs the enable command locally
+// using $(hostname) for proper targeting. Individual node failures are non-fatal.
+// Hostname precedence for endpoints: overlay hostname > overlay IP > private hostname > private IP.
 func (p *MicroCephProvider) EnableRadosGateway(ctx context.Context, sshPool *ssh.Pool, osdNodes []string, port int, overlayProvider string) (*RadosGatewayInfo, error) {
 	log := logging.L().With("component", "microceph-rgw", "port", port, "nodes", len(osdNodes), "overlayProvider", overlayProvider)
 
@@ -1920,36 +1921,69 @@ func (p *MicroCephProvider) EnableRadosGateway(ctx context.Context, sshPool *ssh
 		port = 7480 // Default RGW port
 	}
 
-	// Enable RGW on each OSD node using --target flag
-	// microceph enable rgw --port 7480 --target=hostname
-	// We run from the first OSD node but target each node individually
-	primaryOSD := osdNodes[0]
+	// Enable RGW on each OSD node by running the command ON that node with $(hostname)
+	const maxAttempts = 3
+	const retryDelay = 5 * time.Second
+	const cmdTimeout = 60 // seconds
+
+	var enabledNodes []string
+	var failedNodes []string
 
 	for _, targetNode := range osdNodes {
-		// Resolve target hostname for the --target flag
-		targetHostname := resolveNodeAddress(ctx, sshPool, targetNode, overlayProvider)
+		nodeLog := log.With("targetNode", targetNode)
 
-		enableCmd := fmt.Sprintf("microceph enable rgw --port %d --target=%s", port, targetHostname)
-		log.Infow("enabling RADOS Gateway on node", "target", targetHostname, "command", enableCmd)
+		// Run on the target node itself using $(hostname) for correct targeting
+		enableCmd := fmt.Sprintf("timeout %d microceph enable rgw --port %d --target=\"$(hostname)\"", cmdTimeout, port)
+		nodeLog.Infow("enabling RADOS Gateway on node", "command", enableCmd)
 
-		if _, stderr, err := sshPool.Run(ctx, primaryOSD, enableCmd); err != nil {
-			// Check if already enabled on this node
-			if strings.Contains(stderr, "already") || strings.Contains(stderr, "enabled") {
-				log.Infow("RGW already enabled on node", "target", targetHostname)
-			} else {
-				return nil, fmt.Errorf("failed to enable RGW on %s: %w (stderr: %s)", targetHostname, err, stderr)
+		var lastErr error
+		enabled := false
+
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			stdout, stderr, err := sshPool.Run(ctx, targetNode, enableCmd)
+			if err == nil {
+				nodeLog.Infow("✓ RGW enabled on node", "attempt", attempt)
+				enabled = true
+				break
 			}
+
+			// Check if already enabled
+			combined := stdout + " " + stderr
+			if strings.Contains(strings.ToLower(combined), "already") || strings.Contains(strings.ToLower(combined), "enabled") {
+				nodeLog.Infow("RGW already enabled on node")
+				enabled = true
+				break
+			}
+
+			lastErr = fmt.Errorf("%w (stderr: %s)", err, strings.TrimSpace(stderr))
+			if attempt < maxAttempts {
+				nodeLog.Warnw("RGW enable failed, retrying", "attempt", attempt, "maxAttempts", maxAttempts, "error", lastErr)
+				time.Sleep(retryDelay)
+			}
+		}
+
+		if enabled {
+			enabledNodes = append(enabledNodes, targetNode)
+		} else {
+			nodeLog.Warnw("failed to enable RGW on node after retries (non-fatal)", "error", lastErr)
+			failedNodes = append(failedNodes, targetNode)
 		}
 	}
 
-	// Wait for RGW to start
-	time.Sleep(5 * time.Second)
+	if len(enabledNodes) == 0 {
+		return nil, fmt.Errorf("failed to enable RGW on any node")
+	}
 
-	// Create S3 user for cluster access
+	// Wait for RGW services to start
+	log.Infow("waiting for RGW services to start", "delay", "10s")
+	time.Sleep(10 * time.Second)
+
+	// Create S3 user for cluster access (run on first enabled node)
+	primaryOSD := enabledNodes[0]
 	userID := "clusterctl-s3-user"
 	displayName := "Clusterctl S3 User"
 	createUserCmd := fmt.Sprintf("radosgw-admin user create --uid=%s --display-name=\"%s\" 2>/dev/null || radosgw-admin user info --uid=%s", userID, displayName, userID)
-	log.Infow("creating/retrieving S3 user", "userId", userID)
+	log.Infow("creating/retrieving S3 user", "userId", userID, "node", primaryOSD)
 	stdout, stderr, err := sshPool.Run(ctx, primaryOSD, createUserCmd)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create/get S3 user: %w (stderr: %s)", err, stderr)
@@ -1961,16 +1995,37 @@ func (p *MicroCephProvider) EnableRadosGateway(ctx context.Context, sshPool *ssh
 		return nil, fmt.Errorf("failed to parse S3 user credentials: %w", err)
 	}
 
-	// Build endpoint list using hostname precedence:
-	// overlay hostname > overlay IP > private hostname > private IP
+	// Build endpoint list and verify each RGW is responding
 	var endpoints []string
-	for _, node := range osdNodes {
+	var verifiedEndpoints []string
+
+	for _, node := range enabledNodes {
 		addr := resolveNodeAddress(ctx, sshPool, node, overlayProvider)
 		endpoint := fmt.Sprintf("http://%s:%d", addr, port)
 		endpoints = append(endpoints, endpoint)
 	}
 
-	log.Infow("✓ RADOS Gateway enabled",
+	// Verify RGW endpoints are responding by testing from a manager
+	// We use one of the enabled nodes to make HTTP requests to all endpoints
+	log.Infow("verifying RGW endpoints are responding", "endpoints", endpoints)
+	for i, endpoint := range endpoints {
+		node := enabledNodes[i]
+		if p.verifyRGWEndpoint(ctx, sshPool, primaryOSD, endpoint) {
+			verifiedEndpoints = append(verifiedEndpoints, endpoint)
+			log.Infow("✓ RGW endpoint verified", "endpoint", endpoint, "node", node)
+		} else {
+			log.Warnw("RGW endpoint not responding (non-fatal)", "endpoint", endpoint, "node", node)
+		}
+	}
+
+	if len(verifiedEndpoints) == 0 {
+		log.Warnw("no RGW endpoints verified as responding, but proceeding with enabled list")
+	}
+
+	log.Infow("✓ RADOS Gateway setup complete",
+		"enabledNodes", len(enabledNodes),
+		"failedNodes", len(failedNodes),
+		"verifiedEndpoints", len(verifiedEndpoints),
 		"endpoints", endpoints,
 		"userId", userID,
 		"accessKey", accessKey)
@@ -1981,6 +2036,36 @@ func (p *MicroCephProvider) EnableRadosGateway(ctx context.Context, sshPool *ssh
 		SecretKey: secretKey,
 		UserID:    userID,
 	}, nil
+}
+
+// verifyRGWEndpoint tests if an RGW endpoint is responding by making an HTTP request
+// from a cluster node. Uses curl via SSH since Go HTTP client runs locally.
+// Returns true if the endpoint responds (even with 403, which is expected without auth).
+func (p *MicroCephProvider) verifyRGWEndpoint(ctx context.Context, sshPool *ssh.Pool, fromNode, endpoint string) bool {
+	log := logging.L().With("component", "microceph-rgw", "fromNode", fromNode, "endpoint", endpoint)
+
+	// Use curl with timeout to test the endpoint
+	// RGW returns 403 Forbidden without auth, which is expected and means it's working
+	// We look for any HTTP response (200, 403, etc.) as success
+	curlCmd := fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' --connect-timeout 10 --max-time 15 '%s' 2>/dev/null || echo 'failed'", endpoint)
+
+	stdout, _, err := sshPool.Run(ctx, fromNode, curlCmd)
+	if err != nil {
+		log.Debugw("curl command failed", "error", err)
+		return false
+	}
+
+	httpCode := strings.TrimSpace(stdout)
+
+	// Any HTTP response means RGW is running
+	// 403 = no auth (expected), 200 = bucket listing, etc.
+	if httpCode == "failed" || httpCode == "000" || httpCode == "" {
+		log.Debugw("RGW endpoint not responding", "httpCode", httpCode)
+		return false
+	}
+
+	log.Debugw("RGW endpoint responded", "httpCode", httpCode)
+	return true
 }
 
 // resolveNodeIP resolves the best IP address for a node with precedence.
