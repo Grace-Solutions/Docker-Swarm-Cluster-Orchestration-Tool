@@ -1193,13 +1193,10 @@ func (p *MicroCephProvider) ensureFstabAndReload(
 		combined := strings.TrimSpace(stderr)
 		if !strings.Contains(combined, "already mounted") {
 			log.Warnw("mount -a reported an error", "error", err, "stderr", combined)
-			// Capture recent kernel messages to make debugging mount issues easier
-			// without requiring a separate manual dmesg collection step.
-			dmesgCmd := "dmesg | tail -n 50 || true"
-			if dmesgOut, _, dmesgErr := sshPool.Run(ctx, node, dmesgCmd); dmesgErr == nil {
-				log.Warnw("dmesg output after mount -a failure", "dmesgTail", strings.TrimSpace(dmesgOut))
-			} else {
-				log.Warnw("failed to collect dmesg after mount -a failure", "error", dmesgErr)
+			// Capture only ceph-related kernel messages to aid in diagnosing mount failures
+			dmesgCmd := "dmesg | grep -i ceph | tail -n 5 || true"
+			if dmesgOut, _, dmesgErr := sshPool.Run(ctx, node, dmesgCmd); dmesgErr == nil && strings.TrimSpace(dmesgOut) != "" {
+				log.Warnw("ceph-related dmesg after mount -a failure", "dmesg", strings.TrimSpace(dmesgOut))
 			}
 			return fmt.Errorf("mount -a failed: %w (stderr: %s)", err, stderr)
 		}
