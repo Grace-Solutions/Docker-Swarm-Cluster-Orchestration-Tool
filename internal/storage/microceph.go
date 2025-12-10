@@ -947,6 +947,84 @@ const (
 	systemdDeviceTimeout = "45s"
 )
 
+// CephFSMountMethod represents the method used to mount CephFS.
+type CephFSMountMethod string
+
+const (
+	// MountMethodKernel uses the native Linux kernel CephFS driver (mount -t ceph).
+	MountMethodKernel CephFSMountMethod = "kernel"
+	// MountMethodFuse uses ceph-fuse userspace driver (requires ceph-fuse package).
+	MountMethodFuse CephFSMountMethod = "fuse"
+)
+
+// detectCephFSMountMethod determines the best method to mount CephFS on a node.
+// It checks kernel version, ceph module availability, and ceph-fuse availability.
+// Returns the recommended mount method and any diagnostic information.
+func (p *MicroCephProvider) detectCephFSMountMethod(ctx context.Context, sshPool *ssh.Pool, node string) (CephFSMountMethod, string) {
+	log := logging.L().With("component", "microceph", "node", node)
+
+	// Check if ceph kernel module is loaded or can be loaded
+	modprobeCmd := "sudo modprobe ceph 2>&1 && lsmod | grep -q '^ceph ' && echo 'loaded'"
+	stdout, _, err := sshPool.Run(ctx, node, modprobeCmd)
+	kernelModuleAvailable := err == nil && strings.TrimSpace(stdout) == "loaded"
+
+	if kernelModuleAvailable {
+		log.Debugw("ceph kernel module is available", "method", MountMethodKernel)
+		return MountMethodKernel, "ceph kernel module loaded"
+	}
+
+	// Check kernel version for compatibility info
+	kernelCmd := "uname -r"
+	kernelVersion, _, _ := sshPool.Run(ctx, node, kernelCmd)
+	kernelVersion = strings.TrimSpace(kernelVersion)
+
+	// Check if ceph-fuse is available as fallback
+	fuseCmd := "which ceph-fuse 2>/dev/null || command -v ceph-fuse 2>/dev/null"
+	fuseOut, _, fuseErr := sshPool.Run(ctx, node, fuseCmd)
+	fuseAvailable := fuseErr == nil && strings.TrimSpace(fuseOut) != ""
+
+	if fuseAvailable {
+		log.Infow("ceph kernel module not available, using ceph-fuse", "kernel", kernelVersion)
+		return MountMethodFuse, fmt.Sprintf("kernel module unavailable (kernel %s), using ceph-fuse", kernelVersion)
+	}
+
+	// Kernel module not available and fuse not installed - default to kernel and let it fail with clear error
+	log.Warnw("ceph kernel module not available and ceph-fuse not installed", "kernel", kernelVersion)
+	return MountMethodKernel, fmt.Sprintf("kernel %s, ceph module unavailable, ceph-fuse not installed", kernelVersion)
+}
+
+// ensureCephFuseInstalled ensures ceph-fuse is installed on the node.
+func (p *MicroCephProvider) ensureCephFuseInstalled(ctx context.Context, sshPool *ssh.Pool, node string) error {
+	log := logging.L().With("component", "microceph", "node", node)
+
+	// Check if already installed
+	checkCmd := "which ceph-fuse 2>/dev/null || command -v ceph-fuse 2>/dev/null"
+	if stdout, _, err := sshPool.Run(ctx, node, checkCmd); err == nil && strings.TrimSpace(stdout) != "" {
+		return nil
+	}
+
+	log.Infow("installing ceph-fuse package")
+
+	// Detect package manager and install
+	installCmd := `
+		if command -v apt-get >/dev/null 2>&1; then
+			sudo apt-get update -qq && sudo apt-get install -y ceph-fuse
+		elif command -v dnf >/dev/null 2>&1; then
+			sudo dnf install -y ceph-fuse
+		elif command -v yum >/dev/null 2>&1; then
+			sudo yum install -y ceph-fuse
+		else
+			echo "unsupported package manager" && exit 1
+		fi
+	`
+	if _, stderr, err := sshPool.Run(ctx, node, installCmd); err != nil {
+		return fmt.Errorf("failed to install ceph-fuse: %w (stderr: %s)", err, stderr)
+	}
+
+	log.Infow("✓ ceph-fuse installed")
+	return nil
+}
+
 // GetClusterCredentials retrieves the admin key and monitor addresses from the primary node.
 // For CephFS mounts we now prefer IP-based MON addresses because hostname-based
 // mounts were failing in some environments. The precedence for MON addresses is:
@@ -1079,29 +1157,121 @@ func (p *MicroCephProvider) MountWithCredentials(ctx context.Context, sshPool *s
 		return nil
 	}
 
-	// Mount CephFS using provided credentials. Follow the user-specified
-	// recipe closely and rely on Ceph's default filesystem selection (when a
-	// single filesystem exists) instead of passing an explicit fs=<name>
-	// option. To avoid hanging indefinitely when MONs are unreachable, we
-	// pass `mount_timeout` (the ONLY timeout option supported by the kernel
-	// CephFS driver). Note: `mon_timeout` is NOT a valid kernel mount option.
+	// Detect the best mount method based on kernel capabilities
+	mountMethod, methodReason := p.detectCephFSMountMethod(ctx, sshPool, node)
+	log.Infow("detected CephFS mount method", "method", mountMethod, "reason", methodReason)
+
+	var mountErr error
+
+	if mountMethod == MountMethodKernel {
+		// Try kernel mount first
+		mountErr = p.mountCephFSKernel(ctx, sshPool, node, mountPath, creds)
+
+		if mountErr != nil {
+			// Check if this is a kernel compatibility issue (bad option, wrong fs type, etc.)
+			errStr := mountErr.Error()
+			isKernelIssue := strings.Contains(errStr, "wrong fs type") ||
+				strings.Contains(errStr, "bad option") ||
+				strings.Contains(errStr, "bad superblock") ||
+				strings.Contains(errStr, "Unknown parameter")
+
+			if isKernelIssue {
+				log.Warnw("kernel CephFS mount failed due to compatibility issue, trying ceph-fuse",
+					"error", mountErr)
+
+				// Try to install and use ceph-fuse as fallback
+				if fuseErr := p.ensureCephFuseInstalled(ctx, sshPool, node); fuseErr != nil {
+					log.Warnw("failed to install ceph-fuse for fallback", "error", fuseErr)
+					return fmt.Errorf("kernel mount failed (%w) and ceph-fuse install failed (%v)", mountErr, fuseErr)
+				}
+
+				mountMethod = MountMethodFuse
+				mountErr = p.mountCephFSFuse(ctx, sshPool, node, mountPath, creds)
+			}
+		}
+	} else {
+		// Use ceph-fuse directly
+		if fuseErr := p.ensureCephFuseInstalled(ctx, sshPool, node); fuseErr != nil {
+			return fmt.Errorf("ceph-fuse required but install failed: %w", fuseErr)
+		}
+		mountErr = p.mountCephFSFuse(ctx, sshPool, node, mountPath, creds)
+	}
+
+	if mountErr != nil {
+		return mountErr
+	}
+
+	log.Infow("✓ CephFS mounted", "mountPath", mountPath, "method", mountMethod)
+	return nil
+}
+
+// mountCephFSKernel mounts CephFS using the native kernel driver.
+func (p *MicroCephProvider) mountCephFSKernel(
+	ctx context.Context,
+	sshPool *ssh.Pool,
+	node, mountPath string,
+	creds *ClusterCredentials,
+) error {
+	log := logging.L().With("component", "microceph", "node", node, "method", "kernel")
+
+	// Mount CephFS using kernel driver. Only use mount_timeout as it's the ONLY
+	// timeout option supported by the kernel CephFS driver.
+	// NOTE: mon_timeout is NOT a valid option and will cause mount failures.
 	mountCmd := fmt.Sprintf(
 		"sudo mount -t ceph %s:/ %s -o name=admin,secret=%s,_netdev,mount_timeout=%d",
 		creds.MonAddrs, mountPath, creds.AdminKey, cephMountTimeoutSeconds,
 	)
-	log.Infow("mounting CephFS", "monAddrs", creds.MonAddrs, "mountPath", mountPath, "mount_timeout", cephMountTimeoutSeconds)
-	if _, stderr, err := sshPool.Run(ctx, node, mountCmd); err != nil {
-		// Capture only ceph-related kernel messages to aid in diagnosing mount
-		// failures without flooding the log with unrelated dmesg output.
-		dmesgCmd := "dmesg | grep -i ceph | tail -n 10 || true"
-		if dmesgOut, _, dmesgErr := sshPool.Run(ctx, node, dmesgCmd); dmesgErr == nil && strings.TrimSpace(dmesgOut) != "" {
-			log.Warnw("ceph-related dmesg after mount failure", "dmesg", strings.TrimSpace(dmesgOut))
-		}
+	log.Infow("mounting CephFS via kernel", "monAddrs", creds.MonAddrs, "mount_timeout", cephMountTimeoutSeconds)
 
-		return fmt.Errorf("failed to mount CephFS: %w (stderr: %s)", err, stderr)
+	if _, stderr, err := sshPool.Run(ctx, node, mountCmd); err != nil {
+		// Capture only ceph-related kernel messages to aid in diagnosing mount failures
+		dmesgCmd := "dmesg | grep -i ceph | tail -n 5 || true"
+		if dmesgOut, _, dmesgErr := sshPool.Run(ctx, node, dmesgCmd); dmesgErr == nil && strings.TrimSpace(dmesgOut) != "" {
+			log.Warnw("ceph-related dmesg after kernel mount failure", "dmesg", strings.TrimSpace(dmesgOut))
+		}
+		return fmt.Errorf("kernel mount failed: %w (stderr: %s)", err, strings.TrimSpace(stderr))
 	}
 
-	log.Infow("✓ CephFS mounted", "mountPath", mountPath)
+	return nil
+}
+
+// mountCephFSFuse mounts CephFS using the ceph-fuse userspace driver.
+func (p *MicroCephProvider) mountCephFSFuse(
+	ctx context.Context,
+	sshPool *ssh.Pool,
+	node, mountPath string,
+	creds *ClusterCredentials,
+) error {
+	log := logging.L().With("component", "microceph", "node", node, "method", "fuse")
+
+	// Write a minimal ceph.conf if it doesn't exist (ceph-fuse needs it)
+	confCmd := fmt.Sprintf(`
+		if [ ! -f /etc/ceph/ceph.conf ]; then
+			sudo mkdir -p /etc/ceph
+			echo "[global]" | sudo tee /etc/ceph/ceph.conf
+			echo "mon_host = %s" | sudo tee -a /etc/ceph/ceph.conf
+		fi
+	`, strings.ReplaceAll(creds.MonAddrs, ",", " "))
+	sshPool.Run(ctx, node, confCmd)
+
+	// Write admin keyring for ceph-fuse
+	keyringCmd := fmt.Sprintf(`
+		sudo mkdir -p /etc/ceph
+		echo "[client.admin]" | sudo tee /etc/ceph/ceph.client.admin.keyring
+		echo "    key = %s" | sudo tee -a /etc/ceph/ceph.client.admin.keyring
+	`, creds.AdminKey)
+	if _, stderr, err := sshPool.Run(ctx, node, keyringCmd); err != nil {
+		return fmt.Errorf("failed to create keyring for ceph-fuse: %w (stderr: %s)", err, stderr)
+	}
+
+	// Mount using ceph-fuse
+	mountCmd := fmt.Sprintf("sudo ceph-fuse %s --id admin", mountPath)
+	log.Infow("mounting CephFS via ceph-fuse", "monAddrs", creds.MonAddrs)
+
+	if _, stderr, err := sshPool.Run(ctx, node, mountCmd); err != nil {
+		return fmt.Errorf("ceph-fuse mount failed: %w (stderr: %s)", err, strings.TrimSpace(stderr))
+	}
+
 	return nil
 }
 
