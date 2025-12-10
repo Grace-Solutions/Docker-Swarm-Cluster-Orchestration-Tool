@@ -40,6 +40,19 @@ type Provider interface {
 	// This should only be called on worker nodes.
 	AddStorage(ctx context.Context, sshPool *ssh.Pool, node string) error
 
+	// VerifyOSDsUpForHost verifies that OSDs on the given host are up.
+	// Called after AddStorage to confirm the OSD(s) actually started.
+	// monNode is a MON node to query; osdSSHNode is the SSH target; osdHostname is the node's hostname.
+	VerifyOSDsUpForHost(ctx context.Context, sshPool *ssh.Pool, monNode, osdSSHNode, osdHostname string) error
+
+	// WaitForClusterHealth waits for the cluster to reach a healthy state with
+	// at least a majority of the expected OSDs up. Called after all disks are enrolled.
+	WaitForClusterHealth(ctx context.Context, sshPool *ssh.Pool, monNode string, expectedOSDs int) error
+
+	// VerifyClusterHealthForMount verifies the cluster is healthy enough for mounts.
+	// This is a pre-mount gate to fail fast with a clear message if the cluster is degraded.
+	VerifyClusterHealthForMount(ctx context.Context, sshPool *ssh.Pool, monNode string) error
+
 	// CreatePool creates a storage pool/filesystem for use by containers.
 	CreatePool(ctx context.Context, sshPool *ssh.Pool, primaryNode, poolName string) error
 
@@ -302,6 +315,34 @@ func SetupCluster(ctx context.Context, sshPool *ssh.Pool, provider Provider, man
 				return fmt.Errorf("failed to add storage on %s: %w", node, err)
 			}
 			log.Infow(fmtNode("✓", node, "storage added"))
+
+			// Verify OSD came up for this host (best-effort, don't fail deployment)
+			// Get the hostname for this node to match against OSD tree
+			hostnameCmd := "hostname -f 2>/dev/null || hostname"
+			hostnameOut, _, _ := sshPool.Run(ctx, node, hostnameCmd)
+			osdHostname := strings.TrimSpace(hostnameOut)
+			if osdHostname == "" {
+				osdHostname = node // Fallback to SSH node name
+			}
+
+			log.Infow(fmtNode("→", node, "verifying OSD is up"), "osdHostname", osdHostname)
+			if err := provider.VerifyOSDsUpForHost(ctx, sshPool, primaryNode, node, osdHostname); err != nil {
+				// Best-effort: log warning but don't fail deployment
+				log.Warnw(fmtNode("⚠", node, "OSD verification failed (continuing)"), "error", err)
+			} else {
+				log.Infow(fmtNode("✓", node, "OSD verified up"))
+			}
+		}
+
+		// After all OSDs are added, wait for cluster health (best-effort)
+		log.Infow("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		log.Infow("PHASE 4a: Verify Cluster Health", "expectedOSDs", len(storageNodes))
+		log.Infow("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+		if err := provider.WaitForClusterHealth(ctx, sshPool, primaryNode, len(storageNodes)); err != nil {
+			log.Warnw("cluster health verification failed (continuing)", "error", err)
+		} else {
+			log.Infow("✓ cluster health verified")
 		}
 	} else {
 		log.Warnw("no nodes configured for OSD storage - at least one node needs role=worker, both, all, or empty")
@@ -334,6 +375,13 @@ func SetupCluster(ctx context.Context, sshPool *ssh.Pool, provider Provider, man
 	log.Infow("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	log.Infow("PHASE 6: Mount Storage on All Nodes", "count", len(allNodes), "mountPath", mountPath)
 	log.Infow("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+	// Pre-mount health gate: verify cluster is healthy enough for CephFS mounts
+	log.Infow("→ verifying cluster health before mounting")
+	if err := provider.VerifyClusterHealthForMount(ctx, sshPool, primaryNode); err != nil {
+		return fmt.Errorf("cluster health check failed before mount: %w", err)
+	}
+	log.Infow("✓ cluster health verified for mounting")
 
 	for i, node := range allNodes {
 		log.Infow(fmtNode("→", node, fmt.Sprintf("mounting storage (%d/%d)", i+1, len(allNodes))))
@@ -431,4 +479,3 @@ func writeS3CredentialsFile(path string, info *RadosGatewayInfo) error {
 
 	return nil
 }
-

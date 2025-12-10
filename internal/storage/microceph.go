@@ -839,9 +839,10 @@ const (
 // GetClusterCredentials retrieves the admin key and monitor addresses from the primary node.
 // For CephFS mounts we now prefer IP-based MON addresses because hostname-based
 // mounts were failing in some environments. The precedence for MON addresses is:
-//   1. Overlay IP (Netbird / Tailscale)
-//   2. Private IP (first non-loopback address)
-//   3. SSH node string as a final fallback
+//  1. Overlay IP (Netbird / Tailscale)
+//  2. Private IP (first non-loopback address)
+//  3. SSH node string as a final fallback
+//
 // monNodes is the list of MON node SSH hostnames (for resolving overlay
 // addresses/IPs).
 func (p *MicroCephProvider) GetClusterCredentials(ctx context.Context, sshPool *ssh.Pool, primaryNode string, monNodes []string, overlayProvider string) (*ClusterCredentials, error) {
@@ -1148,6 +1149,30 @@ type cephStatusJSON struct {
 	} `json:"osdmap"`
 }
 
+// cephOSDTreeJSON models the output of `ceph osd tree --format json`.
+// Used to verify OSDs are up after disk enrollment.
+type cephOSDTreeJSON struct {
+	Nodes []cephOSDTreeNode `json:"nodes"`
+}
+
+type cephOSDTreeNode struct {
+	ID       int     `json:"id"`       // OSD ID (e.g., 0, 1) or bucket ID (negative for hosts/roots)
+	Name     string  `json:"name"`     // OSD name (e.g., "osd.0") or bucket name (hostname)
+	Type     string  `json:"type"`     // "osd", "host", "root"
+	Status   string  `json:"status"`   // "up" or "down" (only for OSDs)
+	Children []int   `json:"children"` // Child node IDs (for hosts/roots)
+	Exists   int     `json:"exists"`   // 1 if exists, 0 if removed
+	Reweight float64 `json:"reweight"` // Reweight factor (0 = out, 1 = in)
+}
+
+// OSD verification timeout and polling constants
+const (
+	osdVerifyTimeout          = 60 * time.Second // Max time to wait for single OSD to come up
+	osdVerifyPollInterval     = 5 * time.Second  // How often to check OSD status
+	clusterHealthTimeout      = 5 * time.Minute  // Max time to wait for cluster to become healthy
+	clusterHealthPollInterval = 10 * time.Second // How often to check cluster health
+)
+
 // logDiskListJSON fetches and logs the MicroCeph disk list in JSON form so
 // we have a consistent, machine-readable view of configured and available
 // disks at important points in the lifecycle (post-bootstrap, post-add, etc).
@@ -1180,6 +1205,280 @@ func (p *MicroCephProvider) logDiskListJSON(ctx context.Context, sshPool *ssh.Po
 		"configured", dl.ConfiguredDisks,
 		"available", dl.AvailableDisks,
 	)
+}
+
+// VerifyOSDsUpForHost verifies that at least one OSD on the given host is in "up" state.
+// This is called after adding a disk to confirm the OSD actually started.
+// monNode is a MON node to query the cluster from; osdSSHNode is the SSH target; osdHostname is the node's hostname.
+func (p *MicroCephProvider) VerifyOSDsUpForHost(ctx context.Context, sshPool *ssh.Pool, monNode, osdSSHNode, osdHostname string) error {
+	log := logging.L().With("component", "microceph", "monNode", monNode, "osdSSHNode", osdSSHNode, "osdHostname", osdHostname)
+
+	deadline := time.Now().Add(osdVerifyTimeout)
+	var lastOSDCount, lastUpCount int
+
+	for {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for OSD on host %s to come up (found %d OSDs, %d up) after %s",
+				osdHostname, lastOSDCount, lastUpCount, osdVerifyTimeout)
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("context cancelled while waiting for OSD on host %s: %w", osdHostname, ctx.Err())
+		default:
+		}
+
+		// Query OSD tree from MON node
+		cmd := "ceph osd tree --format json"
+		stdout, stderr, err := sshPool.Run(ctx, monNode, cmd)
+		if err != nil {
+			log.Warnw("failed to get OSD tree (retrying)", "error", err, "stderr", strings.TrimSpace(stderr))
+			time.Sleep(osdVerifyPollInterval)
+			continue
+		}
+
+		var tree cephOSDTreeJSON
+		if err := json.Unmarshal([]byte(stdout), &tree); err != nil {
+			log.Warnw("failed to parse OSD tree JSON (retrying)", "error", err)
+			time.Sleep(osdVerifyPollInterval)
+			continue
+		}
+
+		// Find the host node and its child OSDs
+		hostFound, osdCount, upCount := p.countOSDsForHost(tree, osdHostname)
+		lastOSDCount = osdCount
+		lastUpCount = upCount
+
+		if !hostFound {
+			log.Debugw("host not found in OSD tree yet (retrying)", "osdHost", osdHostname)
+			time.Sleep(osdVerifyPollInterval)
+			continue
+		}
+
+		if osdCount == 0 {
+			log.Debugw("no OSDs registered for host yet (retrying)", "osdHost", osdHostname)
+			time.Sleep(osdVerifyPollInterval)
+			continue
+		}
+
+		if upCount > 0 {
+			log.Infow("✓ OSD verified up for host", "osdHost", osdHostname, "osdCount", osdCount, "upCount", upCount)
+			return nil
+		}
+
+		log.Debugw("OSDs found but not up yet (retrying)", "osdHost", osdHostname, "osdCount", osdCount, "upCount", upCount)
+		time.Sleep(osdVerifyPollInterval)
+	}
+}
+
+// countOSDsForHost parses the OSD tree and returns (hostFound, totalOSDs, upOSDs) for the given hostname.
+func (p *MicroCephProvider) countOSDsForHost(tree cephOSDTreeJSON, hostname string) (bool, int, int) {
+	// Build a map of node ID -> node for quick lookup
+	nodeMap := make(map[int]cephOSDTreeNode)
+	for _, n := range tree.Nodes {
+		nodeMap[n.ID] = n
+	}
+
+	// Find the host node (type=host, name matches hostname)
+	var hostNode *cephOSDTreeNode
+	for i, n := range tree.Nodes {
+		if n.Type == "host" {
+			// Match against full hostname, short hostname, or case-insensitive
+			if strings.EqualFold(n.Name, hostname) {
+				hostNode = &tree.Nodes[i]
+				break
+			}
+			// Also try matching short hostname
+			shortHost := hostname
+			if idx := strings.Index(hostname, "."); idx > 0 {
+				shortHost = hostname[:idx]
+			}
+			if strings.EqualFold(n.Name, shortHost) {
+				hostNode = &tree.Nodes[i]
+				break
+			}
+		}
+	}
+
+	if hostNode == nil {
+		return false, 0, 0
+	}
+
+	// Count OSDs under this host
+	var osdCount, upCount int
+	for _, childID := range hostNode.Children {
+		child, ok := nodeMap[childID]
+		if !ok {
+			continue
+		}
+		if child.Type != "osd" {
+			continue
+		}
+		if child.Exists == 0 {
+			continue // OSD was removed
+		}
+		osdCount++
+		if child.Status == "up" {
+			upCount++
+		}
+	}
+
+	return true, osdCount, upCount
+}
+
+// WaitForClusterHealth waits for the cluster to reach a healthy state with at least
+// the majority of expected OSDs up. This should be called after all disks are enrolled.
+func (p *MicroCephProvider) WaitForClusterHealth(ctx context.Context, sshPool *ssh.Pool, monNode string, expectedOSDs int) error {
+	log := logging.L().With("component", "microceph", "monNode", monNode, "expectedOSDs", expectedOSDs)
+
+	// Calculate majority threshold (at least ceil(n/2) + 1 for odd, n/2 + 1 for even)
+	majorityThreshold := (expectedOSDs / 2) + 1
+	if majorityThreshold < 1 {
+		majorityThreshold = 1
+	}
+
+	log.Infow("waiting for cluster health", "majorityThreshold", majorityThreshold, "timeout", clusterHealthTimeout)
+
+	deadline := time.Now().Add(clusterHealthTimeout)
+	var lastStatus string
+	var lastOSDs, lastUp int
+
+	for {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for cluster health after %s (last: %s, OSDs: %d/%d up)",
+				clusterHealthTimeout, lastStatus, lastUp, lastOSDs)
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("context cancelled while waiting for cluster health: %w", ctx.Err())
+		default:
+		}
+
+		// Get cluster status
+		cmd := "ceph status --format json"
+		stdout, stderr, err := sshPool.Run(ctx, monNode, cmd)
+		if err != nil {
+			log.Warnw("failed to get cluster status (retrying)", "error", err, "stderr", strings.TrimSpace(stderr))
+			time.Sleep(clusterHealthPollInterval)
+			continue
+		}
+
+		var cs cephStatusJSON
+		if err := json.Unmarshal([]byte(stdout), &cs); err != nil {
+			log.Warnw("failed to parse cluster status JSON (retrying)", "error", err)
+			time.Sleep(clusterHealthPollInterval)
+			continue
+		}
+
+		// Extract status values
+		healthStatus := cs.Health.Status
+		if healthStatus == "" {
+			healthStatus = cs.Health.OverallStatus
+		}
+		lastStatus = healthStatus
+
+		// Get OSD counts (handle both nested and flat formats)
+		numOSDs := cs.OSDMap.NumOSDs
+		numUp := cs.OSDMap.NumUpOSDs
+		if cs.OSDMap.Nested.NumOSDs > 0 {
+			numOSDs = cs.OSDMap.Nested.NumOSDs
+			numUp = cs.OSDMap.Nested.NumUpOSDs
+		}
+		lastOSDs = numOSDs
+		lastUp = numUp
+
+		log.Infow("cluster health check",
+			"health", healthStatus,
+			"osdsTotal", numOSDs,
+			"osdsUp", numUp,
+			"majorityThreshold", majorityThreshold)
+
+		// Check if we meet the health criteria:
+		// 1. At least majority of OSDs are up
+		// 2. Health is OK or WARN (WARN is acceptable for fresh clusters)
+		if numUp >= majorityThreshold && (healthStatus == "HEALTH_OK" || healthStatus == "HEALTH_WARN") {
+			log.Infow("✓ cluster health verified",
+				"health", healthStatus,
+				"osdsUp", numUp,
+				"osdsTotal", numOSDs,
+				"majorityThreshold", majorityThreshold)
+			return nil
+		}
+
+		// Not healthy yet
+		if numUp < majorityThreshold {
+			log.Infow("waiting for more OSDs to come up",
+				"osdsUp", numUp,
+				"needed", majorityThreshold,
+				"polling", clusterHealthPollInterval)
+		} else if healthStatus != "HEALTH_OK" && healthStatus != "HEALTH_WARN" {
+			log.Infow("waiting for cluster health to improve",
+				"currentHealth", healthStatus,
+				"polling", clusterHealthPollInterval)
+		}
+
+		time.Sleep(clusterHealthPollInterval)
+	}
+}
+
+// VerifyClusterHealthForMount verifies the cluster is healthy enough for CephFS mounts.
+// This is a pre-mount gate to fail fast with a clear message if the cluster is degraded.
+func (p *MicroCephProvider) VerifyClusterHealthForMount(ctx context.Context, sshPool *ssh.Pool, monNode string) error {
+	log := logging.L().With("component", "microceph", "monNode", monNode)
+
+	cmd := "ceph status --format json"
+	stdout, stderr, err := sshPool.Run(ctx, monNode, cmd)
+	if err != nil {
+		return fmt.Errorf("failed to get cluster status: %w (stderr: %s)", err, strings.TrimSpace(stderr))
+	}
+
+	var cs cephStatusJSON
+	if err := json.Unmarshal([]byte(stdout), &cs); err != nil {
+		return fmt.Errorf("failed to parse cluster status: %w", err)
+	}
+
+	healthStatus := cs.Health.Status
+	if healthStatus == "" {
+		healthStatus = cs.Health.OverallStatus
+	}
+
+	numOSDs := cs.OSDMap.NumOSDs
+	numUp := cs.OSDMap.NumUpOSDs
+	if cs.OSDMap.Nested.NumOSDs > 0 {
+		numOSDs = cs.OSDMap.Nested.NumOSDs
+		numUp = cs.OSDMap.Nested.NumUpOSDs
+	}
+
+	// Calculate majority
+	majorityThreshold := (numOSDs / 2) + 1
+	if majorityThreshold < 1 {
+		majorityThreshold = 1
+	}
+
+	// Check for critical failures
+	if numUp == 0 {
+		return fmt.Errorf("cannot mount CephFS: no OSDs are up (0/%d OSDs available)", numOSDs)
+	}
+
+	if numUp < majorityThreshold {
+		return fmt.Errorf("cannot mount CephFS: cluster degraded (%d/%d OSDs up, need %d for majority)",
+			numUp, numOSDs, majorityThreshold)
+	}
+
+	if healthStatus != "HEALTH_OK" && healthStatus != "HEALTH_WARN" {
+		log.Warnw("cluster health is not optimal but proceeding with mount",
+			"health", healthStatus,
+			"osdsUp", numUp,
+			"osdsTotal", numOSDs)
+	}
+
+	log.Infow("✓ cluster health verified for mount",
+		"health", healthStatus,
+		"osdsUp", numUp,
+		"osdsTotal", numOSDs)
+
+	return nil
 }
 
 // removeOSDsForNode removes any configured OSDs whose LOCATION matches this
