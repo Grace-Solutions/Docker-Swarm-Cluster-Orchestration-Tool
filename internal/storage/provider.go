@@ -373,10 +373,11 @@ func SetupCluster(ctx context.Context, sshPool *ssh.Pool, provider Provider, man
 	log.Infow("✓ cluster credentials retrieved from primary", "monAddrs", clusterCreds.MonAddrs)
 
 	// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-	// PHASE 6: Mount Storage on All Nodes
+	// PHASE 6: Mount Storage on Worker Nodes Only
 	// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+	// Managers (MON nodes) don't need storage mounted - services run on workers
 	log.Infow("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	log.Infow("PHASE 6: Mount Storage on All Nodes", "count", len(allNodes), "mountPath", mountPath)
+	log.Infow("PHASE 6: Mount Storage on Worker Nodes", "count", len(workers), "mountPath", mountPath)
 	log.Infow("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 	// Pre-mount health gate: verify cluster is healthy enough for CephFS mounts
@@ -386,12 +387,22 @@ func SetupCluster(ctx context.Context, sshPool *ssh.Pool, provider Provider, man
 	}
 	log.Infow("✓ cluster health verified for mounting")
 
-	for i, node := range allNodes {
-		log.Infow(fmtNode("→", node, fmt.Sprintf("mounting storage (%d/%d)", i+1, len(allNodes))))
+	for i, node := range workers {
+		log.Infow(fmtNode("→", node, fmt.Sprintf("mounting storage (%d/%d)", i+1, len(workers))))
 		if err := provider.MountWithCredentials(ctx, sshPool, node, ds.PoolName, clusterCreds); err != nil {
 			return fmt.Errorf("failed to mount storage on %s: %w", node, err)
 		}
 		log.Infow(fmtNode("✓", node, "storage mounted"))
+	}
+
+	// Create scripts folder and mount helper script on shared storage
+	if len(workers) > 0 {
+		log.Infow("→ creating mount helper script on shared storage")
+		if err := createMountHelperScript(ctx, sshPool, workers[0], mountPath, clusterCreds); err != nil {
+			log.Warnw("failed to create mount helper script (non-fatal)", "error", err)
+		} else {
+			log.Infow("✓ mount helper script created", "path", mountPath+"/scripts/mount-cephfs.sh")
+		}
 	}
 
 	// Step 8: Enable RADOS Gateway (S3) on OSD nodes if configured
@@ -478,6 +489,47 @@ func writeS3CredentialsFile(path string, info *RadosGatewayInfo) error {
 
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		return fmt.Errorf("failed to write credentials file: %w", err)
+	}
+
+	return nil
+}
+
+// createMountHelperScript creates a shell script on the shared storage that can be
+// copied to any node to mount the CephFS filesystem. All values are expanded inline.
+func createMountHelperScript(ctx context.Context, sshPool *ssh.Pool, node, mountPath string, creds *ClusterCredentials) error {
+	scriptsDir := mountPath + "/scripts"
+	scriptPath := scriptsDir + "/mount-cephfs.sh"
+
+	// Create scripts directory
+	mkdirCmd := fmt.Sprintf("mkdir -p %s", scriptsDir)
+	if _, _, err := sshPool.Run(ctx, node, mkdirCmd); err != nil {
+		return fmt.Errorf("failed to create scripts directory: %w", err)
+	}
+
+	// Build the script content with all values expanded
+	script := fmt.Sprintf(`#!/bin/bash
+MOUNT_PATH="%s"
+ADMIN_KEY="%s"
+FSID="%s"
+FSNAME="%s"
+MON_ADDRS="%s"
+
+mkdir -p "$MOUNT_PATH"
+mount -t ceph "admin@${FSID}.${FSNAME}=/" "$MOUNT_PATH" -o mon_addr=${MON_ADDRS},secret=${ADMIN_KEY},_netdev
+echo "Mounted CephFS at $MOUNT_PATH"
+df -h "$MOUNT_PATH"
+`, mountPath, creds.AdminKey, creds.FSID, creds.FSName, creds.MonAddrOpt)
+
+	// Write the script via SSH
+	writeCmd := fmt.Sprintf("cat > %s << 'SCRIPT_EOF'\n%sSCRIPT_EOF", scriptPath, script)
+	if _, stderr, err := sshPool.Run(ctx, node, writeCmd); err != nil {
+		return fmt.Errorf("failed to write script: %w (stderr: %s)", err, stderr)
+	}
+
+	// Make executable
+	chmodCmd := fmt.Sprintf("chmod +x %s", scriptPath)
+	if _, _, err := sshPool.Run(ctx, node, chmodCmd); err != nil {
+		return fmt.Errorf("failed to chmod script: %w", err)
 	}
 
 	return nil
