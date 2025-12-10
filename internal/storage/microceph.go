@@ -164,11 +164,64 @@ type NetworkInfo struct {
 	CIDR string // The network CIDR (e.g., "100.76.132.128/16")
 }
 
+// getDockerSubnets retrieves all Docker network subnets from the node.
+// Returns a slice of *net.IPNet representing Docker-managed network ranges.
+// These should be excluded from IP selection since Docker IPs are not routable.
+func (p *MicroCephProvider) getDockerSubnets(ctx context.Context, sshPool *ssh.Pool, node string) []*net.IPNet {
+	log := logging.L().With("component", "microceph", "node", node)
+
+	// Get all Docker network subnets using docker network inspect
+	// This handles bridge, overlay, and custom networks dynamically
+	cmd := `docker network ls -q 2>/dev/null | xargs -r docker network inspect --format '{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}' 2>/dev/null | grep -v '^$' || true`
+	stdout, _, err := sshPool.Run(ctx, node, cmd)
+	if err != nil {
+		// Docker may not be installed or running - that's fine
+		return nil
+	}
+
+	var subnets []*net.IPNet
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		cidr := strings.TrimSpace(line)
+		if cidr == "" {
+			continue
+		}
+		_, ipnet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			continue
+		}
+		subnets = append(subnets, ipnet)
+	}
+
+	if len(subnets) > 0 {
+		subnetStrs := make([]string, len(subnets))
+		for i, s := range subnets {
+			subnetStrs[i] = s.String()
+		}
+		log.Debugw("detected Docker subnets to exclude", "subnets", subnetStrs)
+	}
+
+	return subnets
+}
+
+// isIPInDockerSubnet checks if an IP address falls within any Docker network subnet.
+func isIPInDockerSubnet(ip net.IP, dockerSubnets []*net.IPNet) bool {
+	for _, subnet := range dockerSubnets {
+		if subnet.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // detectNetworkInfo detects the appropriate network IP and CIDR for Ceph cluster communication.
 // Priority: RFC 6598 overlay (100.64.0.0/10) > RFC 1918 private > none
+// Docker network subnets are excluded since they are not routable across hosts.
 // Returns both the IP (for --mon-ip) and CIDR (for --cluster-network)
 func (p *MicroCephProvider) detectNetworkInfo(ctx context.Context, sshPool *ssh.Pool, node string) *NetworkInfo {
 	log := logging.L().With("component", "microceph", "node", node)
+
+	// First, get Docker network subnets to exclude
+	dockerSubnets := p.getDockerSubnets(ctx, sshPool, node)
 
 	// Get all IPv4 addresses with their CIDR notation
 	// Using 'ip -4 addr show' to get addresses in CIDR format
@@ -179,7 +232,7 @@ func (p *MicroCephProvider) detectNetworkInfo(ctx context.Context, sshPool *ssh.
 		return nil
 	}
 
-	log.Infow("detected network addresses", "raw", strings.TrimSpace(stdout))
+	log.Debugw("detected network addresses", "raw", strings.TrimSpace(stdout))
 
 	var cgnatInfo, rfc1918Info *NetworkInfo
 	lines := strings.Split(strings.TrimSpace(stdout), "\n")
@@ -199,6 +252,12 @@ func (p *MicroCephProvider) detectNetworkInfo(ctx context.Context, sshPool *ssh.
 		// Convert to 4-byte IPv4 representation (net.IP can be 4 or 16 bytes)
 		ip4 := ip.To4()
 		if ip4 == nil {
+			continue
+		}
+
+		// Skip IPs that fall within Docker network subnets
+		if isIPInDockerSubnet(ip4, dockerSubnets) {
+			log.Debugw("skipping IP in Docker subnet", "ip", ip4.String(), "cidr", cidr)
 			continue
 		}
 
@@ -819,21 +878,21 @@ func (p *MicroCephProvider) waitForCephFS(ctx context.Context, sshPool *ssh.Pool
 // kernel client mount and the persisted /etc/fstab entry so that CephFS
 // does not block boot or `mount -a` indefinitely when the cluster or MONs
 // are slow or unreachable.
+//
+// NOTE: `mon_timeout` is NOT a valid kernel CephFS mount option. The kernel
+// driver only supports `mount_timeout` for bounding the mount operation.
+// See: https://docs.ceph.com/en/latest/man/8/mount.ceph/#options
 const (
-	// cephMonTimeoutSeconds controls how long the Ceph client waits for
-	// monitors before giving up. This is passed as the `mon_timeout` mount
-	// option.
-	cephMonTimeoutSeconds = 10
-
 	// cephMountTimeoutSeconds bounds the overall mount operation from the
 	// Ceph client's perspective via the `mount_timeout` option.
-	cephMountTimeoutSeconds = 15
+	// This is the ONLY timeout option supported by the kernel CephFS driver.
+	cephMountTimeoutSeconds = 30
 
 	// systemdMountTimeout and systemdDeviceTimeout are passed via
 	// x-systemd.* options in /etc/fstab so that systemd refuses to wait
 	// indefinitely when CephFS cannot be mounted.
-	systemdMountTimeout  = "20s"
-	systemdDeviceTimeout = "20s"
+	systemdMountTimeout  = "45s"
+	systemdDeviceTimeout = "45s"
 )
 
 // GetClusterCredentials retrieves the admin key and monitor addresses from the primary node.
@@ -972,23 +1031,19 @@ func (p *MicroCephProvider) MountWithCredentials(ctx context.Context, sshPool *s
 	// recipe closely and rely on Ceph's default filesystem selection (when a
 	// single filesystem exists) instead of passing an explicit fs=<name>
 	// option. To avoid hanging indefinitely when MONs are unreachable, we
-	// also pass Ceph's `mon_timeout` and `mount_timeout` options so the
-	// kernel client fails within a bounded time window instead of blocking
-	// boot or `mount -a` forever.
+	// pass `mount_timeout` (the ONLY timeout option supported by the kernel
+	// CephFS driver). Note: `mon_timeout` is NOT a valid kernel mount option.
 	mountCmd := fmt.Sprintf(
-		"sudo mount -t ceph %s:/ %s -o name=admin,secret=%s,_netdev,mon_timeout=%d,mount_timeout=%d",
-		creds.MonAddrs, mountPath, creds.AdminKey, cephMonTimeoutSeconds, cephMountTimeoutSeconds,
+		"sudo mount -t ceph %s:/ %s -o name=admin,secret=%s,_netdev,mount_timeout=%d",
+		creds.MonAddrs, mountPath, creds.AdminKey, cephMountTimeoutSeconds,
 	)
-	log.Infow("mounting CephFS", "monAddrs", creds.MonAddrs, "mountPath", mountPath)
+	log.Infow("mounting CephFS", "monAddrs", creds.MonAddrs, "mountPath", mountPath, "mount_timeout", cephMountTimeoutSeconds)
 	if _, stderr, err := sshPool.Run(ctx, node, mountCmd); err != nil {
-		// Capture recent kernel messages to aid in diagnosing mount failures
-		// such as "wrong fs type, bad option, bad superblock" without requiring
-		// an additional manual test cycle.
-		dmesgCmd := "dmesg | tail -n 50 || true"
-		if dmesgOut, _, dmesgErr := sshPool.Run(ctx, node, dmesgCmd); dmesgErr == nil {
-			log.Warnw("dmesg output after CephFS mount failure", "dmesgTail", strings.TrimSpace(dmesgOut))
-		} else {
-			log.Warnw("failed to collect dmesg after CephFS mount failure", "error", dmesgErr)
+		// Capture only ceph-related kernel messages to aid in diagnosing mount
+		// failures without flooding the log with unrelated dmesg output.
+		dmesgCmd := "dmesg | grep -i ceph | tail -n 10 || true"
+		if dmesgOut, _, dmesgErr := sshPool.Run(ctx, node, dmesgCmd); dmesgErr == nil && strings.TrimSpace(dmesgOut) != "" {
+			log.Warnw("ceph-related dmesg after mount failure", "dmesg", strings.TrimSpace(dmesgOut))
 		}
 
 		return fmt.Errorf("failed to mount CephFS: %w (stderr: %s)", err, stderr)
@@ -1013,13 +1068,12 @@ func (p *MicroCephProvider) ensureFstabAndReload(
 	// Build the fstab line using MON IPs and the admin key, following the
 	// documented format and relying on Ceph's default filesystem selection
 	// when only a single filesystem exists. To prevent `mount -a` and boot
-	// from hanging indefinitely when Ceph is unavailable, we also include
-	// Ceph's own timeout options (mon_timeout/mount_timeout) as well as
-	// systemd x-systemd.* timeouts:
-	//   <MON_IPS>:/ <mountPath> ceph name=admin,secret=<KEY>,_netdev,mon_timeout=10,\
-	//       mount_timeout=15,x-systemd.mount-timeout=20s,x-systemd.device-timeout=20s 0 0
-	fstabEntry := fmt.Sprintf("%s:/ %s ceph name=admin,secret=%s,_netdev,mon_timeout=%d,mount_timeout=%d,x-systemd.mount-timeout=%s,x-systemd.device-timeout=%s 0 0",
-		creds.MonAddrs, mountPath, creds.AdminKey, cephMonTimeoutSeconds, cephMountTimeoutSeconds, systemdMountTimeout, systemdDeviceTimeout)
+	// from hanging indefinitely when Ceph is unavailable, we include:
+	//   - mount_timeout: the ONLY timeout option supported by kernel CephFS driver
+	//   - x-systemd.mount-timeout / x-systemd.device-timeout: systemd timeouts
+	// NOTE: mon_timeout is NOT a valid kernel CephFS option and will cause mount failures.
+	fstabEntry := fmt.Sprintf("%s:/ %s ceph name=admin,secret=%s,_netdev,mount_timeout=%d,x-systemd.mount-timeout=%s,x-systemd.device-timeout=%s 0 0",
+		creds.MonAddrs, mountPath, creds.AdminKey, cephMountTimeoutSeconds, systemdMountTimeout, systemdDeviceTimeout)
 
 	// Ensure idempotency by removing any existing fstab lines that reference
 	// this mount path before appending the new, timeout-aware entry.
@@ -1798,10 +1852,34 @@ func (p *MicroCephProvider) EnableRadosGateway(ctx context.Context, sshPool *ssh
 	}, nil
 }
 
+// getDockerSubnetsStandalone retrieves Docker network subnets (standalone version for use outside MicroCephProvider).
+func getDockerSubnetsStandalone(ctx context.Context, sshPool *ssh.Pool, node string) []*net.IPNet {
+	cmd := `docker network ls -q 2>/dev/null | xargs -r docker network inspect --format '{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}' 2>/dev/null | grep -v '^$' || true`
+	stdout, _, err := sshPool.Run(ctx, node, cmd)
+	if err != nil {
+		return nil
+	}
+
+	var subnets []*net.IPNet
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		cidr := strings.TrimSpace(line)
+		if cidr == "" {
+			continue
+		}
+		_, ipnet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			continue
+		}
+		subnets = append(subnets, ipnet)
+	}
+	return subnets
+}
+
 // resolveNodeIP resolves the best IP address for a node with precedence:
 // 1. Overlay IP (Netbird / Tailscale)
-// 2. Private IP (first non-loopback address)
+// 2. Private IP (first non-loopback, non-Docker address)
 // 3. SSH node string as a final fallback
+// Docker network subnets are excluded since they are not routable across hosts.
 func resolveNodeIP(ctx context.Context, sshPool *ssh.Pool, node, overlayProvider string) string {
 	log := logging.L().With("component", "resolve-ip", "node", node)
 	overlayProvider = strings.ToLower(strings.TrimSpace(overlayProvider))
@@ -1840,16 +1918,29 @@ func resolveNodeIP(ctx context.Context, sshPool *ssh.Pool, node, overlayProvider
 		}
 	}
 
-	// 2. Private IP (first non-loopback address)
+	// Get Docker subnets to exclude
+	dockerSubnets := getDockerSubnetsStandalone(ctx, sshPool, node)
+
+	// 2. Private IP (first non-loopback, non-Docker address)
 	// Use hostname -I on Linux which returns a space-separated list of addresses.
 	stdout, _, err := sshPool.Run(ctx, node, "hostname -I 2>/dev/null || hostname -i 2>/dev/null || echo ''")
 	if err == nil {
 		fields := strings.Fields(strings.TrimSpace(stdout))
 		for _, f := range fields {
-			if f != "127.0.0.1" && f != "::1" {
-				log.Debugw("using private IP", "ip", f)
-				return f
+			if f == "127.0.0.1" || f == "::1" {
+				continue
 			}
+			ip := net.ParseIP(f)
+			if ip == nil {
+				continue
+			}
+			// Skip IPs in Docker subnets
+			if isIPInDockerSubnet(ip, dockerSubnets) {
+				log.Debugw("skipping IP in Docker subnet", "ip", f)
+				continue
+			}
+			log.Debugw("using private IP", "ip", f)
+			return f
 		}
 	}
 
