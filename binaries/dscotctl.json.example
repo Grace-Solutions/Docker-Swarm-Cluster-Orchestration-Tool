@@ -21,7 +21,7 @@
           "enableUpdates": false,
           "mountPath": "/mnt/MicroCephFS/docker-swarm-0001",
           "allowLoopDevices": true,
-          "loopDeviceDirectory": "/var/snap/microceph/common",
+          "loopDeviceDirectory": "/mnt/MicroCephFS/LoopDevices",
           "loopDeviceSizeGB": 16,
           "loopDeviceThinProvision": true,
           "enableRadosGateway": false,
