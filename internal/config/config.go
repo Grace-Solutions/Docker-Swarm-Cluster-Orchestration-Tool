@@ -71,6 +71,13 @@ type MicroCephProviderConfig struct {
 	// Default: 7480
 	RadosGatewayPort int `json:"radosGatewayPort"`
 
+	// RadosGatewayMultisite enables multisite replication for S3 objects.
+	// When true, objects written via S3 protocol are replicated across RGW instances.
+	// This configures realm, zonegroup, zone, and sync policies automatically.
+	// Requires multiple OSD nodes for meaningful replication.
+	// Default: true (replication enabled by default for HA)
+	RadosGatewayMultisite bool `json:"radosGatewayMultisite"`
+
 	// S3BucketName is the name of the S3 bucket to create when EnableRadosGateway is true.
 	// If empty, no bucket is created.
 	// Default: "" (no bucket created)

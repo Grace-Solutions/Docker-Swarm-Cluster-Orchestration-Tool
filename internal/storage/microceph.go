@@ -1910,9 +1910,10 @@ func (p *MicroCephProvider) Status(ctx context.Context, sshPool *ssh.Pool, node 
 // EnableRadosGateway enables RADOS Gateway (S3-compatible) on the specified OSD nodes.
 // RGW is enabled on workers (OSD nodes) only. Each node runs the enable command locally
 // using $(hostname) for proper targeting. Individual node failures are non-fatal.
+// enableMultisite enables S3 object replication across RGW instances (realm/zonegroup/zone).
 // Hostname precedence for endpoints: overlay hostname > overlay IP > private hostname > private IP.
-func (p *MicroCephProvider) EnableRadosGateway(ctx context.Context, sshPool *ssh.Pool, osdNodes []string, port int, overlayProvider string) (*RadosGatewayInfo, error) {
-	log := logging.L().With("component", "microceph-rgw", "port", port, "nodes", len(osdNodes), "overlayProvider", overlayProvider)
+func (p *MicroCephProvider) EnableRadosGateway(ctx context.Context, sshPool *ssh.Pool, osdNodes []string, port int, overlayProvider string, enableMultisite bool) (*RadosGatewayInfo, error) {
+	log := logging.L().With("component", "microceph-rgw", "port", port, "nodes", len(osdNodes), "overlayProvider", overlayProvider, "multisite", enableMultisite)
 
 	if len(osdNodes) == 0 {
 		return nil, fmt.Errorf("no OSD nodes provided for RGW")
@@ -1922,6 +1923,7 @@ func (p *MicroCephProvider) EnableRadosGateway(ctx context.Context, sshPool *ssh
 	}
 
 	// Enable RGW on each OSD node by running the command ON that node with $(hostname)
+	// --multisite enables S3 object replication (realm/zonegroup/zone/sync policies)
 	const maxAttempts = 3
 	const retryDelay = 5 * time.Second
 	const cmdTimeout = 60 // seconds
@@ -1932,8 +1934,12 @@ func (p *MicroCephProvider) EnableRadosGateway(ctx context.Context, sshPool *ssh
 	for _, targetNode := range osdNodes {
 		nodeLog := log.With("targetNode", targetNode)
 
-		// Run on the target node itself using $(hostname) for correct targeting
-		enableCmd := fmt.Sprintf("timeout %d microceph enable rgw --port %d --target=\"$(hostname)\"", cmdTimeout, port)
+		// Build command with optional --multisite flag
+		multisiteFlag := ""
+		if enableMultisite {
+			multisiteFlag = " --multisite"
+		}
+		enableCmd := fmt.Sprintf("timeout %d microceph enable rgw --port %d --target=\"$(hostname)\"%s", cmdTimeout, port, multisiteFlag)
 		nodeLog.Infow("enabling RADOS Gateway on node", "command", enableCmd)
 
 		var lastErr error

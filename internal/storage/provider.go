@@ -80,8 +80,9 @@ type Provider interface {
 
 	// EnableRadosGateway enables the RADOS Gateway (S3-compatible) on specified OSD nodes.
 	// overlayProvider is used for hostname precedence: overlay hostname > overlay IP > private hostname > private IP.
+	// enableMultisite enables S3 object replication across RGW instances.
 	// Returns the S3 endpoint URL and credentials.
-	EnableRadosGateway(ctx context.Context, sshPool *ssh.Pool, osdNodes []string, port int, overlayProvider string) (*RadosGatewayInfo, error)
+	EnableRadosGateway(ctx context.Context, sshPool *ssh.Pool, osdNodes []string, port int, overlayProvider string, enableMultisite bool) (*RadosGatewayInfo, error)
 
 	// CreateS3Bucket creates an S3 bucket using the RADOS Gateway.
 	// Returns nil if bucket already exists.
@@ -410,8 +411,10 @@ func SetupCluster(ctx context.Context, sshPool *ssh.Pool, provider Provider, man
 	mcCfg := ds.Providers.MicroCeph
 	if mcCfg.EnableRadosGateway && len(workers) > 0 {
 		overlayProvider := strings.ToLower(strings.TrimSpace(cfg.GlobalSettings.OverlayProvider))
-		log.Infow("→ Step 8: Enabling RADOS Gateway (S3) on OSD nodes", "port", mcCfg.RadosGatewayPort, "nodes", len(workers), "overlayProvider", overlayProvider)
-		rgwInfo, err := provider.EnableRadosGateway(ctx, sshPool, workers, mcCfg.RadosGatewayPort, overlayProvider)
+		// Default multisite to true if not explicitly set to false (for S3 object replication)
+		enableMultisite := mcCfg.RadosGatewayMultisite || len(workers) > 1
+		log.Infow("→ Step 8: Enabling RADOS Gateway (S3) on OSD nodes", "port", mcCfg.RadosGatewayPort, "nodes", len(workers), "overlayProvider", overlayProvider, "multisite", enableMultisite)
+		rgwInfo, err := provider.EnableRadosGateway(ctx, sshPool, workers, mcCfg.RadosGatewayPort, overlayProvider, enableMultisite)
 		if err != nil {
 			return fmt.Errorf("failed to enable RADOS Gateway: %w", err)
 		}
