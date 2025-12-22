@@ -222,10 +222,11 @@ Each node supports extensive per-node configuration with overrides:
   - When `false`: Connects with `password` or `privateKeyPath` and installs the auto-generated public key for future use
   - **Key Generation**: New key pair is generated **only when**:
     - The `sshkeys/` directory doesn't exist, OR
-    - The `sshkeys/` directory is empty (no timestamped folders), OR
-    - The latest timestamped folder doesn't contain valid `PrivateKey` and `PublicKey` files
+    - The `sshkeys/` directory is empty (no UUID folders), OR
+    - The latest UUID folder doesn't contain valid `PrivateKey` and `PublicKey` files
   - **Key Reuse**: Otherwise, uses existing key pair from latest folder (by modified date descending)
-  - **Location**: `sshkeys/yyyy.MM.dd.HHmm/PrivateKey` and `sshkeys/yyyy.MM.dd.HHmm/PublicKey` next to binary
+  - **Location**: `sshkeys/<uuid>/PrivateKey.ppk` and `sshkeys/<uuid>/PublicKey.pubkey` next to binary
+  - **Public Key Comment**: `ssh-<uuid>` (e.g., `ssh-ed25519 AAAA... ssh-a1b2c3d4-e5f6-...`)
   - **Persistence**: Keys are never deleted from disk, always kept for future deployments
 - `sshPort`: SSH port per node (default: `22`)
 

@@ -11,9 +11,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"clusterctl/internal/logging"
+	"github.com/google/uuid"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -182,19 +182,19 @@ func EnsureKeyPair(keyDir string) (*KeyPair, error) {
 		}
 	}
 
-	// Generate new key pair in timestamped folder
-	timestamp := time.Now().Format("2006.01.02.1504")
-	timestampedDir := filepath.Join(keyDir, timestamp)
+	// Generate new key pair in UUID folder (lowercase)
+	keyUUID := strings.ToLower(uuid.New().String())
+	uuidDir := filepath.Join(keyDir, keyUUID)
 
-	if err := os.MkdirAll(timestampedDir, 0700); err != nil {
-		return nil, fmt.Errorf("failed to create timestamped key directory: %w", err)
+	if err := os.MkdirAll(uuidDir, 0700); err != nil {
+		return nil, fmt.Errorf("failed to create UUID key directory: %w", err)
 	}
 
-	privateKeyPath := filepath.Join(timestampedDir, PrivateKeyFileName)
-	publicKeyPath := filepath.Join(timestampedDir, PublicKeyFileName)
-	passwordPath := filepath.Join(timestampedDir, PasswordFileName)
+	privateKeyPath := filepath.Join(uuidDir, PrivateKeyFileName)
+	publicKeyPath := filepath.Join(uuidDir, PublicKeyFileName)
+	passwordPath := filepath.Join(uuidDir, PasswordFileName)
 
-	log.Infow("generating new SSH key pair", "path", privateKeyPath)
+	log.Infow("generating new SSH key pair", "path", privateKeyPath, "uuid", keyUUID)
 
 	// Generate random password for private key encryption
 	password, err := generateRandomPassword(32)
@@ -210,8 +210,9 @@ func EnsureKeyPair(keyDir string) (*KeyPair, error) {
 
 	// Marshal private key to OpenSSH format with password encryption
 	// ssh.MarshalPrivateKeyWithPassphrase encrypts the key with the given passphrase
-	// The second parameter is a comment (empty here), third is the passphrase
-	privateKeyPEM, err := ssh.MarshalPrivateKeyWithPassphrase(crypto.PrivateKey(privateKey), "", []byte(password))
+	// The second parameter is a comment with ssh-<uuid> identifier, third is the passphrase
+	keyComment := fmt.Sprintf("ssh-%s", keyUUID)
+	privateKeyPEM, err := ssh.MarshalPrivateKeyWithPassphrase(crypto.PrivateKey(privateKey), keyComment, []byte(password))
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal private key with passphrase: %w", err)
 	}
@@ -232,12 +233,14 @@ func EnsureKeyPair(keyDir string) (*KeyPair, error) {
 		return nil, fmt.Errorf("failed to write password file: %w", err)
 	}
 
-	// Generate OpenSSH format public key
+	// Generate OpenSSH format public key with ssh-<uuid> comment
 	sshPublicKey, err := ssh.NewPublicKey(publicKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create SSH public key: %w", err)
 	}
-	publicKeyStr := string(ssh.MarshalAuthorizedKey(sshPublicKey))
+	// MarshalAuthorizedKey returns "ssh-ed25519 AAAA...\n", we need to add comment before newline
+	pubKeyBytes := ssh.MarshalAuthorizedKey(sshPublicKey)
+	publicKeyStr := strings.TrimSpace(string(pubKeyBytes)) + " " + keyComment + "\n"
 
 	// Write public key
 	if err := os.WriteFile(publicKeyPath, []byte(publicKeyStr), 0644); err != nil {
