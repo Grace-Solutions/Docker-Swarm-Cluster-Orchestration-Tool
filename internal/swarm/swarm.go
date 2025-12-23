@@ -74,10 +74,17 @@ func Join(ctx context.Context, token, managerAddr string) error {
 	return nil
 }
 
-// JoinToken returns the join token for the given role ("manager" or
-// "worker"). It must be called on a Swarm manager node.
+// JoinToken returns the join token for the given role ("manager", "worker", or "both").
+// "both" returns the manager token since those nodes join as managers.
+// It must be called on a Swarm manager node.
 func JoinToken(ctx context.Context, role string) (string, error) {
-	if role != "manager" && role != "worker" {
+	// Normalize role: "both" nodes join as managers
+	tokenRole := role
+	if role == "both" {
+		tokenRole = "manager"
+	}
+
+	if tokenRole != "manager" && tokenRole != "worker" {
 		return "", fmt.Errorf("swarm: invalid role %q", role)
 	}
 
@@ -85,7 +92,7 @@ func JoinToken(ctx context.Context, role string) (string, error) {
 		return "", err
 	}
 
-	cmd := exec.CommandContext(ctx, "docker", "swarm", "join-token", "-q", role)
+	cmd := exec.CommandContext(ctx, "docker", "swarm", "join-token", "-q", tokenRole)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err

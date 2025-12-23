@@ -212,7 +212,7 @@ type NodeConfig struct {
 	SSHPort                int    `json:"sshPort"`                // SSH port (default: 22)
 
 	// Node Role Settings
-	Role string `json:"role"` // "manager" or "worker" (required)
+	Role string `json:"role"` // "manager", "worker", or "both" (required)
 
 	// System Settings
 	NewHostname        string `json:"newHostname"`        // New hostname to set (optional, idempotent)
@@ -290,10 +290,11 @@ func (c *Config) Validate() error {
 		if node.SSHFQDNorIP == "" {
 			return fmt.Errorf("node %d: sshFQDNorIP is required", i)
 		}
-		if node.Role != "manager" && node.Role != "worker" {
-			return fmt.Errorf("node %d (%s): role must be 'manager' or 'worker'", i, node.SSHFQDNorIP)
+		if node.Role != "manager" && node.Role != "worker" && node.Role != "both" {
+			return fmt.Errorf("node %d (%s): role must be 'manager', 'worker', or 'both'", i, node.SSHFQDNorIP)
 		}
-		if node.Role == "manager" {
+		// "both" counts as a manager (it will be a manager that also has OSD storage)
+		if node.Role == "manager" || node.Role == "both" {
 			managerCount++
 		}
 

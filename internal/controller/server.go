@@ -205,7 +205,7 @@ func handleConn(ctx context.Context, conn net.Conn, store *fileStore, opts Serve
 		}
 	}
 
-	if action == "register" && resp.Status == StatusReady && (reg.Role == "manager" || reg.Role == "worker") {
+	if action == "register" && resp.Status == StatusReady && (reg.Role == "manager" || reg.Role == "worker" || reg.Role == "both") {
 		if token, err := swarm.JoinToken(ctx, reg.Role); err != nil {
 			logging.L().Infow(fmt.Sprintf("failed to fetch swarm join token for role=%s: %v", reg.Role, err))
 		} else {
@@ -220,8 +220,8 @@ func handleConn(ctx context.Context, conn net.Conn, store *fileStore, opts Serve
 		resp.StorageEnabled = true
 		resp.StorageReady = state.StorageReady
 
-		if reg.Role == "worker" || reg.Role == "manager" {
-			// Both workers and managers can participate in distributed storage.
+		if reg.Role == "worker" || reg.Role == "manager" || reg.Role == "both" {
+			// Workers, managers, and "both" nodes can participate in distributed storage.
 			if !state.StorageReady {
 				resp.Status = StatusWaiting
 				if action == "register" {

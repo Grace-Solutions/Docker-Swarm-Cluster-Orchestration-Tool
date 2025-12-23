@@ -262,8 +262,8 @@ func validateJoinOptions(opts JoinOptions) error {
 	if opts.Role == "" {
 		opts.Role = "worker"
 	}
-	if opts.Role != "manager" && opts.Role != "worker" {
-		return errors.New("role must be 'manager' or 'worker'")
+	if opts.Role != "manager" && opts.Role != "worker" && opts.Role != "both" {
+		return errors.New("role must be 'manager', 'worker', or 'both'")
 	}
 	return nil
 }

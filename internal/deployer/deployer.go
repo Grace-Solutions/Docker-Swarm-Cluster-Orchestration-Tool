@@ -977,15 +977,21 @@ func getStorageNodes(cfg *config.Config) []string {
 
 // getStorageNodesByRole returns storage-enabled nodes categorized by role.
 // For MicroCeph: managers become MON nodes, workers become OSD nodes.
+// "both" nodes are managers that also get OSD storage (they go in both categories).
 func getStorageNodesByRole(cfg *config.Config) (managers []string, workers []string) {
 	enabledNodes := getEnabledNodes(cfg)
 	for _, node := range enabledNodes {
 		if !node.StorageEnabled {
 			continue
 		}
-		if node.Role == "manager" {
+		switch node.Role {
+		case "manager":
 			managers = append(managers, node.SSHFQDNorIP)
-		} else if node.Role == "worker" {
+		case "worker":
+			workers = append(workers, node.SSHFQDNorIP)
+		case "both":
+			// "both" nodes act as managers for MON and also get OSD storage like workers
+			managers = append(managers, node.SSHFQDNorIP)
 			workers = append(workers, node.SSHFQDNorIP)
 		}
 	}
@@ -993,12 +999,15 @@ func getStorageNodesByRole(cfg *config.Config) (managers []string, workers []str
 }
 
 // categorizeNodes returns enabled managers and workers.
+// For Docker Swarm: "both" nodes join as managers (they can run manager workloads).
 func categorizeNodes(cfg *config.Config) (managers []string, workers []string) {
 	enabledNodes := getEnabledNodes(cfg)
 	for _, node := range enabledNodes {
-		if node.Role == "manager" {
+		switch node.Role {
+		case "manager", "both":
+			// "both" nodes join swarm as managers
 			managers = append(managers, node.SSHFQDNorIP)
-		} else if node.Role == "worker" {
+		case "worker":
 			workers = append(workers, node.SSHFQDNorIP)
 		}
 	}

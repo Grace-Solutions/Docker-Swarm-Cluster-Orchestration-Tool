@@ -233,9 +233,11 @@ Each node supports extensive per-node configuration with overrides:
 - `sshPort`: SSH port per node (default: `22`)
 
 **Node Role Settings:**
-- `role`: `manager` or `worker` (required)
-  - **Note**: First manager in the list becomes the primary master (no `primaryMaster` field needed)
-  - This allows deployment from a separate control server that's not part of the swarm
+- `role`: `manager`, `worker`, or `both` (required)
+  - `manager`: Swarm manager node (MON only for MicroCeph)
+  - `worker`: Swarm worker node (OSD only for MicroCeph)
+  - `both`: Joins swarm as manager AND gets OSD storage (for smaller clusters)
+  - **Note**: First manager/both in the list becomes the primary master
 
 **System Settings:**
 - `newHostname`: New hostname to set on this node (optional, idempotent)
@@ -279,7 +281,7 @@ The deployer automatically applies comprehensive labels to each Docker Swarm nod
 - `storage.provider`: Storage provider (e.g., "microceph")
 - `storage.mount-path`: CephFS mount path (if enabled)
 - `cluster.name`: Cluster name from global settings
-- `node.role`: "manager" or "worker"
+- `node.role`: "manager", "worker", or "both"
 
 **Label Precedence:**
 1. Automatic labels are applied first
