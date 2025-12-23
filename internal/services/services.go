@@ -265,8 +265,8 @@ func deployService(ctx context.Context, sshPool *ssh.Pool, primaryMaster string,
 	}
 
 	// Deploy using docker stack deploy with --prune to remove orphaned services
-	// Use --detach=false to wait for deployment and get proper error reporting
-	deployCmd := fmt.Sprintf("docker stack deploy --prune --detach=false -c %s %s", remoteFile, svc.Name)
+	// Use --detach=true explicitly to avoid warning about future default change
+	deployCmd := fmt.Sprintf("docker stack deploy --prune --detach=true -c %s %s", remoteFile, svc.Name)
 
 	log.Infow("deploying Docker stack", "host", primaryMaster, "stack", svc.Name, "command", deployCmd)
 
@@ -287,33 +287,18 @@ func deployService(ctx context.Context, sshPool *ssh.Pool, primaryMaster string,
 }
 
 // replaceStoragePaths replaces distributed storage mount paths in YAML content with the configured path.
-// It uses regex to match common storage path patterns and replaces them with the configured storageMountPath.
-// Supports both legacy GlusterFS paths and new CephFS paths.
+// It dynamically matches any /mnt/<storage-type>/<cluster-name> pattern and replaces with storageMountPath.
+// Preserves any subdirectories after the base mount path.
 func replaceStoragePaths(content string, storageMountPath string) string {
-	// Common storage path patterns to replace:
-	// - /mnt/GlusterFS/cluster-name/data/ServiceName (legacy)
-	// - /mnt/GlusterFS/cluster-name/scripts (legacy)
-	// - /mnt/cephfs/cluster-name/...
-	// - /mnt/storage/cluster-name/...
-	// - /mnt/MicroCephFS/cluster-name/...
-	// The pattern captures the base mount path (up to cluster-name) and preserves subdirs after it
+	// Dynamic pattern: /mnt/<any-storage-type>/<any-cluster-name>
+	// Matches: /mnt/GlusterFS/docker-swarm-0001, /mnt/cephfs/my-cluster, /mnt/nfs/prod, etc.
+	// The pattern matches /mnt/ followed by a storage type name and cluster/volume name
+	// Storage type: alphanumeric with optional hyphens/underscores (e.g., GlusterFS, MicroCephFS, cephfs, nfs)
+	// Cluster name: alphanumeric with optional hyphens/underscores/dots (e.g., docker-swarm-0001, my-cluster)
+	// Preserves anything after (e.g., /data/Portainer, /scripts)
+	pattern := `/mnt/[A-Za-z0-9_-]+/[A-Za-z0-9._-]+`
 
-	// Use regex to find and replace storage paths
-	// Pattern matches: /mnt/<storage-type>/<cluster-name> and replaces with storageMountPath
-	// Preserves any paths after the cluster-name (e.g., /data/Portainer, /scripts, etc.)
-	patterns := []string{
-		`/mnt/[Gg]luster[Ff][Ss]/[^/]+`,     // Legacy GlusterFS: /mnt/GlusterFS/docker-swarm-0001
-		`/mnt/MicroCephFS/[^/]+`,            // MicroCeph: /mnt/MicroCephFS/docker-swarm-0001
-		`/mnt/cephfs/[^/]+`,                 // CephFS: /mnt/cephfs/docker-swarm-0001
-		`/mnt/storage/[^/]+`,                // Generic storage: /mnt/storage/docker-swarm-0001
-	}
-
-	replaced := content
-	for _, pattern := range patterns {
-		re := regexp.MustCompile(pattern)
-		replaced = re.ReplaceAllString(replaced, storageMountPath)
-	}
-
-	return replaced
+	re := regexp.MustCompile(pattern)
+	return re.ReplaceAllString(content, storageMountPath)
 }
 
