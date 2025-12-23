@@ -1989,7 +1989,8 @@ func (p *MicroCephProvider) EnableRadosGateway(ctx context.Context, sshPool *ssh
 	}
 
 	if len(enabledNodes) == 0 {
-		return nil, fmt.Errorf("failed to enable RGW on any node")
+		log.Warnw("⚠️ RGW could not be enabled on any node (S3 will not be available)", "failedNodes", len(failedNodes))
+		return nil, nil // Non-fatal: return nil error so deployment continues
 	}
 
 	// Wait for RGW services to start
@@ -2004,7 +2005,8 @@ func (p *MicroCephProvider) EnableRadosGateway(ctx context.Context, sshPool *ssh
 	log.Infow("creating/retrieving S3 user", "userId", userID, "node", primaryOSD)
 	stdout, stderr, err := sshPool.Run(ctx, primaryOSD, createUserCmd)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create/get S3 user: %w (stderr: %s)", err, stderr)
+		log.Warnw("⚠️ failed to create S3 user (RGW enabled but S3 user not available)", "error", err, "stderr", stderr)
+		return nil, nil // Non-fatal: RGW is enabled but S3 user creation failed
 	}
 
 	// Parse the user info JSON to extract access_key and secret_key
