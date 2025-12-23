@@ -159,7 +159,21 @@ func SetupCluster(ctx context.Context, sshPool *ssh.Pool, provider Provider, man
 	ds := cfg.GetDistributedStorage()
 	mountPath := provider.GetMountPath()
 
-	allNodes := append(managers, workers...)
+	// Build deduplicated list of all nodes (since "both" nodes appear in both managers and workers)
+	allNodes := []string{}
+	seen := make(map[string]bool)
+	for _, node := range managers {
+		if !seen[node] {
+			seen[node] = true
+			allNodes = append(allNodes, node)
+		}
+	}
+	for _, node := range workers {
+		if !seen[node] {
+			seen[node] = true
+			allNodes = append(allNodes, node)
+		}
+	}
 	if len(allNodes) == 0 {
 		return fmt.Errorf("no storage nodes provided")
 	}
