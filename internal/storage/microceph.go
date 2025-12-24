@@ -1963,10 +1963,9 @@ func (p *MicroCephProvider) Status(ctx context.Context, sshPool *ssh.Pool, node 
 // EnableRadosGateway enables RADOS Gateway (S3-compatible) on the specified OSD nodes.
 // RGW is enabled on workers (OSD nodes) only. Each node runs the enable command locally
 // using $(hostname) for proper targeting. Individual node failures are non-fatal.
-// enableMultisite enables S3 object replication across RGW instances (realm/zonegroup/zone).
 // Hostname precedence for endpoints: overlay hostname > overlay IP > private hostname > private IP.
-func (p *MicroCephProvider) EnableRadosGateway(ctx context.Context, sshPool *ssh.Pool, osdNodes []string, port int, overlayProvider string, enableMultisite bool) (*RadosGatewayInfo, error) {
-	log := logging.L().With("component", "microceph-rgw", "port", port, "nodes", len(osdNodes), "overlayProvider", overlayProvider, "multisite", enableMultisite)
+func (p *MicroCephProvider) EnableRadosGateway(ctx context.Context, sshPool *ssh.Pool, osdNodes []string, port int, overlayProvider string) (*RadosGatewayInfo, error) {
+	log := logging.L().With("component", "microceph-rgw", "port", port, "nodes", len(osdNodes), "overlayProvider", overlayProvider)
 
 	if len(osdNodes) == 0 {
 		return nil, fmt.Errorf("no OSD nodes provided for RGW")
@@ -1975,8 +1974,7 @@ func (p *MicroCephProvider) EnableRadosGateway(ctx context.Context, sshPool *ssh
 		port = 7480 // Default RGW port
 	}
 
-	// Enable RGW on each OSD node using hostname with precedence
-	// Try with --multisite first (if requested), fall back without if "unknown flag" error
+	// Enable RGW on each OSD node using system hostname
 	const maxAttempts = 3
 	const retryDelay = 5 * time.Second
 	const cmdTimeout = 60 // seconds
@@ -2002,15 +2000,9 @@ func (p *MicroCephProvider) EnableRadosGateway(ctx context.Context, sshPool *ssh
 
 		var lastErr error
 		enabled := false
-		useMultisite := enableMultisite
 
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
-			// Build command with optional --multisite flag
-			multisiteFlag := ""
-			if useMultisite {
-				multisiteFlag = " --multisite"
-			}
-			enableCmd := fmt.Sprintf("timeout %d microceph enable rgw --port %d --target=\"%s\"%s", cmdTimeout, port, systemHostname, multisiteFlag)
+			enableCmd := fmt.Sprintf("timeout %d microceph enable rgw --port %d --target=\"%s\"", cmdTimeout, port, systemHostname)
 			nodeLog.Infow("enabling RADOS Gateway on node", "command", enableCmd, "attempt", attempt)
 
 			stdout, stderr, err := sshPool.Run(ctx, targetNode, enableCmd)
@@ -2026,13 +2018,6 @@ func (p *MicroCephProvider) EnableRadosGateway(ctx context.Context, sshPool *ssh
 				nodeLog.Infow("RGW already enabled on node", "systemHostname", systemHostname)
 				enabled = true
 				break
-			}
-
-			// Check if --multisite is not supported and retry without it
-			if useMultisite && strings.Contains(strings.ToLower(combined), "unknown flag") && strings.Contains(strings.ToLower(combined), "multisite") {
-				nodeLog.Warnw("--multisite flag not supported by this MicroCeph version, retrying without it")
-				useMultisite = false
-				continue // Retry immediately without multisite
 			}
 
 			lastErr = fmt.Errorf("%w (stderr: %s)", err, strings.TrimSpace(stderr))
@@ -2190,11 +2175,42 @@ func parseRadosGWUserKeys(jsonOutput string) (accessKey, secretKey string, err e
 }
 
 // CreateS3Bucket creates an S3 bucket using radosgw-admin.
-func (p *MicroCephProvider) CreateS3Bucket(ctx context.Context, sshPool *ssh.Pool, primaryOSD string, bucketName string) error {
+func (p *MicroCephProvider) CreateS3Bucket(ctx context.Context, sshPool *ssh.Pool, primaryOSD string, bucketName string, rgwPort int) error {
 	log := logging.L().With("component", "microceph-s3", "node", primaryOSD, "bucket", bucketName)
 
 	if bucketName == "" {
 		return fmt.Errorf("bucket name is required")
+	}
+	if rgwPort == 0 {
+		rgwPort = 7480
+	}
+
+	// Wait for RGW to be ready using curl health check
+	log.Infow("waiting for RGW endpoint to be ready", "port", rgwPort)
+	const maxHealthChecks = 10
+	const healthCheckDelay = 3 * time.Second
+	rgwReady := false
+
+	for attempt := 1; attempt <= maxHealthChecks; attempt++ {
+		curlCmd := fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' http://127.0.0.1:%d/ 2>/dev/null || echo '000'", rgwPort)
+		stdout, _, _ := sshPool.Run(ctx, primaryOSD, curlCmd)
+		httpCode := strings.TrimSpace(stdout)
+
+		if httpCode == "200" || httpCode == "403" || httpCode == "404" {
+			// 200 = OK, 403 = Forbidden (auth required), 404 = Not found (but RGW is responding)
+			log.Infow("✓ RGW endpoint is ready", "httpCode", httpCode, "attempt", attempt)
+			rgwReady = true
+			break
+		}
+
+		if attempt < maxHealthChecks {
+			log.Debugw("RGW not ready yet, waiting", "httpCode", httpCode, "attempt", attempt)
+			time.Sleep(healthCheckDelay)
+		}
+	}
+
+	if !rgwReady {
+		return fmt.Errorf("RGW endpoint not ready after %d attempts", maxHealthChecks)
 	}
 
 	// Get the S3 user credentials first
