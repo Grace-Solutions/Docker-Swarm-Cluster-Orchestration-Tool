@@ -293,12 +293,13 @@ func EnsureDefaultNetworks(ctx context.Context) error {
 		// Continue anyway - our network might still work as non-ingress
 	}
 
-	// Create internal network (for inter-service communication)
+	// Create internal communication network (overlay for inter-service communication)
+	// Named "internal" but not using --internal flag so containers can still reach external if needed
 	internal := NetworkSpec{
 		Name:     DefaultInternalNetworkName,
 		Subnet:   "10.10.0.0/20",
 		Gateway:  "10.10.0.1",
-		Internal: true,  // Internal-only network (no external access)
+		Internal: false, // Regular overlay (not --internal restricted)
 		Ingress:  false, // Not an ingress network
 	}
 	if err := EnsureOverlayNetwork(ctx, internal); err != nil {
