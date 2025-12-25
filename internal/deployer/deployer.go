@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"clusterctl/internal/config"
+	"clusterctl/internal/defaults"
 	"clusterctl/internal/geolocation"
 	"clusterctl/internal/logging"
 	"clusterctl/internal/orchestrator"
@@ -1516,7 +1517,7 @@ func unmountDistributedStorage(ctx context.Context, sshPool *ssh.Pool, nodes []s
 	// Get mount path from provider config
 	mountPath := ds.Providers.MicroCeph.MountPath
 	if mountPath == "" {
-		mountPath = "/mnt/cephfs"
+		mountPath = defaults.CephFSMountPath
 	}
 
 	for _, node := range nodes {
@@ -1562,7 +1563,7 @@ func removeOverlayNetworks(ctx context.Context, sshPool *ssh.Pool, primaryManage
 }
 
 // createDefaultOverlayNetworks creates the default internal and external overlay networks via SSH.
-// Uses 10.10.x.x and 10.20.x.x ranges to avoid conflicts with Docker's default bridge (172.17.0.0/16).
+// Network configurations are defined in the defaults package.
 // The external network is created as an ingress network for routing mesh.
 func createDefaultOverlayNetworks(ctx context.Context, sshPool *ssh.Pool, primaryManager string) error {
 	log := logging.L().With("component", "overlay-networks")
@@ -1576,32 +1577,8 @@ func createDefaultOverlayNetworks(ctx context.Context, sshPool *ssh.Pool, primar
 		log.Warnw("could not remove default ingress network (may have services attached)", "error", err, "stderr", stderr)
 	}
 
-	// Define the networks with their specs
-	// Uses 10.x.x.x ranges to avoid conflict with Docker bridge (172.17.0.0/16)
-	networks := []struct {
-		Name     string
-		Subnet   string
-		Gateway  string
-		Internal bool
-		Ingress  bool
-	}{
-		{
-			Name:     swarm.DefaultInternalNetworkName,
-			Subnet:   "10.10.0.0/20",
-			Gateway:  "10.10.0.1",
-			Internal: true,
-			Ingress:  false,
-		},
-		{
-			Name:     swarm.DefaultExternalNetworkName,
-			Subnet:   "10.20.0.0/20",
-			Gateway:  "10.20.0.1",
-			Internal: false,
-			Ingress:  true, // This is the ingress network for routing mesh
-		},
-	}
-
-	for _, network := range networks {
+	// Use centralized network configs from defaults package
+	for _, network := range defaults.AllNetworks() {
 		// Check if network already exists with correct subnet
 		checkSubnetCmd := fmt.Sprintf("docker network inspect %s --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null", network.Name)
 		existingSubnet, _, _ := sshPool.Run(ctx, primaryManager, checkSubnetCmd)
@@ -1942,7 +1919,7 @@ func basicStorageTeardown(ctx context.Context, sshPool *ssh.Pool, nodes []string
 	// Get mount path from provider config
 	mountPath := ds.Providers.MicroCeph.MountPath
 	if mountPath == "" {
-		mountPath = "/mnt/cephfs"
+		mountPath = defaults.CephFSMountPath
 	}
 
 	for _, node := range nodes {
@@ -2011,7 +1988,7 @@ func verifyStorageTeardown(ctx context.Context, sshPool *ssh.Pool, node string, 
 	// Check 3: Mount path should not exist or be empty
 	mountPath := ds.Providers.MicroCeph.MountPath
 	if mountPath == "" {
-		mountPath = "/mnt/cephfs"
+		mountPath = defaults.CephFSMountPath
 	}
 	mountCheck := fmt.Sprintf("mountpoint -q %s 2>/dev/null && echo 'mounted' || echo 'not mounted'", mountPath)
 	stdout, _, _ = sshPool.Run(ctx, node, mountCheck)

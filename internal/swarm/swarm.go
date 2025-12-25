@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"clusterctl/internal/defaults"
 	"clusterctl/internal/deps"
 	"clusterctl/internal/logging"
 )
@@ -168,17 +169,13 @@ func Leave(ctx context.Context, force bool) error {
 }
 
 // NetworkSpec describes the desired shape of a Swarm overlay network.
-type NetworkSpec struct {
-	Name     string
-	Subnet   string
-	Gateway  string
-	Internal bool // If true, network is internal-only (no external access)
-	Ingress  bool // If true, network is the swarm ingress network for routing mesh
-}
+// This is an alias for defaults.NetworkConfig to maintain backward compatibility.
+type NetworkSpec = defaults.NetworkConfig
 
+// Network name constants - aliases for defaults package for backward compatibility.
 const (
-	DefaultInternalNetworkName = "DOCKER-SWARM-CLUSTER-INTERNAL-COMMUNICATION"
-	DefaultExternalNetworkName = "DOCKER-SWARM-CLUSTER-EXTERNAL-INGRESS"
+	DefaultInternalNetworkName = defaults.InternalNetworkName
+	DefaultExternalNetworkName = defaults.ExternalNetworkName
 )
 
 // getNetworkSubnet returns the subnet of an existing Docker network, or empty string if not found.
@@ -278,8 +275,7 @@ func EnsureOverlayNetwork(ctx context.Context, spec NetworkSpec) error {
 
 // EnsureDefaultNetworks ensures the default internal and external overlay
 // networks exist on the primary manager. It is safe to call multiple times.
-// Uses 10.10.x.x and 10.20.x.x ranges to avoid conflicts with Docker's default
-// bridge network (172.17.0.0/16) and docker_gwbridge (172.18.0.0/16).
+// Network configurations are defined in the defaults package.
 // The external network is created as an ingress network for routing mesh,
 // and the default "ingress" network is removed.
 func EnsureDefaultNetworks(ctx context.Context) error {
@@ -293,29 +289,11 @@ func EnsureDefaultNetworks(ctx context.Context) error {
 		// Continue anyway - our network might still work as non-ingress
 	}
 
-	// Create internal communication network (overlay for inter-service communication)
-	// Named "internal" but not using --internal flag so containers can still reach external if needed
-	internal := NetworkSpec{
-		Name:     DefaultInternalNetworkName,
-		Subnet:   "10.10.0.0/20",
-		Gateway:  "10.10.0.1",
-		Internal: false, // Regular overlay (not --internal restricted)
-		Ingress:  false, // Not an ingress network
-	}
-	if err := EnsureOverlayNetwork(ctx, internal); err != nil {
-		return err
-	}
-
-	// Create external ingress network (for external traffic routing mesh)
-	external := NetworkSpec{
-		Name:     DefaultExternalNetworkName,
-		Subnet:   "10.20.0.0/20",
-		Gateway:  "10.20.0.1",
-		Internal: false, // External-facing network
-		Ingress:  true,  // This is the ingress network for routing mesh
-	}
-	if err := EnsureOverlayNetwork(ctx, external); err != nil {
-		return err
+	// Create all default networks from centralized config
+	for _, network := range defaults.AllNetworks() {
+		if err := EnsureOverlayNetwork(ctx, network); err != nil {
+			return err
+		}
 	}
 
 	return nil

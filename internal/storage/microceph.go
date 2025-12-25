@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"clusterctl/internal/config"
+	"clusterctl/internal/defaults"
 	"clusterctl/internal/ipdetect"
 	"clusterctl/internal/logging"
 	"clusterctl/internal/ssh"
@@ -42,7 +43,7 @@ func (p *MicroCephProvider) Install(ctx context.Context, sshPool *ssh.Pool, node
 	mcCfg := ds.Providers.MicroCeph
 	channel := mcCfg.SnapChannel
 	if channel == "" {
-		channel = "reef/stable"
+		channel = defaults.MicroCephSnapChannel
 	}
 
 	// Install microceph snap
@@ -1974,7 +1975,7 @@ func (p *MicroCephProvider) EnableRadosGateway(ctx context.Context, sshPool *ssh
 		return nil, fmt.Errorf("no OSD nodes provided for RGW")
 	}
 	if port == 0 {
-		port = 7480 // Default RGW port
+		port = defaults.RadosGatewayPort
 	}
 
 	// Enable RGW on each OSD node using system hostname
@@ -2049,8 +2050,8 @@ func (p *MicroCephProvider) EnableRadosGateway(ctx context.Context, sshPool *ssh
 
 	// Create S3 user for cluster access (run on first enabled node)
 	primaryOSD := enabledNodes[0]
-	userID := "dscotctl-s3-admin"
-	displayName := "DSCOTCTL S3 Admin"
+	userID := defaults.S3AdminUser
+	displayName := defaults.S3AdminDisplayName
 	createUserCmd := fmt.Sprintf("radosgw-admin user create --uid=%s --display-name=\"%s\" 2>/dev/null || radosgw-admin user info --uid=%s", userID, displayName, userID)
 	log.Infow("creating/retrieving S3 user", "userId", userID, "node", primaryOSD)
 	stdout, stderr, err := sshPool.Run(ctx, primaryOSD, createUserCmd)
@@ -2185,7 +2186,7 @@ func (p *MicroCephProvider) CreateS3Bucket(ctx context.Context, sshPool *ssh.Poo
 		return fmt.Errorf("bucket name is required")
 	}
 	if rgwPort == 0 {
-		rgwPort = 7480
+		rgwPort = defaults.RadosGatewayPort
 	}
 
 	// Wait for RGW to be ready using curl health check
@@ -2217,7 +2218,7 @@ func (p *MicroCephProvider) CreateS3Bucket(ctx context.Context, sshPool *ssh.Poo
 	}
 
 	// Get the S3 user credentials first
-	userID := "dscotctl-s3-admin"
+	userID := defaults.S3AdminUser
 	getUserCmd := fmt.Sprintf("radosgw-admin user info --uid=%s", userID)
 	stdout, stderr, err := sshPool.Run(ctx, primaryOSD, getUserCmd)
 	if err != nil {
@@ -2251,11 +2252,11 @@ func (p *MicroCephProvider) CreateS3Bucket(ctx context.Context, sshPool *ssh.Poo
 	s3cfgContent := fmt.Sprintf(`[default]
 access_key = %s
 secret_key = %s
-host_base = 127.0.0.1:7480
-host_bucket = 127.0.0.1:7480/%%(bucket)s
+host_base = 127.0.0.1:%d
+host_bucket = 127.0.0.1:%d/%%(bucket)s
 use_https = False
 signature_v2 = True
-`, accessKey, secretKey)
+`, accessKey, secretKey, rgwPort, rgwPort)
 
 	configureCmd := fmt.Sprintf("cat > /tmp/.s3cfg << 'EOF'\n%sEOF", s3cfgContent)
 	if _, stderr, err := sshPool.Run(ctx, primaryOSD, configureCmd); err != nil {

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"clusterctl/internal/defaults"
 )
 
 // Config represents the cluster configuration loaded from JSON.
@@ -312,10 +314,11 @@ func (c *Config) Validate() error {
 }
 
 // ApplyDefaults applies default values to the configuration.
+// Default values are centralized in the defaults package.
 func (c *Config) ApplyDefaults() {
 	// Global defaults
 	if c.GlobalSettings.OverlayProvider == "" {
-		c.GlobalSettings.OverlayProvider = "none"
+		c.GlobalSettings.OverlayProvider = defaults.OverlayProviderNone
 	}
 
 	// DistributedStorage defaults (now under GlobalSettings)
@@ -324,27 +327,27 @@ func (c *Config) ApplyDefaults() {
 		ds.Provider = StorageProviderMicroCeph
 	}
 	if ds.PoolName == "" {
-		ds.PoolName = "docker-swarm"
+		ds.PoolName = defaults.CephPoolName
 	}
 
 	// MicroCeph provider defaults
 	mc := &ds.Providers.MicroCeph
 	if mc.SnapChannel == "" {
-		mc.SnapChannel = "reef/stable"
+		mc.SnapChannel = defaults.MicroCephSnapChannel
 	}
 	if mc.MountPath == "" {
-		mc.MountPath = "/mnt/cephfs"
+		mc.MountPath = defaults.CephFSMountPath
 	}
 	if mc.LoopDeviceDirectory == "" {
-		mc.LoopDeviceDirectory = "/var/snap/microceph/common"
+		mc.LoopDeviceDirectory = defaults.CephLoopDeviceDirectory
 	}
 	if mc.LoopDeviceSizeGB == 0 {
-		mc.LoopDeviceSizeGB = 4
+		mc.LoopDeviceSizeGB = defaults.CephLoopDeviceSizeGB
 	}
 	// LoopDeviceThinProvision defaults to true (set explicitly since zero value is false)
 	// This is handled by checking if the struct was unmarshaled with the field set
 	if mc.RadosGatewayPort == 0 {
-		mc.RadosGatewayPort = 7480
+		mc.RadosGatewayPort = defaults.RadosGatewayPort
 	}
 
 	// Node defaults
@@ -357,10 +360,10 @@ func (c *Config) ApplyDefaults() {
 
 		// SSH defaults
 		if c.Nodes[i].Username == "" {
-			c.Nodes[i].Username = "root"
+			c.Nodes[i].Username = defaults.SSHUsername
 		}
 		if c.Nodes[i].SSHPort == 0 {
-			c.Nodes[i].SSHPort = 22
+			c.Nodes[i].SSHPort = defaults.SSHPort
 		}
 	}
 }
