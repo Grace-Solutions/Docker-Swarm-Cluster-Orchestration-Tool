@@ -1562,42 +1562,74 @@ func removeOverlayNetworks(ctx context.Context, sshPool *ssh.Pool, primaryManage
 }
 
 // createDefaultOverlayNetworks creates the default internal and external overlay networks via SSH.
+// Uses 10.10.x.x and 10.20.x.x ranges to avoid conflicts with Docker's default bridge (172.17.0.0/16).
+// The external network is created as an ingress network for routing mesh.
 func createDefaultOverlayNetworks(ctx context.Context, sshPool *ssh.Pool, primaryManager string) error {
 	log := logging.L().With("component", "overlay-networks")
 
+	// First, remove the default "ingress" network to free up the ingress slot
+	// Docker only allows one ingress network at a time
+	log.Infow("checking for default ingress network to replace")
+	removeIngressCmd := "docker network rm ingress 2>/dev/null || true"
+	log.Infow("removing default ingress network", "command", removeIngressCmd)
+	if _, stderr, err := sshPool.Run(ctx, primaryManager, removeIngressCmd); err != nil {
+		log.Warnw("could not remove default ingress network (may have services attached)", "error", err, "stderr", stderr)
+	}
+
 	// Define the networks with their specs
+	// Uses 10.x.x.x ranges to avoid conflict with Docker bridge (172.17.0.0/16)
 	networks := []struct {
 		Name     string
 		Subnet   string
 		Gateway  string
 		Internal bool
+		Ingress  bool
 	}{
 		{
 			Name:     swarm.DefaultInternalNetworkName,
-			Subnet:   "172.17.16.0/20",
-			Gateway:  "172.17.16.1",
+			Subnet:   "10.10.0.0/20",
+			Gateway:  "10.10.0.1",
 			Internal: true,
+			Ingress:  false,
 		},
 		{
 			Name:     swarm.DefaultExternalNetworkName,
-			Subnet:   "172.17.32.0/20",
-			Gateway:  "172.17.32.1",
+			Subnet:   "10.20.0.0/20",
+			Gateway:  "10.20.0.1",
 			Internal: false,
+			Ingress:  true, // This is the ingress network for routing mesh
 		},
 	}
 
 	for _, network := range networks {
-		// Check if network already exists
-		checkCmd := fmt.Sprintf("docker network inspect %s --format '{{.Name}}' 2>/dev/null", network.Name)
-		stdout, _, _ := sshPool.Run(ctx, primaryManager, checkCmd)
-		if strings.TrimSpace(stdout) == network.Name {
-			log.Infow("overlay network already exists", "network", network.Name)
-			continue
+		// Check if network already exists with correct subnet
+		checkSubnetCmd := fmt.Sprintf("docker network inspect %s --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null", network.Name)
+		existingSubnet, _, _ := sshPool.Run(ctx, primaryManager, checkSubnetCmd)
+		existingSubnet = strings.TrimSpace(existingSubnet)
+
+		if existingSubnet != "" {
+			if existingSubnet == network.Subnet {
+				log.Infow("overlay network already exists with correct subnet", "network", network.Name, "subnet", existingSubnet)
+				continue
+			}
+			// Subnet mismatch - need to remove and recreate
+			log.Warnw("network exists with different subnet, will recreate", "network", network.Name, "existing", existingSubnet, "desired", network.Subnet)
+			removeCmd := fmt.Sprintf("docker network rm %s", network.Name)
+			log.Infow("removing network with wrong subnet", "command", removeCmd)
+			if _, stderr, err := sshPool.Run(ctx, primaryManager, removeCmd); err != nil {
+				return fmt.Errorf("failed to remove network %s with wrong subnet: %w (stderr: %s)", network.Name, err, stderr)
+			}
 		}
 
 		// Build create command
-		createCmd := fmt.Sprintf("docker network create --driver overlay --attachable --subnet %s --gateway %s",
-			network.Subnet, network.Gateway)
+		createCmd := "docker network create --driver overlay"
+		if network.Ingress {
+			createCmd += " --ingress"
+		} else {
+			// Only attachable for non-ingress networks (ingress cannot be attachable)
+			createCmd += " --attachable"
+		}
+		createCmd += fmt.Sprintf(" --subnet %s --gateway %s", network.Subnet, network.Gateway)
 		if network.Internal {
 			createCmd += " --internal"
 		}
@@ -1607,7 +1639,14 @@ func createDefaultOverlayNetworks(ctx context.Context, sshPool *ssh.Pool, primar
 		if _, stderr, err := sshPool.Run(ctx, primaryManager, createCmd); err != nil {
 			return fmt.Errorf("failed to create network %s: %w (stderr: %s)", network.Name, err, stderr)
 		}
-		log.Infow("✅ overlay network created", "network", network.Name, "subnet", network.Subnet, "internal", network.Internal)
+
+		netType := "overlay"
+		if network.Ingress {
+			netType = "ingress"
+		} else if network.Internal {
+			netType = "internal"
+		}
+		log.Infow("✅ overlay network created", "network", network.Name, "subnet", network.Subnet, "type", netType)
 	}
 
 	return nil
