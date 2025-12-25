@@ -173,6 +173,7 @@ type NetworkSpec struct {
 	Subnet   string
 	Gateway  string
 	Internal bool // If true, network is internal-only (no external access)
+	Ingress  bool // If true, network is the swarm ingress network for routing mesh
 }
 
 const (
@@ -180,9 +181,40 @@ const (
 	DefaultExternalNetworkName = "DOCKER-SWARM-CLUSTER-EXTERNAL-INGRESS"
 )
 
+// getNetworkSubnet returns the subnet of an existing Docker network, or empty string if not found.
+func getNetworkSubnet(ctx context.Context, networkName string) string {
+	cmd := exec.CommandContext(ctx, "docker", "network", "inspect", networkName, "--format", "{{range .IPAM.Config}}{{.Subnet}}{{end}}")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// removeNetwork removes a Docker network by name. Returns nil if network doesn't exist.
+func removeNetwork(ctx context.Context, networkName string) error {
+	log := logging.L()
+	cmdStr := fmt.Sprintf("docker network rm %s", networkName)
+	log.Infow("removing Docker network", "command", cmdStr)
+
+	cmd := exec.CommandContext(ctx, "docker", "network", "rm", networkName)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		// Check if network doesn't exist (not an error)
+		if strings.Contains(string(out), "not found") || strings.Contains(string(out), "No such network") {
+			return nil
+		}
+		return fmt.Errorf("failed to remove network %s: %w (output: %s)", networkName, err, strings.TrimSpace(string(out)))
+	}
+	log.Infow("✅ Docker network removed", "name", networkName)
+	return nil
+}
+
 // EnsureOverlayNetwork ensures an attachable overlay network with the given
-// IPAM configuration exists. If the network already exists it is left as-is.
+// IPAM configuration exists. If the network exists with a different subnet,
+// it will be removed and recreated with the correct subnet.
 func EnsureOverlayNetwork(ctx context.Context, spec NetworkSpec) error {
+	log := logging.L()
 	if spec.Name == "" {
 		return errors.New("swarm: network name is required")
 	}
@@ -191,15 +223,28 @@ func EnsureOverlayNetwork(ctx context.Context, spec NetworkSpec) error {
 		return err
 	}
 
-	// Fast-path: if the network exists, leave it alone.
-	inspectCmd := exec.CommandContext(ctx, "docker", "network", "inspect", spec.Name, "--format", "{{.Name}}")
-	out, err := inspectCmd.Output()
-	if err == nil && strings.TrimSpace(string(out)) == spec.Name {
-		logging.L().Infow("swarm overlay network already present", "name", spec.Name)
-		return nil
+	// Check if network exists and verify subnet
+	existingSubnet := getNetworkSubnet(ctx, spec.Name)
+	if existingSubnet != "" {
+		if existingSubnet == spec.Subnet {
+			log.Infow("swarm overlay network already present with correct subnet", "name", spec.Name, "subnet", existingSubnet)
+			return nil
+		}
+		// Subnet mismatch - need to recreate
+		log.Warnw("network exists with different subnet, will recreate", "name", spec.Name, "existing", existingSubnet, "desired", spec.Subnet)
+		if err := removeNetwork(ctx, spec.Name); err != nil {
+			return fmt.Errorf("failed to remove network with mismatched subnet: %w", err)
+		}
 	}
 
-	args := []string{"network", "create", "--driver", "overlay", "--attachable"}
+	// Build create command
+	args := []string{"network", "create", "--driver", "overlay"}
+	if spec.Ingress {
+		args = append(args, "--ingress")
+	} else {
+		// Only attachable for non-ingress networks (ingress networks cannot be attachable)
+		args = append(args, "--attachable")
+	}
 	if spec.Internal {
 		args = append(args, "--internal")
 	}
@@ -212,19 +257,22 @@ func EnsureOverlayNetwork(ctx context.Context, spec NetworkSpec) error {
 	args = append(args, spec.Name)
 
 	// Log the command before execution
-	logging.L().Infow("creating Docker overlay network", "command", fmt.Sprintf("docker %s", strings.Join(args, " ")))
+	log.Infow("creating Docker overlay network", "command", fmt.Sprintf("docker %s", strings.Join(args, " ")))
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
-	out, err = cmd.CombinedOutput()
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("swarm: network create %s failed: %w (output: %s)", spec.Name, err, strings.TrimSpace(string(out)))
 	}
 
-	internalStr := "external"
+	netType := "external"
 	if spec.Internal {
-		internalStr = "internal-only"
+		netType = "internal-only"
 	}
-	logging.L().Infow("✅ swarm overlay network created", "name", spec.Name, "subnet", spec.Subnet, "gateway", spec.Gateway, "type", internalStr)
+	if spec.Ingress {
+		netType = "ingress"
+	}
+	log.Infow("✅ swarm overlay network created", "name", spec.Name, "subnet", spec.Subnet, "gateway", spec.Gateway, "type", netType)
 	return nil
 }
 
@@ -232,22 +280,38 @@ func EnsureOverlayNetwork(ctx context.Context, spec NetworkSpec) error {
 // networks exist on the primary manager. It is safe to call multiple times.
 // Uses 10.10.x.x and 10.20.x.x ranges to avoid conflicts with Docker's default
 // bridge network (172.17.0.0/16) and docker_gwbridge (172.18.0.0/16).
+// The external network is created as an ingress network for routing mesh,
+// and the default "ingress" network is removed.
 func EnsureDefaultNetworks(ctx context.Context) error {
+	log := logging.L()
+
+	// First, remove the default "ingress" network to free up the ingress slot
+	// Docker only allows one ingress network at a time
+	log.Infow("checking for default ingress network to replace")
+	if err := removeNetwork(ctx, "ingress"); err != nil {
+		log.Warnw("could not remove default ingress network (may have services attached)", "error", err)
+		// Continue anyway - our network might still work as non-ingress
+	}
+
+	// Create internal network (for inter-service communication)
 	internal := NetworkSpec{
 		Name:     DefaultInternalNetworkName,
 		Subnet:   "10.10.0.0/20",
 		Gateway:  "10.10.0.1",
-		Internal: true, // Internal-only network (no external access)
+		Internal: true,  // Internal-only network (no external access)
+		Ingress:  false, // Not an ingress network
 	}
 	if err := EnsureOverlayNetwork(ctx, internal); err != nil {
 		return err
 	}
 
+	// Create external ingress network (for external traffic routing mesh)
 	external := NetworkSpec{
 		Name:     DefaultExternalNetworkName,
 		Subnet:   "10.20.0.0/20",
 		Gateway:  "10.20.0.1",
 		Internal: false, // External-facing network
+		Ingress:  true,  // This is the ingress network for routing mesh
 	}
 	if err := EnsureOverlayNetwork(ctx, external); err != nil {
 		return err

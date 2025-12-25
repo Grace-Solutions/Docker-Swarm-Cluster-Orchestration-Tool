@@ -243,6 +243,9 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 		"duration", metrics.Duration.String(),
 	)
 
+	// Show final network summary
+	showNetworkSummary(ctx, sshPool, primaryMaster)
+
 	return metrics, nil
 }
 
@@ -316,6 +319,9 @@ func deployService(ctx context.Context, sshPool *ssh.Pool, primaryMaster string,
 		log.Warnw("failed to cleanup temporary file", "file", remoteFile, "error", err)
 	}
 
+	// Verify deployment - show service status, networks, and logs
+	verifyDeployment(ctx, sshPool, primaryMaster, svc.Name)
+
 	return nil
 }
 
@@ -359,3 +365,130 @@ func replaceStoragePaths(content string, storageMountPath string) string {
 	return re.ReplaceAllString(content, storageMountPath)
 }
 
+// verifyDeployment shows verification info for a deployed service including
+// service status, network info, and recent logs.
+func verifyDeployment(ctx context.Context, sshPool *ssh.Pool, host string, stackName string) {
+	log := logging.L().With("component", "services", "stack", stackName)
+
+	// Get service list for this stack
+	serviceListCmd := fmt.Sprintf("docker service ls --filter name=%s --format '{{.ID}}\\t{{.Name}}\\t{{.Mode}}\\t{{.Replicas}}\\t{{.Image}}'", stackName)
+	log.Infow("→ verifying deployment", "command", serviceListCmd)
+
+	stdout, _, err := sshPool.Run(ctx, host, serviceListCmd)
+	if err != nil {
+		log.Warnw("failed to get service list", "error", err)
+	} else if strings.TrimSpace(stdout) != "" {
+		lines := strings.Split(strings.TrimSpace(stdout), "\n")
+		for _, line := range lines {
+			parts := strings.Split(line, "\t")
+			if len(parts) >= 5 {
+				log.Infow("  service status",
+					"id", parts[0],
+					"name", parts[1],
+					"mode", parts[2],
+					"replicas", parts[3],
+					"image", parts[4],
+				)
+			}
+		}
+	}
+
+	// Get networks used by services in this stack
+	networkCmd := fmt.Sprintf("docker service inspect %s_%s --format '{{range .Spec.TaskTemplate.Networks}}{{.Target}} {{end}}' 2>/dev/null || docker service inspect %s --format '{{range .Spec.TaskTemplate.Networks}}{{.Target}} {{end}}' 2>/dev/null || echo ''", stackName, stackName, stackName)
+	stdout, _, err = sshPool.Run(ctx, host, networkCmd)
+	if err == nil && strings.TrimSpace(stdout) != "" {
+		networkIDs := strings.Fields(strings.TrimSpace(stdout))
+		for _, netID := range networkIDs {
+			// Get network details
+			netDetailCmd := fmt.Sprintf("docker network inspect %s --format '{{.Name}}|{{range .IPAM.Config}}{{.Subnet}}{{end}}|{{.Ingress}}|{{.Internal}}'", netID)
+			netOut, _, nerr := sshPool.Run(ctx, host, netDetailCmd)
+			if nerr == nil && strings.TrimSpace(netOut) != "" {
+				parts := strings.Split(strings.TrimSpace(netOut), "|")
+				if len(parts) >= 4 {
+					netType := "overlay"
+					if parts[2] == "true" {
+						netType = "ingress"
+					} else if parts[3] == "true" {
+						netType = "internal"
+					}
+					log.Infow("  network",
+						"name", parts[0],
+						"subnet", parts[1],
+						"type", netType,
+					)
+				}
+			}
+		}
+	}
+
+	// Get recent logs (last 5 lines) for services in this stack
+	logsCmd := fmt.Sprintf("docker service logs --tail 5 --no-trunc %s_%s 2>&1 || docker service logs --tail 5 --no-trunc %s 2>&1 || echo 'no logs available'", stackName, stackName, stackName)
+	log.Infow("→ recent logs", "command", fmt.Sprintf("docker service logs --tail 5 %s", stackName))
+	stdout, _, err = sshPool.Run(ctx, host, logsCmd)
+	if err == nil && strings.TrimSpace(stdout) != "" {
+		logLines := strings.Split(strings.TrimSpace(stdout), "\n")
+		// Show at most 5 lines
+		maxLines := 5
+		if len(logLines) < maxLines {
+			maxLines = len(logLines)
+		}
+		for i := 0; i < maxLines; i++ {
+			// Truncate long lines
+			line := logLines[i]
+			if len(line) > 200 {
+				line = line[:200] + "..."
+			}
+			log.Infow("  log", "line", line)
+		}
+	}
+}
+
+// showNetworkSummary displays a summary of all Docker networks at the end of deployment.
+func showNetworkSummary(ctx context.Context, sshPool *ssh.Pool, host string) {
+	log := logging.L().With("component", "services")
+
+	// Get all networks with their subnets
+	networkCmd := "docker network ls --format '{{.Name}}' | xargs -I {} docker network inspect {} --format '{{.Name}}|{{range .IPAM.Config}}{{.Subnet}}{{end}}|{{.Driver}}|{{.Ingress}}|{{.Internal}}' 2>/dev/null"
+	log.Infow("=== Network Summary ===", "command", "docker network ls + inspect")
+
+	stdout, _, err := sshPool.Run(ctx, host, networkCmd)
+	if err != nil {
+		log.Warnw("failed to get network summary", "error", err)
+		return
+	}
+
+	if strings.TrimSpace(stdout) == "" {
+		log.Infow("no networks found")
+		return
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	for _, line := range lines {
+		parts := strings.Split(line, "|")
+		if len(parts) >= 5 {
+			name := parts[0]
+			subnet := parts[1]
+			driver := parts[2]
+			isIngress := parts[3] == "true"
+			isInternal := parts[4] == "true"
+
+			netType := driver
+			if isIngress {
+				netType = "ingress"
+			} else if isInternal {
+				netType = "internal"
+			}
+
+			// Skip networks without subnets (like host, none)
+			if subnet == "" {
+				continue
+			}
+
+			log.Infow("  network",
+				"name", name,
+				"subnet", subnet,
+				"type", netType,
+			)
+		}
+	}
+}
