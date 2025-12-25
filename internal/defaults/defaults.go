@@ -52,7 +52,7 @@ const (
 	MicroCephSnapChannel = "reef/stable"
 
 	// CephFSMountPath is the default mount path for CephFS.
-	CephFSMountPath = "/mnt/cephfs"
+	CephFSMountPath = "/mnt/MicroCephFS/docker-swarm-0001"
 
 	// ServiceDataSubdir is the subdirectory under the storage mount for service data.
 	ServiceDataSubdir = "data"

@@ -4,7 +4,7 @@
 
 services:
   NginxUI:
-    image: 0xjacky/nginx-ui:latest
+    image: uozi/nginx-ui:sha-4754ef3
     hostname: 'Nginx-UI-{{.Task.Slot}}'
     environment:
       TZ: UTC
@@ -22,8 +22,8 @@ services:
         protocol: tcp
         mode: host
     volumes:
-      - /mnt/cephfs/data/NginxUI:/etc/nginx
-      - /mnt/cephfs/data/NginxUI/app:/app
+      - /mnt/MicroCephFS/docker-swarm-0001/data/NginxUI:/etc/nginx
+      - /mnt/MicroCephFS/docker-swarm-0001/data/NginxUI/app:/app
     networks:
       - DOCKER-SWARM-CLUSTER-INTERNAL-COMMUNICATION
     deploy:
