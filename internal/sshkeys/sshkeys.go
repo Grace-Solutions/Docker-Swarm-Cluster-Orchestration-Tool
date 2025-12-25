@@ -95,9 +95,35 @@ func readPasswordFile(passwordPath string) (string, error) {
 	return "", nil // Empty file = no password
 }
 
-// getLatestKeyFolder returns the latest key folder based on modified date descending.
-// Returns empty string if no folders exist.
+// isUUIDFolder checks if a folder name matches the UUID format (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).
+func isUUIDFolder(name string) bool {
+	// UUID format: 8-4-4-4-12 hex chars with dashes
+	// Example: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+	if len(name) != 36 {
+		return false
+	}
+	// Check dash positions
+	if name[8] != '-' || name[13] != '-' || name[18] != '-' || name[23] != '-' {
+		return false
+	}
+	// Check that all other chars are hex
+	for i, c := range name {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			continue // skip dashes
+		}
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+// getLatestKeyFolder returns the latest UUID key folder based on modified date descending.
+// Only considers folders matching UUID format (ignores old date-based folders).
+// Returns empty string if no UUID folders exist.
 func getLatestKeyFolder(baseDir string) (string, error) {
+	log := logging.L().With("component", "sshkeys")
+
 	entries, err := os.ReadDir(baseDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -106,26 +132,28 @@ func getLatestKeyFolder(baseDir string) (string, error) {
 		return "", fmt.Errorf("failed to read key directory: %w", err)
 	}
 
-	// Filter for directories only
-	var folders []os.DirEntry
+	// Filter for directories matching UUID format only
+	var uuidFolders []os.DirEntry
 	for _, entry := range entries {
-		if entry.IsDir() {
-			folders = append(folders, entry)
+		if entry.IsDir() && isUUIDFolder(entry.Name()) {
+			uuidFolders = append(uuidFolders, entry)
+		} else if entry.IsDir() {
+			log.Debugw("ignoring non-UUID folder", "folder", entry.Name())
 		}
 	}
 
-	if len(folders) == 0 {
+	if len(uuidFolders) == 0 {
 		return "", nil
 	}
 
 	// Sort by modified time descending
-	sort.Slice(folders, func(i, j int) bool {
-		infoI, _ := folders[i].Info()
-		infoJ, _ := folders[j].Info()
+	sort.Slice(uuidFolders, func(i, j int) bool {
+		infoI, _ := uuidFolders[i].Info()
+		infoJ, _ := uuidFolders[j].Info()
 		return infoI.ModTime().After(infoJ.ModTime())
 	})
 
-	return filepath.Join(baseDir, folders[0].Name()), nil
+	return filepath.Join(baseDir, uuidFolders[0].Name()), nil
 }
 
 // EnsureKeyPair ensures an SSH key pair exists, generating it if necessary.
