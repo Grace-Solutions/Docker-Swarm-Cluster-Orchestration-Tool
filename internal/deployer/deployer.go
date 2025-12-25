@@ -253,6 +253,7 @@ func Deploy(ctx context.Context, cfg *config.Config) error {
 	// sshWorkers only contains nodes with role="worker" (not "both" or "manager")
 	clusterInfo := services.ClusterInfo{
 		HasDedicatedWorkers: len(sshWorkers) > 0,
+		AllNodes:            allSSHNodes, // All nodes for directory creation
 	}
 	metrics, err := services.DeployServices(ctx, sshPool, primaryMaster, cfg.GlobalSettings.ServiceDefinitionDirectory, storageMountPath, clusterInfo)
 	if err != nil {

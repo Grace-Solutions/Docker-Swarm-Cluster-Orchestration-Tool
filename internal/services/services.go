@@ -38,7 +38,8 @@ type DeploymentMetrics struct {
 
 // ClusterInfo contains information about the cluster composition for dynamic constraint handling
 type ClusterInfo struct {
-	HasDedicatedWorkers bool // true if there are nodes with role="worker" (not just managers or "both")
+	HasDedicatedWorkers bool     // true if there are nodes with role="worker" (not just managers or "both")
+	AllNodes            []string // list of all SSH-accessible nodes for directory creation
 }
 
 const (
@@ -289,6 +290,18 @@ func deployService(ctx context.Context, sshPool *ssh.Pool, primaryMaster string,
 		}
 	}
 
+	// Parse bind mounts from the processed content and create directories on all nodes
+	// This ensures directories exist before service deployment to avoid mount failures
+	if storageMountPath != "" && len(clusterInfo.AllNodes) > 0 {
+		bindMountPaths := parseBindMounts(processedContent, storageMountPath)
+		if len(bindMountPaths) > 0 {
+			if err := ensureDirectoriesOnNodes(ctx, sshPool, clusterInfo.AllNodes, bindMountPaths, svc.Name); err != nil {
+				log.Warnw("failed to create some bind mount directories", "error", err)
+				// Continue anyway - directories might already exist or be created by other means
+			}
+		}
+	}
+
 	// Create temporary file on remote host
 	remoteFile := fmt.Sprintf("/tmp/dscotctl-service-%s.yml", svc.Name)
 
@@ -364,6 +377,92 @@ func replaceStoragePaths(content string, storageMountPath string) string {
 
 	re := regexp.MustCompile(pattern)
 	return re.ReplaceAllString(content, storageMountPath)
+}
+
+// parseBindMounts extracts host paths from bind mount volume definitions in YAML content.
+// It parses both short form ("host:container") and long form (source:/path, target:/path) volumes.
+// Only returns paths that start with the storage mount path prefix.
+func parseBindMounts(content string, storageMountPath string) []string {
+	if storageMountPath == "" {
+		return nil
+	}
+
+	var paths []string
+	seenPaths := make(map[string]bool)
+
+	// Pattern for short form volumes: - /host/path:/container/path or - /host/path:/container/path:ro
+	shortFormPattern := regexp.MustCompile(`^\s*-\s*([^:\s]+):([^:\s]+)(?::[^:\s]+)?$`)
+
+	// Pattern for long form source: /host/path
+	longFormPattern := regexp.MustCompile(`^\s*source:\s*([^\s]+)`)
+
+	lines := strings.Split(content, "\n")
+	for _, line := range lines {
+		var hostPath string
+
+		// Try short form first
+		if matches := shortFormPattern.FindStringSubmatch(line); len(matches) >= 2 {
+			hostPath = matches[1]
+		} else if matches := longFormPattern.FindStringSubmatch(line); len(matches) >= 2 {
+			// Try long form
+			hostPath = matches[1]
+		}
+
+		// Only include paths under the storage mount path
+		if hostPath != "" && strings.HasPrefix(hostPath, storageMountPath) {
+			// Normalize path and avoid duplicates
+			hostPath = strings.TrimSuffix(hostPath, "/")
+			if !seenPaths[hostPath] {
+				seenPaths[hostPath] = true
+				paths = append(paths, hostPath)
+			}
+		}
+	}
+
+	return paths
+}
+
+// ensureDirectoriesOnNodes creates directories on all nodes if they don't exist.
+// This is idempotent - directories are created with mkdir -p only if they don't exist.
+func ensureDirectoriesOnNodes(ctx context.Context, sshPool *ssh.Pool, nodes []string, directories []string, serviceName string) error {
+	if len(directories) == 0 || len(nodes) == 0 {
+		return nil
+	}
+
+	log := logging.L().With("component", "services", "service", serviceName)
+
+	// Build a single command that creates all directories
+	// Using mkdir -p makes this idempotent
+	var quotedPaths []string
+	for _, dir := range directories {
+		quotedPaths = append(quotedPaths, fmt.Sprintf("'%s'", dir))
+	}
+	mkdirCmd := fmt.Sprintf("mkdir -p %s", strings.Join(quotedPaths, " "))
+
+	log.Infow("ensuring bind mount directories exist",
+		"directories", directories,
+		"nodeCount", len(nodes),
+	)
+
+	// Create directories on all nodes in parallel by iterating
+	// (SSH pool handles connection reuse)
+	var errors []string
+	for _, node := range nodes {
+		log.Infow("creating directories", "host", node, "command", mkdirCmd)
+		if _, stderr, err := sshPool.Run(ctx, node, mkdirCmd); err != nil {
+			errMsg := fmt.Sprintf("%s: %v (stderr: %s)", node, err, stderr)
+			log.Warnw("failed to create directories on node", "host", node, "error", err, "stderr", stderr)
+			errors = append(errors, errMsg)
+		} else {
+			log.Infow("✅ directories created", "host", node)
+		}
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("failed to create directories on some nodes: %s", strings.Join(errors, "; "))
+	}
+
+	return nil
 }
 
 // ServiceInfo represents Docker service information from JSON output.

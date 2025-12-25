@@ -20,7 +20,7 @@ services:
         protocol: tcp
         mode: ingress
     volumes:
-      - /mnt/GlusterFS/docker-swarm-0001/data/Portainer:/data
+      - /mnt/cephfs/data/Portainer:/data
     networks:
       - DOCKER-SWARM-CLUSTER-INTERNAL-COMMUNICATION
     deploy:

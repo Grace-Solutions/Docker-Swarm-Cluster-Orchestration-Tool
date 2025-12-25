@@ -22,8 +22,8 @@ services:
         protocol: tcp
         mode: host
     volumes:
-      - /mnt/GlusterFS/docker-swarm-0001/data/NginxUI:/etc/nginx
-      - /mnt/GlusterFS/docker-swarm-0001/data/NginxUI/app:/app
+      - /mnt/cephfs/data/NginxUI:/etc/nginx
+      - /mnt/cephfs/data/NginxUI/app:/app
     networks:
       - DOCKER-SWARM-CLUSTER-INTERNAL-COMMUNICATION
     deploy:

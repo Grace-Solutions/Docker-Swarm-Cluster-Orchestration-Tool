@@ -54,6 +54,9 @@ const (
 	// CephFSMountPath is the default mount path for CephFS.
 	CephFSMountPath = "/mnt/cephfs"
 
+	// ServiceDataSubdir is the subdirectory under the storage mount for service data.
+	ServiceDataSubdir = "data"
+
 	// CephLoopDeviceDirectory is the default directory for loop device image files.
 	CephLoopDeviceDirectory = "/var/snap/microceph/common"
 
