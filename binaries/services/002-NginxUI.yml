@@ -1,18 +1,15 @@
 # NAME: NginxUI
-# DESCRIPTION: Nginx UI - Single-writer (control plane) + multi-reader (edge) pattern
+# DESCRIPTION: Nginx UI
 # ENABLED: true
 
 services:
-  # Control plane (writer/master) - Single instance with RW mounts
-  # Manages config via the UI on port 9000
   # Requires: docker node update --label-add loadbalancer.master=true <NODE>
-  NginxUIWriter:
+  LoadBalancerMaster:
     image: uozi/nginx-ui:sha-4754ef3
-    hostname: 'nginx-ui-writer-{{.Task.Slot}}'
+    hostname: 'LoadBalancer-Master-{{.Task.Slot}}'
     environment:
       TZ: UTC
     ports:
-      # UI port only - accessible via ingress routing mesh
       - target: 9000
         published: 9000
         protocol: tcp
@@ -20,22 +17,22 @@ services:
       - target: 80
         published: 80
         protocol: tcp
-        mode: ingress
+        mode: host
       - target: 443
         published: 443
         protocol: tcp
-        mode: ingress
+        mode: host
     volumes:
-      # RW mounts - ONLY this service writes
-      - /mnt/MicroCephFS/docker-swarm-0001/data/NginxUI:/etc/nginx
-      - /mnt/MicroCephFS/docker-swarm-0001/data/NginxUI/nginx-ui:/etc/nginx-ui
+      - /mnt/MicroCephFS/docker-swarm-0001/data/NginxUI:/etc/nginx:rw
+      - /mnt/MicroCephFS/docker-swarm-0001/data/NginxUI/nginx-ui:/etc/nginx-ui:rw
     networks:
       - DOCKER-SWARM-CLUSTER-INTERNAL-COMMUNICATION
     deploy:
-      replicas: 1
+      mode: global
       placement:
         constraints:
           - node.platform.os==linux
+          - node.role==worker
           - node.labels.loadbalancer.master==true
       restart_policy:
         condition: on-failure
@@ -51,26 +48,23 @@ services:
         parallelism: 1
         delay: 10s
 
-  # Data plane (readers/slaves) - Global on edge nodes with RO mounts
   # Serves traffic on ports 80/443, reads config from shared storage
   # Requires: docker node update --label-add loadbalancer.slave=true <NODE>
-  NginxUIEdge:
+  LoadBalancerSlave:
     image: uozi/nginx-ui:sha-4754ef3
-    hostname: 'nginx-ui-edge-{{.Task.Slot}}'
+    hostname: 'LoadBalancer-Slave-{{.Task.Slot}}'
     environment:
       TZ: UTC
     ports:
-      # HTTP/HTTPS traffic via ingress routing mesh
       - target: 80
         published: 80
         protocol: tcp
-        mode: ingress
+        mode: host
       - target: 443
         published: 443
         protocol: tcp
-        mode: ingress
+        mode: host
     volumes:
-      # RO mounts - edge MUST NOT write to prevent corruption
       - /mnt/MicroCephFS/docker-swarm-0001/data/NginxUI:/etc/nginx:ro
       - /mnt/MicroCephFS/docker-swarm-0001/data/NginxUI/nginx-ui:/etc/nginx-ui:ro
     networks:
