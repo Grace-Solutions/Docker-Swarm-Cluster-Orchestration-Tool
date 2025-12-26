@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -206,8 +207,21 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 		)
 	}
 
+	// Prepare NginxUI if enabled
+	var nginxUIConfig *NginxUIConfig
+	if IsNginxUIEnabled(services) {
+		log.Infow("NginxUI service detected, preparing deployment")
+		nginxUIConfig, err = PrepareNginxUIDeployment(ctx, sshPool, primaryMaster, storageMountPath, clusterInfo)
+		if err != nil {
+			log.Warnw("failed to prepare NginxUI deployment", "error", err)
+			// Continue anyway - NginxUI may work with defaults
+		}
+	} else {
+		log.Infow("NginxUI service not enabled, skipping NginxUI preparation")
+	}
+
 	// Run pre-initialization script before deploying services
-	if err := runInitializationScript(ctx, sshPool, primaryMaster, serviceDefDir, "001-PreInitialization.sh", storageMountPath, clusterInfo, nil); err != nil {
+	if err := runInitializationScript(ctx, sshPool, primaryMaster, serviceDefDir, "001-PreInitialization.sh", storageMountPath, clusterInfo, nil, nginxUIConfig); err != nil {
 		log.Warnw("pre-initialization script failed", "error", err)
 		// Continue anyway - services may still deploy successfully
 	}
@@ -227,7 +241,7 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 			"file", svc.FileName,
 		)
 
-		if err := deployService(ctx, sshPool, primaryMaster, svc, storageMountPath, clusterInfo); err != nil {
+		if err := deployService(ctx, sshPool, primaryMaster, svc, storageMountPath, clusterInfo, nginxUIConfig); err != nil {
 			log.Errorw(fmt.Sprintf("failed to deploy service %d/%d", i+1, metrics.TotalFound),
 				"name", svc.Name,
 				"error", err,
@@ -256,7 +270,7 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 
 	// Run post-initialization script after all services are deployed
 	if len(deployedStacks) > 0 {
-		if err := runInitializationScript(ctx, sshPool, primaryMaster, serviceDefDir, "002-PostInitialization.sh", storageMountPath, clusterInfo, deployedStacks); err != nil {
+		if err := runInitializationScript(ctx, sshPool, primaryMaster, serviceDefDir, "002-PostInitialization.sh", storageMountPath, clusterInfo, deployedStacks, nginxUIConfig); err != nil {
 			log.Warnw("post-initialization script failed", "error", err)
 			// Continue anyway - services are already deployed
 		}
@@ -283,7 +297,7 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 }
 
 // deployService deploys a single service to the Docker Swarm cluster
-func deployService(ctx context.Context, sshPool *ssh.Pool, primaryMaster string, svc ServiceMetadata, storageMountPath string, clusterInfo ClusterInfo) error {
+func deployService(ctx context.Context, sshPool *ssh.Pool, primaryMaster string, svc ServiceMetadata, storageMountPath string, clusterInfo ClusterInfo, nginxUIConfig *NginxUIConfig) error {
 	log := logging.L().With("component", "services", "service", svc.Name)
 
 	// Read service file
@@ -301,6 +315,16 @@ func deployService(ctx context.Context, sshPool *ssh.Pool, primaryMaster string,
 			processedContent = newContent
 			modified = true
 			log.Infow("replaced storage mount paths", "storageMountPath", storageMountPath)
+		}
+	}
+
+	// Replace NginxUI placeholder secrets with generated ones if this is the NginxUI service
+	if nginxUIConfig != nil && IsNginxUIService(svc.Name) {
+		newContent := ReplaceNginxUISecretsInYAML(processedContent, nginxUIConfig.Secrets)
+		if newContent != processedContent {
+			processedContent = newContent
+			modified = true
+			log.Infow("replaced NginxUI placeholder secrets with generated secrets")
 		}
 	}
 
@@ -831,7 +855,8 @@ func showNetworkSummary(ctx context.Context, sshPool *ssh.Pool, host string) {
 // runInitializationScript uploads and executes a shell script on the target node with environment variables.
 // scriptName should be either "001-PreInitialization.sh" or "002-PostInitialization.sh".
 // deployedStacks is only used for post-initialization to pass the list of deployed stack names.
-func runInitializationScript(ctx context.Context, sshPool *ssh.Pool, primaryMaster string, serviceDefDir string, scriptName string, storageMountPath string, clusterInfo ClusterInfo, deployedStacks []string) error {
+// nginxUIConfig contains NginxUI configuration if NginxUI is enabled.
+func runInitializationScript(ctx context.Context, sshPool *ssh.Pool, primaryMaster string, serviceDefDir string, scriptName string, storageMountPath string, clusterInfo ClusterInfo, deployedStacks []string, nginxUIConfig *NginxUIConfig) error {
 	log := logging.L().With("component", "services", "script", scriptName)
 
 	// Scripts are in a "scripts" folder next to the "services" folder
@@ -891,6 +916,18 @@ export NODE_HOSTNAME='%s'
 	// Add deployed stacks for post-init script
 	if len(deployedStacks) > 0 {
 		envVars += fmt.Sprintf("export DEPLOYED_SERVICES='%s'\n", strings.Join(deployedStacks, ","))
+	}
+
+	// Add NginxUI configuration if enabled
+	if nginxUIConfig != nil && nginxUIConfig.Enabled {
+		envVars += "export NGINXUI_ENABLED='true'\n"
+		// Base64 encode the cluster config to avoid shell escaping issues
+		if nginxUIConfig.ClusterConfigINI != "" {
+			encodedConfig := base64.StdEncoding.EncodeToString([]byte(nginxUIConfig.ClusterConfigINI))
+			envVars += fmt.Sprintf("export NGINXUI_CLUSTER_CONFIG='%s'\n", encodedConfig)
+		}
+	} else {
+		envVars += "export NGINXUI_ENABLED='false'\n"
 	}
 
 	// Upload script to remote host
