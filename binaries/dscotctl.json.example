@@ -45,7 +45,7 @@
       "interface": "auto",
       "routerId": "auto",
       "authPass": "auto",
-      "vipScanTimeout": 30
+      "vipScanTimeout": 60
     },
     "preScripts": [
       {

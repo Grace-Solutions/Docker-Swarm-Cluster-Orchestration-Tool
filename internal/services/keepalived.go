@@ -39,6 +39,8 @@ type KeepalivedDeployment struct {
 
 // PrepareKeepalivedDeployment prepares the Keepalived configuration for all nodes.
 // This must be called after Swarm setup and before service deployment.
+// Only nodes with an RFC1918 IP in the same subnet as the first node are included,
+// since VRRP is Layer 2 and requires all nodes to be on the same broadcast domain.
 func PrepareKeepalivedDeployment(ctx context.Context, sshPool *ssh.Pool, cfg *config.Config) (*KeepalivedDeployment, error) {
 	log := logging.L().With("component", "keepalived")
 
@@ -53,11 +55,11 @@ func PrepareKeepalivedDeployment(ctx context.Context, sshPool *ssh.Pool, cfg *co
 		return &KeepalivedDeployment{Enabled: false}, nil
 	}
 
-	log.Infow("preparing Keepalived deployment", "nodeCount", len(keepalivedNodes))
+	log.Infow("preparing Keepalived deployment", "candidateNodeCount", len(keepalivedNodes))
 
 	globalKA := cfg.GetKeepalived()
 
-	// Use first enabled node to detect interface and VIP
+	// Use first enabled node to detect interface and establish reference subnet
 	firstNode := keepalivedNodes[0].SSHFQDNorIP
 
 	// Detect or use configured interface
@@ -71,12 +73,53 @@ func PrepareKeepalivedDeployment(ctx context.Context, sshPool *ssh.Pool, cfg *co
 		log.Infow("auto-detected RFC1918 interface", "interface", iface, "node", firstNode)
 	}
 
-	// Get interface details (IP and netmask)
+	// Get interface details (IP and netmask) from first node - this is the reference subnet
 	ifaceIP, ifaceCIDR, err := getInterfaceDetails(ctx, sshPool, firstNode, iface)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get interface details: %w", err)
 	}
-	log.Infow("interface details", "interface", iface, "ip", ifaceIP, "cidr", ifaceCIDR)
+	log.Infow("reference subnet from first node", "interface", iface, "ip", ifaceIP, "cidr", ifaceCIDR)
+
+	// Parse the reference network for subnet filtering
+	referenceNetwork, err := parseNetwork(ifaceIP, ifaceCIDR)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse reference network: %w", err)
+	}
+
+	// Filter nodes to only include those in the same subnet (VRRP is Layer 2)
+	var eligibleNodes []config.NodeConfig
+	for _, node := range keepalivedNodes {
+		nodeIP, err := getNodeRFC1918IP(ctx, sshPool, node.SSHFQDNorIP, iface)
+		if err != nil {
+			log.Warnw("failed to get RFC1918 IP for node, excluding from VRRP",
+				"node", node.SSHFQDNorIP, "error", err)
+			continue
+		}
+
+		parsedIP := net.ParseIP(nodeIP)
+		if parsedIP == nil {
+			log.Warnw("invalid IP for node, excluding from VRRP",
+				"node", node.SSHFQDNorIP, "ip", nodeIP)
+			continue
+		}
+
+		if !referenceNetwork.Contains(parsedIP) {
+			log.Warnw("node not in same subnet as reference, excluding from VRRP (Layer 2 requirement)",
+				"node", node.SSHFQDNorIP, "nodeIP", nodeIP, "referenceNetwork", referenceNetwork.String())
+			continue
+		}
+
+		log.Infow("node eligible for VRRP", "node", node.SSHFQDNorIP, "ip", nodeIP)
+		eligibleNodes = append(eligibleNodes, node)
+	}
+
+	if len(eligibleNodes) == 0 {
+		log.Warnw("no nodes in same subnet eligible for Keepalived, skipping")
+		return &KeepalivedDeployment{Enabled: false}, nil
+	}
+
+	log.Infow("filtered nodes for same-subnet VRRP",
+		"eligible", len(eligibleNodes), "excluded", len(keepalivedNodes)-len(eligibleNodes))
 
 	// Get VIP scan timeout
 	vipScanTimeout := globalKA.VIPScanTimeout
@@ -126,7 +169,7 @@ func PrepareKeepalivedDeployment(ctx context.Context, sshPool *ssh.Pool, cfg *co
 		}
 	}
 
-	// Build per-node configurations
+	// Build per-node configurations (using filtered eligible nodes with reindexed priorities)
 	deployment := &KeepalivedDeployment{
 		Enabled:   true,
 		VIP:       vip,
@@ -134,10 +177,10 @@ func PrepareKeepalivedDeployment(ctx context.Context, sshPool *ssh.Pool, cfg *co
 		Interface: iface,
 		RouterID:  routerID,
 		AuthPass:  authPass,
-		Nodes:     make([]*KeepalivedNodeConfig, 0, len(keepalivedNodes)),
+		Nodes:     make([]*KeepalivedNodeConfig, 0, len(eligibleNodes)),
 	}
 
-	for i, node := range keepalivedNodes {
+	for i, node := range eligibleNodes {
 		nodeConfig := resolveNodeConfig(node, i, iface, deployment.VIPCIDR)
 		deployment.Nodes = append(deployment.Nodes, nodeConfig)
 		log.Infow("resolved node configuration",
@@ -157,6 +200,32 @@ func PrepareKeepalivedDeployment(ctx context.Context, sshPool *ssh.Pool, cfg *co
 	)
 
 	return deployment, nil
+}
+
+// parseNetwork parses an IP and CIDR prefix into a net.IPNet for subnet checking.
+func parseNetwork(ip string, cidrPrefix string) (*net.IPNet, error) {
+	cidr := fmt.Sprintf("%s/%s", ip, cidrPrefix)
+	_, network, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return nil, err
+	}
+	return network, nil
+}
+
+// getNodeRFC1918IP gets the RFC1918 IP address for a node on the specified interface.
+func getNodeRFC1918IP(ctx context.Context, sshPool *ssh.Pool, host, iface string) (string, error) {
+	ip, _, err := getInterfaceDetails(ctx, sshPool, host, iface)
+	if err != nil {
+		return "", err
+	}
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil {
+		return "", fmt.Errorf("invalid IP: %s", ip)
+	}
+	if !ipdetect.IsRFC1918(parsedIP) {
+		return "", fmt.Errorf("IP %s is not RFC1918", ip)
+	}
+	return ip, nil
 }
 
 // resolveNodeConfig resolves the per-node configuration with auto-values.

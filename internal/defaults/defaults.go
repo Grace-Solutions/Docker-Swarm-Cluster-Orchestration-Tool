@@ -128,7 +128,7 @@ const (
 	KeepalivedAdvertInterval = 1
 
 	// KeepalivedVIPScanTimeout is the default timeout in seconds for VIP scanning.
-	KeepalivedVIPScanTimeout = 30
+	KeepalivedVIPScanTimeout = 60
 
 	// KeepalivedHealthCheckScript is the name of the health check script.
 	KeepalivedHealthCheckScript = "HealthCheck.sh"
