@@ -483,13 +483,23 @@ func prepareSSHKeys(cfg *config.Config) (*sshkeys.KeyPair, error) {
 			node.SSHFQDNorIP: authConfig,
 		})
 
+		// Check if public key already exists
+		pubKeyTrimmed := strings.TrimSpace(keyPair.PublicKey)
+		checkCmd := fmt.Sprintf("grep -qF '%s' ~/.ssh/authorized_keys 2>/dev/null && echo 'EXISTS' || echo 'NOT_EXISTS'", pubKeyTrimmed)
+		stdout, _, _ := tempPool.Run(ctx, node.SSHFQDNorIP, checkCmd)
+
+		if strings.TrimSpace(stdout) == "EXISTS" {
+			nodeLog.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "public key already exists"))
+			continue
+		}
+
 		// Install public key
 		installCmd := fmt.Sprintf(
 			"mkdir -p ~/.ssh && chmod 700 ~/.ssh && "+
 				"echo '%s' >> ~/.ssh/authorized_keys && "+
 				"chmod 600 ~/.ssh/authorized_keys && "+
 				"sort -u ~/.ssh/authorized_keys -o ~/.ssh/authorized_keys",
-			strings.TrimSpace(keyPair.PublicKey),
+			pubKeyTrimmed,
 		)
 
 		if _, stderr, err := tempPool.Run(ctx, node.SSHFQDNorIP, installCmd); err != nil {
