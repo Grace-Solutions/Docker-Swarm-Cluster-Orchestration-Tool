@@ -114,9 +114,6 @@ const (
 // =============================================================================
 
 const (
-	// KeepalivedRouterID is the default VRRP router ID.
-	KeepalivedRouterID = 51
-
 	// KeepalivedBasePriority is the starting priority for auto-assignment.
 	// First node gets this priority, subsequent nodes decrement by 1.
 	KeepalivedBasePriority = 100
@@ -129,5 +126,11 @@ const (
 
 	// KeepalivedAdvertInterval is the advertisement interval in seconds.
 	KeepalivedAdvertInterval = 1
+
+	// KeepalivedVIPScanTimeout is the default timeout in seconds for VIP scanning.
+	KeepalivedVIPScanTimeout = 30
+
+	// KeepalivedHealthCheckScript is the name of the health check script.
+	KeepalivedHealthCheckScript = "HealthCheck.sh"
 )
 

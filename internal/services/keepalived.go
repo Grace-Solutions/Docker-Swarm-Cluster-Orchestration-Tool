@@ -8,9 +8,11 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	"clusterctl/internal/config"
 	"clusterctl/internal/defaults"
+	"clusterctl/internal/ipdetect"
 	"clusterctl/internal/logging"
 	"clusterctl/internal/ssh"
 )
@@ -33,13 +35,6 @@ type KeepalivedDeployment struct {
 	RouterID  int                     // VRRP router ID
 	AuthPass  string                  // VRRP authentication password
 	Nodes     []*KeepalivedNodeConfig // Per-node configurations
-}
-
-// RFC1918 private network ranges
-var rfc1918Networks = []string{
-	"10.0.0.0/8",
-	"172.16.0.0/12",
-	"192.168.0.0/16",
 }
 
 // PrepareKeepalivedDeployment prepares the Keepalived configuration for all nodes.
@@ -83,10 +78,16 @@ func PrepareKeepalivedDeployment(ctx context.Context, sshPool *ssh.Pool, cfg *co
 	}
 	log.Infow("interface details", "interface", iface, "ip", ifaceIP, "cidr", ifaceCIDR)
 
+	// Get VIP scan timeout
+	vipScanTimeout := globalKA.VIPScanTimeout
+	if vipScanTimeout <= 0 {
+		vipScanTimeout = defaults.KeepalivedVIPScanTimeout
+	}
+
 	// Detect or use configured VIP
 	vip := globalKA.VIP
 	if config.IsAutoValue(vip) || vip == "" {
-		detected, err := findUnusedVIP(ctx, sshPool, firstNode, ifaceIP, ifaceCIDR)
+		detected, err := findUnusedVIP(ctx, sshPool, firstNode, ifaceIP, ifaceCIDR, vipScanTimeout)
 		if err != nil {
 			return nil, fmt.Errorf("failed to auto-detect unused VIP: %w", err)
 		}
@@ -101,17 +102,35 @@ func PrepareKeepalivedDeployment(ctx context.Context, sshPool *ssh.Pool, cfg *co
 		log.Infow("generated Keepalived auth password", "password", authPass)
 	}
 
-	// Use default or configured router ID
-	routerID := globalKA.RouterID
-	if routerID == 0 {
-		routerID = defaults.KeepalivedRouterID
+	// Resolve router ID - if auto, use last octet of VIP
+	routerID := 0
+	if config.IsAutoValue(globalKA.RouterID) || globalKA.RouterID == "" {
+		// Parse VIP to get last octet
+		vipIP := net.ParseIP(vip)
+		if vipIP != nil {
+			vip4 := vipIP.To4()
+			if vip4 != nil {
+				routerID = int(vip4[3])
+			}
+		}
+		if routerID == 0 {
+			routerID = 51 // Fallback default
+		}
+		log.Infow("auto-generated router ID from VIP last octet", "routerId", routerID)
+	} else {
+		// Try to parse as integer
+		if id, err := strconv.Atoi(globalKA.RouterID); err == nil {
+			routerID = id
+		} else {
+			routerID = 51 // Fallback default
+		}
 	}
 
 	// Build per-node configurations
 	deployment := &KeepalivedDeployment{
 		Enabled:   true,
 		VIP:       vip,
-		VIPCIDR:   fmt.Sprintf("%s/%s", vip, extractCIDRPrefix(ifaceCIDR)),
+		VIPCIDR:   fmt.Sprintf("%s/%s", vip, ifaceCIDR),
 		Interface: iface,
 		RouterID:  routerID,
 		AuthPass:  authPass,
@@ -169,6 +188,7 @@ func resolveNodeConfig(node config.NodeConfig, nodeIndex int, iface, vipCIDR str
 }
 
 // detectRFC1918Interface finds the first network interface with an RFC1918 IP address.
+// Uses ipdetect.IsRFC1918 for consistent RFC1918 detection across the codebase.
 func detectRFC1918Interface(ctx context.Context, sshPool *ssh.Pool, host string) (string, error) {
 	// Get all interfaces with their IPs
 	cmd := `ip -o -4 addr show | awk '{print $2, $4}' | grep -v '^lo '`
@@ -192,13 +212,13 @@ func detectRFC1918Interface(ctx context.Context, sshPool *ssh.Pool, host string)
 			continue
 		}
 
-		// Check if IP is RFC1918
+		// Check if IP is RFC1918 using centralized ipdetect package
 		ip, _, err := net.ParseCIDR(ipCIDR)
 		if err != nil {
 			continue
 		}
 
-		if isRFC1918(ip) {
+		if ipdetect.IsRFC1918(ip) {
 			return iface, nil
 		}
 	}
@@ -229,7 +249,8 @@ func getInterfaceDetails(ctx context.Context, sshPool *ssh.Pool, host, iface str
 }
 
 // findUnusedVIP finds an unused IP address in the subnet using ARP scanning.
-func findUnusedVIP(ctx context.Context, sshPool *ssh.Pool, host, ifaceIP, cidrPrefix string) (string, error) {
+// It dynamically calculates the full usable address range and scans until timeout.
+func findUnusedVIP(ctx context.Context, sshPool *ssh.Pool, host, ifaceIP, cidrPrefix string, timeoutSeconds int) (string, error) {
 	log := logging.L().With("component", "keepalived")
 
 	// Parse the interface IP to get the network
@@ -237,67 +258,87 @@ func findUnusedVIP(ctx context.Context, sshPool *ssh.Pool, host, ifaceIP, cidrPr
 	if ip == nil {
 		return "", fmt.Errorf("invalid interface IP: %s", ifaceIP)
 	}
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return "", fmt.Errorf("not an IPv4 address: %s", ifaceIP)
+	}
 
 	prefix, _ := strconv.Atoi(cidrPrefix)
 	mask := net.CIDRMask(prefix, 32)
-	network := ip.Mask(mask)
 
-	// Calculate broadcast address
-	broadcast := make(net.IP, len(network))
-	for i := range network {
-		broadcast[i] = network[i] | ^mask[i]
+	// Calculate network and broadcast addresses
+	networkAddr := make(net.IP, 4)
+	broadcastAddr := make(net.IP, 4)
+	for i := 0; i < 4; i++ {
+		networkAddr[i] = ip4[i] & mask[i]
+		broadcastAddr[i] = ip4[i] | ^mask[i]
 	}
 
-	// Try IPs from the high end of the range (.254, .253, .252, etc.)
-	// Skip .255 (broadcast) and try up to 10 addresses
-	candidateIPs := []string{}
-	for i := 254; i >= 245; i-- {
-		candidateIP := net.IPv4(network[0], network[1], network[2], byte(i))
-		// Skip if it matches the interface IP
-		if candidateIP.String() == ifaceIP {
-			continue
-		}
-		candidateIPs = append(candidateIPs, candidateIP.String())
+	// Calculate total usable hosts (excluding network and broadcast)
+	hostBits := 32 - prefix
+	totalHosts := (1 << hostBits) - 2 // Subtract network and broadcast
+	if totalHosts <= 0 {
+		return "", fmt.Errorf("subnet /%d has no usable hosts", prefix)
 	}
+
+	log.Infow("scanning for unused VIP",
+		"network", networkAddr.String(),
+		"broadcast", broadcastAddr.String(),
+		"usableHosts", totalHosts,
+		"timeout", timeoutSeconds,
+	)
 
 	// Ensure arping is installed
-	installCmd := "command -v arping || apt-get update && apt-get install -y arping iputils-arping 2>/dev/null || yum install -y arping 2>/dev/null || true"
+	installCmd := "command -v arping >/dev/null 2>&1 || { apt-get update && apt-get install -y iputils-arping 2>/dev/null || yum install -y arping 2>/dev/null || dnf install -y arping 2>/dev/null || true; }"
 	sshPool.Run(ctx, host, installCmd)
 
-	// Try each candidate IP with arping
-	for _, candidate := range candidateIPs {
-		// arping -c 2 -w 1 -D <ip> returns 0 if IP is in use, 1 if unused
-		// Using -D (duplicate address detection mode)
-		arpCmd := fmt.Sprintf("arping -c 2 -w 1 -D -I $(ip route get %s | grep -oP 'dev \\K\\S+') %s", candidate, candidate)
-		_, _, err := sshPool.Run(ctx, host, arpCmd)
-		if err != nil {
-			// arping returned non-zero, meaning IP is likely unused
-			log.Infow("found unused IP candidate", "ip", candidate)
-			return candidate, nil
+	// Start from broadcast-1 and work down (prefer high IPs for VIPs)
+	startTime := time.Now()
+	timeout := time.Duration(timeoutSeconds) * time.Second
+
+	// Convert network address to uint32 for iteration
+	netInt := ipToUint32(networkAddr)
+	broadInt := ipToUint32(broadcastAddr)
+
+	// Iterate from broadcast-1 down to network+1
+	for hostInt := broadInt - 1; hostInt > netInt; hostInt-- {
+		// Check timeout
+		if time.Since(startTime) > timeout {
+			return "", fmt.Errorf("VIP scan timeout (%ds) exceeded", timeoutSeconds)
 		}
-		log.Infow("IP is in use", "ip", candidate)
-	}
 
-	return "", fmt.Errorf("no unused IP found in range %s.245-%s.254", network[:3], network[:3])
-}
+		candidate := uint32ToIP(hostInt)
 
-// isRFC1918 checks if an IP address is in RFC1918 private address space.
-func isRFC1918(ip net.IP) bool {
-	for _, cidr := range rfc1918Networks {
-		_, network, err := net.ParseCIDR(cidr)
-		if err != nil {
+		// Skip if it matches the interface IP
+		if candidate.String() == ifaceIP {
 			continue
 		}
-		if network.Contains(ip) {
-			return true
+
+		// arping -c 1 -w 1 -D -I <iface> <ip>
+		// -D = DAD mode: returns 0 if IP responds (in use), 1 if no response (available)
+		arpCmd := fmt.Sprintf("arping -c 1 -w 1 -D -I $(ip route get %s 2>/dev/null | grep -oP 'dev \\K\\S+' || echo eth0) %s 2>/dev/null",
+			candidate.String(), candidate.String())
+		_, _, err := sshPool.Run(ctx, host, arpCmd)
+		if err != nil {
+			// arping returned non-zero, meaning no response = IP available
+			log.Infow("found unused VIP", "ip", candidate.String())
+			return candidate.String(), nil
 		}
+		log.Debugw("IP in use", "ip", candidate.String())
 	}
-	return false
+
+	return "", fmt.Errorf("no unused IP found in subnet %s/%s after scanning %d hosts", networkAddr.String(), cidrPrefix, totalHosts)
 }
 
-// extractCIDRPrefix extracts the prefix length from a CIDR string.
-func extractCIDRPrefix(cidr string) string {
-	return cidr // Already just the prefix number
+// ipToUint32 converts an IPv4 address to uint32.
+func ipToUint32(ip net.IP) uint32 {
+	ip4 := ip.To4()
+	return uint32(ip4[0])<<24 | uint32(ip4[1])<<16 | uint32(ip4[2])<<8 | uint32(ip4[3])
+}
+
+// uint32ToIP converts a uint32 to an IPv4 address.
+func uint32ToIP(n uint32) net.IP {
+	return net.IPv4(byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
 }
 
 // generateAuthPassword generates a random password for VRRP authentication.
@@ -388,14 +429,7 @@ KEEPALIVED_EOF`, keepalivedConf)
 
 // generateKeepalivedConf generates the keepalived.conf content for a node.
 func generateKeepalivedConf(nodeConfig *KeepalivedNodeConfig, deployment *KeepalivedDeployment) string {
-	// Generate the health check script for Docker Swarm
-	checkScript := `#!/bin/bash
-# Check if this node is active in Docker Swarm
-if docker node ls &>/dev/null; then
-    exit 0
-else
-    exit 1
-fi`
+	healthCheckPath := "/etc/keepalived/" + defaults.KeepalivedHealthCheckScript
 
 	conf := fmt.Sprintf(`# Keepalived configuration - Generated by dscotctl
 # VIP: %s | Interface: %s | Node State: %s
@@ -406,8 +440,8 @@ global_defs {
     enable_script_security
 }
 
-vrrp_script chk_docker_swarm {
-    script "/etc/keepalived/check_docker_swarm.sh"
+vrrp_script chk_health {
+    script "%s"
     interval 5
     weight -20
     fall 2
@@ -431,7 +465,7 @@ vrrp_instance %s {
     }
 
     track_script {
-        chk_docker_swarm
+        chk_health
     }
 }
 `,
@@ -440,6 +474,7 @@ vrrp_instance %s {
 		nodeConfig.State,
 		defaults.KeepalivedVRRPInstance,
 		deployment.RouterID,
+		healthCheckPath,
 		defaults.KeepalivedVRRPInstance,
 		nodeConfig.State,
 		nodeConfig.Interface,
@@ -450,17 +485,14 @@ vrrp_instance %s {
 		deployment.VIPCIDR,
 	)
 
-	// Add the check script as a separate file command
-	// We'll write this as part of the configuration
-	_ = checkScript // Will be written separately
-
 	return conf
 }
 
 // WriteHealthCheckScript writes the Docker Swarm health check script to a node.
 func WriteHealthCheckScript(ctx context.Context, sshPool *ssh.Pool, host string) error {
+	scriptPath := "/etc/keepalived/" + defaults.KeepalivedHealthCheckScript
 	script := `#!/bin/bash
-# Docker Swarm health check for Keepalived
+# Health check for Keepalived - Docker Swarm node status
 # Returns 0 if node is healthy in swarm, 1 otherwise
 
 if ! command -v docker &> /dev/null; then
@@ -473,10 +505,10 @@ else
     exit 1
 fi
 `
-	cmd := fmt.Sprintf(`cat > /etc/keepalived/check_docker_swarm.sh << 'SCRIPT_EOF'
+	cmd := fmt.Sprintf(`cat > %s << 'SCRIPT_EOF'
 %s
 SCRIPT_EOF
-chmod +x /etc/keepalived/check_docker_swarm.sh`, script)
+chmod +x %s`, scriptPath, script, scriptPath)
 
 	_, stderr, err := sshPool.Run(ctx, host, cmd)
 	if err != nil {

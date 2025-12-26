@@ -209,11 +209,15 @@ type KeepalivedConfig struct {
 	// Interface is the network interface for VRRP.
 	// Use "auto" or "automatic" to auto-detect the RFC1918 interface.
 	Interface string `json:"interface"`
-	// RouterID is the VRRP router ID (1-255). Default: 51.
-	RouterID int `json:"routerId"`
+	// RouterID is the VRRP router ID (1-255).
+	// Use "auto" or "automatic" to auto-generate based on VIP last octet.
+	RouterID string `json:"routerId"`
 	// AuthPass is the VRRP authentication password.
 	// Use "auto" or "automatic" to generate a random password.
 	AuthPass string `json:"authPass"`
+	// VIPScanTimeout is the maximum time in seconds to scan for an unused VIP.
+	// Default: 30 seconds.
+	VIPScanTimeout int `json:"vipScanTimeout"`
 }
 
 // NodeConfig represents a single node's configuration.

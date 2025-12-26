@@ -43,8 +43,9 @@
       "enabled": false,
       "vip": "auto",
       "interface": "auto",
-      "routerId": 51,
-      "authPass": "auto"
+      "routerId": "auto",
+      "authPass": "auto",
+      "vipScanTimeout": 30
     },
     "preScripts": [
       {
