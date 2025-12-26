@@ -25,6 +25,7 @@ services:
     volumes:
       - /mnt/MicroCephFS/docker-swarm-0001/data/NginxUI:/etc/nginx:rw
       - /mnt/MicroCephFS/docker-swarm-0001/data/NginxUI/nginx-ui:/etc/nginx-ui:rw
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - DOCKER-SWARM-CLUSTER-INTERNAL-COMMUNICATION
     deploy:

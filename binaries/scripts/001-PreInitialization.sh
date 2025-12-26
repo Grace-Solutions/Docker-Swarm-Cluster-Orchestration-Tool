@@ -31,10 +31,19 @@ echo "[PreInit] Initializing NginxUI..."
 
 NGINX_PATH="${BASE_PATH}/NginxUI"
 
-# Create required directories
+# Create all required directories for NginxUI self-check
 echo "[PreInit] Creating NginxUI directories..."
 mkdir -p "${NGINX_PATH}/conf.d"
 mkdir -p "${NGINX_PATH}/nginx-ui"
+mkdir -p "${NGINX_PATH}/sites-available"
+mkdir -p "${NGINX_PATH}/sites-enabled"
+mkdir -p "${NGINX_PATH}/streams-available"
+mkdir -p "${NGINX_PATH}/streams-enabled"
+mkdir -p "${NGINX_PATH}/logs"
+
+# Create empty log files if they don't exist (NginxUI checks these)
+touch "${NGINX_PATH}/logs/access.log"
+touch "${NGINX_PATH}/logs/error.log"
 
 # Download mime.types if not exists
 MIME_TYPES_PATH="${NGINX_PATH}/mime.types"
@@ -46,7 +55,7 @@ else
     echo "[PreInit] mime.types already exists"
 fi
 
-# Create nginx.conf if not exists
+# Create nginx.conf if not exists (includes all directories for NginxUI self-check)
 NGINX_CONF_PATH="${NGINX_PATH}/nginx.conf"
 if [ ! -f "${NGINX_CONF_PATH}" ]; then
     echo "[PreInit] Creating nginx.conf..."
@@ -54,7 +63,7 @@ if [ ! -f "${NGINX_CONF_PATH}" ]; then
 user  nginx;
 worker_processes  auto;
 
-error_log  /var/log/nginx/error.log notice;
+error_log  /etc/nginx/logs/error.log notice;
 pid        /var/run/nginx.pid;
 
 events {
@@ -69,12 +78,21 @@ http {
                       '$status $body_bytes_sent "$http_referer" '
                       '"$http_user_agent" "$http_x_forwarded_for"';
 
-    access_log  /var/log/nginx/access.log  main;
+    access_log  /etc/nginx/logs/access.log  main;
 
     sendfile        on;
     keepalive_timeout  65;
 
+    # Include conf.d directory (NginxUI self-check)
     include /etc/nginx/conf.d/*.conf;
+
+    # Include sites-enabled directory (NginxUI self-check)
+    include /etc/nginx/sites-enabled/*;
+}
+
+# Include streams-enabled directory (NginxUI self-check)
+stream {
+    include /etc/nginx/streams-enabled/*;
 }
 NGINX_CONF_EOF
     echo "[PreInit] nginx.conf created"
