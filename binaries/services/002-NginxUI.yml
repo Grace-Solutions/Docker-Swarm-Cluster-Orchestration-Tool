@@ -18,10 +18,10 @@ services:
       # Predefined admin user (change in production)
       NGINX_UI_PREDEFINED_USER_NAME: "admin"
       NGINX_UI_PREDEFINED_USER_PASSWORD: "admin"
-      # Secrets (defaults - should be changed in production)
-      NGINX_UI_NODE_SECRET: "dscotctl-default-node-secret"
-      NGINX_UI_APP_JWT_SECRET: "dscotctl-default-jwt-secret"
-      NGINX_UI_CRYPTO_SECRET: "dscotctl-default-crypto-secret"
+      # Secrets (change in production)
+      NGINX_UI_NODE_SECRET: "a9f3c7e2b8d14a6f5c0e9d3b7a1f8c4e"
+      NGINX_UI_APP_JWT_SECRET: "d4b8f2a6c1e9573d0b4a8f2e6c1d9a7b"
+      NGINX_UI_CRYPTO_SECRET: "e7c3a9f1d5b8024e6a3c9f1d7b4e8a2c"
     ports:
       - target: 9000
         published: 9000
@@ -37,8 +37,8 @@ services:
         mode: host
     volumes:
       # Per-node directories to avoid write contention
-      - /mnt/MicroCephFS/docker-swarm-0001/data/NginxUI/{{.Node.Hostname}}:/etc/nginx:rw
-      - /mnt/MicroCephFS/docker-swarm-0001/data/NginxUI/{{.Node.Hostname}}/nginx-ui:/etc/nginx-ui:rw
+      - /mnt/MicroCephFS/docker-swarm-0001/data/NginxUI/{{.Node.Hostname}}/nginx:/etc/nginx:rw
+      - /mnt/MicroCephFS/docker-swarm-0001/data/NginxUI/{{.Node.Hostname}}/nginxui:/etc/nginx-ui:rw
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - DOCKER-SWARM-CLUSTER-INTERNAL-COMMUNICATION

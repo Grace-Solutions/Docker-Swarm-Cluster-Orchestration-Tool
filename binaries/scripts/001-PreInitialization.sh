@@ -30,17 +30,20 @@ BASE_PATH="${STORAGE_MOUNT_PATH}/${SERVICE_DATA_DIR}"
 echo "[PreInit] Initializing NginxUI for node: ${NODE_HOSTNAME}..."
 
 # Each node gets its own directory to avoid write contention
-NGINX_PATH="${BASE_PATH}/NginxUI/${NODE_HOSTNAME}"
+# Structure: NginxUI/<hostname>/nginx (nginx config) and NginxUI/<hostname>/nginxui (UI data)
+NGINXUI_BASE="${BASE_PATH}/NginxUI/${NODE_HOSTNAME}"
+NGINX_PATH="${NGINXUI_BASE}/nginx"
+NGINXUI_PATH="${NGINXUI_BASE}/nginxui"
 
 # Create all required directories for NginxUI self-check
-echo "[PreInit] Creating NginxUI directories at ${NGINX_PATH}..."
+echo "[PreInit] Creating NginxUI directories at ${NGINXUI_BASE}..."
 mkdir -p "${NGINX_PATH}/conf.d"
-mkdir -p "${NGINX_PATH}/nginx-ui"
 mkdir -p "${NGINX_PATH}/sites-available"
 mkdir -p "${NGINX_PATH}/sites-enabled"
 mkdir -p "${NGINX_PATH}/streams-available"
 mkdir -p "${NGINX_PATH}/streams-enabled"
 mkdir -p "${NGINX_PATH}/logs"
+mkdir -p "${NGINXUI_PATH}"
 
 # Create empty log files if they don't exist (NginxUI checks these)
 touch "${NGINX_PATH}/logs/access.log"
