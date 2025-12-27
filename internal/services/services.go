@@ -895,6 +895,15 @@ func runInitializationScript(ctx context.Context, sshPool *ssh.Pool, primaryMast
 		targetNode = clusterInfo.AllNodes[0]
 	}
 
+	// Get the actual hostname of the target node (not the SSH address which may be an IP)
+	nodeHostname := targetNode
+	if stdout, _, err := sshPool.Run(ctx, targetNode, "hostname 2>/dev/null"); err == nil {
+		if h := strings.TrimSpace(stdout); h != "" {
+			nodeHostname = h
+			log.Infow("resolved node hostname", "sshHost", targetNode, "hostname", nodeHostname)
+		}
+	}
+
 	// Build environment variables
 	envVars := fmt.Sprintf(`export STORAGE_MOUNT_PATH='%s'
 export SERVICE_DATA_DIR='%s'
@@ -910,7 +919,7 @@ export NODE_HOSTNAME='%s'
 		primaryMaster,
 		clusterInfo.HasDedicatedWorkers,
 		clusterInfo.DistributedStorageEnabled,
-		targetNode,
+		nodeHostname,
 	)
 
 	// Add deployed stacks for post-init script
