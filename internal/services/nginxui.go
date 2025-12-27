@@ -170,14 +170,26 @@ func GenerateClusterConfig(nodes []NginxUIClusterNode, nodeSecret string, selfHo
 	return strings.Join(lines, "\n")
 }
 
-// GeneratePerNodeClusterConfigs generates cluster configs for each node.
+// GeneratePerNodeClusterConfigs generates cluster configs.
+// Only the FIRST node gets the cluster config with all other nodes.
+// Other nodes get empty config (no cluster section) to prevent cross-sync loops.
 // Returns a map of hostname -> cluster config INI section.
 func GeneratePerNodeClusterConfigs(nodes []NginxUIClusterNode, nodeSecret string) map[string]string {
 	configs := make(map[string]string)
-	for _, node := range nodes {
-		cfg := GenerateClusterConfig(nodes, nodeSecret, node.Hostname)
-		configs[node.Hostname] = cfg
+	if len(nodes) == 0 {
+		return configs
 	}
+
+	// Only first node gets cluster config pointing to all other nodes
+	firstNode := nodes[0]
+	cfg := GenerateClusterConfig(nodes, nodeSecret, firstNode.Hostname)
+	configs[firstNode.Hostname] = cfg
+
+	// Other nodes get empty cluster config (hub-spoke model, first node is hub)
+	for i := 1; i < len(nodes); i++ {
+		configs[nodes[i].Hostname] = ""
+	}
+
 	return configs
 }
 
