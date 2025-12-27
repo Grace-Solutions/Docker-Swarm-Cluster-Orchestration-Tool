@@ -197,19 +197,19 @@ APP_INI_EOF
     echo "[PreInit] NginxUI directories ready for ${hostname}"
 }
 
-# Create directories for all load balancer nodes (from NGINXUI_LB_NODES env var)
-# NGINXUI_LB_NODES is a comma-separated list of hostnames
-if [ -n "${NGINXUI_LB_NODES}" ]; then
-    echo "[PreInit] Creating NginxUI directories for all load balancer nodes: ${NGINXUI_LB_NODES}"
-    IFS=',' read -ra LB_NODES <<< "${NGINXUI_LB_NODES}"
-    for node in "${LB_NODES[@]}"; do
-        create_nginxui_node_dirs "${node}"
-    done
-else
-    # Fallback to current node hostname if no LB nodes specified
-    echo "[PreInit] No NGINXUI_LB_NODES specified, using current node: ${NODE_HOSTNAME}"
-    create_nginxui_node_dirs "${NODE_HOSTNAME}"
-fi
+# Each node creates its OWN directory using its hostname
+# Script runs on ALL nodes, each creates its own folder on shared (or local) storage
+# Using case statement with never-matching case to ensure default always runs
+case "${NODE_HOSTNAME}" in
+    "__THIS_CASE_NEVER_MATCHES__")
+        # This case intentionally never matches
+        ;;
+    *)
+        # Default case - always runs, each node creates its own directory
+        echo "[PreInit] Creating NginxUI directories for this node: ${NODE_HOSTNAME}"
+        create_nginxui_node_dirs "${NODE_HOSTNAME}"
+        ;;
+esac
 
 # =============================================================================
 # Portainer Pre-Initialization

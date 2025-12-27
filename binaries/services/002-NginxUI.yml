@@ -10,7 +10,7 @@
 services:
   LoadBalancer:
     image: uozi/nginx-ui:sha-4754ef3
-    hostname: '{{.Node.Hostname}}'
+    # hostname omitted - let Docker assign ({{.Node.Hostname}} causes sethostname error if uppercase)
     environment:
       TZ: UTC
       # Skip installation wizard

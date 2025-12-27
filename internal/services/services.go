@@ -43,6 +43,7 @@ type ClusterInfo struct {
 	HasDedicatedWorkers       bool     // true if there are nodes with role="worker" (not just managers or "both")
 	AllNodes                  []string // list of all SSH-accessible nodes for directory creation
 	DistributedStorageEnabled bool     // true if distributed storage is enabled (shared across nodes)
+	PrimaryMaster             string   // primary master node SSH address
 }
 
 const (
@@ -220,8 +221,8 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 		log.Infow("NginxUI service not enabled, skipping NginxUI preparation")
 	}
 
-	// Run pre-initialization script before deploying services
-	if err := runInitializationScript(ctx, sshPool, primaryMaster, serviceDefDir, "001-PreInitialization.sh", storageMountPath, clusterInfo, nil, nginxUIConfig); err != nil {
+	// Run pre-initialization script on ALL nodes (each creates its own directories on shared storage)
+	if err := runInitializationScriptOnAllNodes(ctx, sshPool, clusterInfo.AllNodes, serviceDefDir, "001-PreInitialization.sh", storageMountPath, clusterInfo, nil, nginxUIConfig); err != nil {
 		log.Warnw("pre-initialization script failed", "error", err)
 		// Continue anyway - services may still deploy successfully
 	}
@@ -852,12 +853,34 @@ func showNetworkSummary(ctx context.Context, sshPool *ssh.Pool, host string) {
 	}
 }
 
+// runInitializationScriptOnAllNodes runs an initialization script on all nodes in the cluster.
+// Each node runs the script in its own context, creating its own directories on shared storage.
+func runInitializationScriptOnAllNodes(ctx context.Context, sshPool *ssh.Pool, allNodes []string, serviceDefDir string, scriptName string, storageMountPath string, clusterInfo ClusterInfo, deployedStacks []string, nginxUIConfig *NginxUIConfig) error {
+	log := logging.L().With("component", "services", "script", scriptName)
+
+	if len(allNodes) == 0 {
+		log.Warnw("no nodes to run initialization script on")
+		return nil
+	}
+
+	log.Infow("running initialization script on all nodes", "nodeCount", len(allNodes))
+
+	for _, node := range allNodes {
+		if err := runInitializationScript(ctx, sshPool, node, serviceDefDir, scriptName, storageMountPath, clusterInfo, deployedStacks, nginxUIConfig); err != nil {
+			log.Warnw("initialization script failed on node", "node", node, "error", err)
+			// Continue with other nodes
+		}
+	}
+
+	return nil
+}
+
 // runInitializationScript uploads and executes a shell script on the target node with environment variables.
 // scriptName should be either "001-PreInitialization.sh" or "002-PostInitialization.sh".
 // deployedStacks is only used for post-initialization to pass the list of deployed stack names.
 // nginxUIConfig contains NginxUI configuration if NginxUI is enabled.
-func runInitializationScript(ctx context.Context, sshPool *ssh.Pool, primaryMaster string, serviceDefDir string, scriptName string, storageMountPath string, clusterInfo ClusterInfo, deployedStacks []string, nginxUIConfig *NginxUIConfig) error {
-	log := logging.L().With("component", "services", "script", scriptName)
+func runInitializationScript(ctx context.Context, sshPool *ssh.Pool, targetNode string, serviceDefDir string, scriptName string, storageMountPath string, clusterInfo ClusterInfo, deployedStacks []string, nginxUIConfig *NginxUIConfig) error {
+	log := logging.L().With("component", "services", "script", scriptName, "node", targetNode)
 
 	// Scripts are in a "scripts" folder next to the "services" folder
 	// If serviceDefDir is provided (e.g., /path/to/services), look for scripts in sibling folder
@@ -885,15 +908,7 @@ func runInitializationScript(ctx context.Context, sshPool *ssh.Pool, primaryMast
 		return fmt.Errorf("failed to read script: %w", err)
 	}
 
-	log.Infow("running initialization script", "host", primaryMaster, "size", len(scriptContent))
-
-	// Determine target node for script execution
-	// For distributed storage, only run on one node (shared storage)
-	// For local storage, run on primary master
-	targetNode := primaryMaster
-	if clusterInfo.DistributedStorageEnabled && len(clusterInfo.AllNodes) > 0 {
-		targetNode = clusterInfo.AllNodes[0]
-	}
+	log.Infow("running initialization script", "host", targetNode, "size", len(scriptContent))
 
 	// Get the actual hostname of the target node (not the SSH address which may be an IP)
 	nodeHostname := targetNode
@@ -916,7 +931,7 @@ export NODE_HOSTNAME='%s'
 		storageMountPath,
 		defaults.ServiceDataSubdir,
 		defaults.ServiceDefinitionsSubdir,
-		primaryMaster,
+		clusterInfo.PrimaryMaster,
 		clusterInfo.HasDedicatedWorkers,
 		clusterInfo.DistributedStorageEnabled,
 		nodeHostname,
