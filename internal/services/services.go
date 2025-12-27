@@ -935,6 +935,14 @@ export NODE_HOSTNAME='%s'
 			encodedConfig := base64.StdEncoding.EncodeToString([]byte(nginxUIConfig.ClusterConfigINI))
 			envVars += fmt.Sprintf("export NGINXUI_CLUSTER_CONFIG='%s'\n", encodedConfig)
 		}
+		// Pass load balancer node hostnames so pre-init can create directories for all nodes
+		if len(nginxUIConfig.ClusterNodes) > 0 {
+			var lbHostnames []string
+			for _, node := range nginxUIConfig.ClusterNodes {
+				lbHostnames = append(lbHostnames, node.Hostname)
+			}
+			envVars += fmt.Sprintf("export NGINXUI_LB_NODES='%s'\n", strings.Join(lbHostnames, ","))
+		}
 	} else {
 		envVars += "export NGINXUI_ENABLED='false'\n"
 	}

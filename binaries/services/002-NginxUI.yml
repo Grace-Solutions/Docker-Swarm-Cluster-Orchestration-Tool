@@ -10,13 +10,13 @@
 services:
   LoadBalancer:
     image: uozi/nginx-ui:sha-4754ef3
-    hostname: '{{.Node.Hostname}}-{{.Service.Name}}-{{.Task.Slot}}'
+    hostname: '{{.Node.Hostname}}'
     environment:
       TZ: UTC
       # Skip installation wizard
       NGINX_UI_NODE_SKIP_INSTALLATION: "true"
       # Node display name is hostname
-      NGINX_UI_NODE_NAME: "{{.Node.Hostname}}-{{.Service.Name}}-{{.Task.Slot}}"
+      NGINX_UI_NODE_NAME: "{{.Node.Hostname}}"
       # Predefined admin user (change in production)
       NGINX_UI_PREDEFINED_USER_NAME: "admin"
       NGINX_UI_PREDEFINED_USER_PASSWORD: "admin"
