@@ -357,9 +357,36 @@ func findUnusedVIP(ctx context.Context, sshPool *ssh.Pool, host, ifaceIP, cidrPr
 		"timeout", timeoutSeconds,
 	)
 
-	// Ensure arping is installed
-	installCmd := "command -v arping >/dev/null 2>&1 || { apt-get update && apt-get install -y iputils-arping 2>/dev/null || yum install -y arping 2>/dev/null || dnf install -y arping 2>/dev/null || true; }"
-	sshPool.Run(ctx, host, installCmd)
+	// Ensure arping is installed (iputils-arping on Debian/Ubuntu, arping on RHEL/CentOS)
+	installCmd := `command -v arping >/dev/null 2>&1 || {
+		if command -v apt-get >/dev/null 2>&1; then
+			apt-get update -qq && apt-get install -y -qq iputils-arping 2>/dev/null
+		elif command -v dnf >/dev/null 2>&1; then
+			dnf install -y -q arping 2>/dev/null
+		elif command -v yum >/dev/null 2>&1; then
+			yum install -y -q arping 2>/dev/null
+		fi
+	}`
+	if stdout, stderr, err := sshPool.Run(ctx, host, installCmd); err != nil {
+		log.Warnw("arping install may have failed", "stdout", stdout, "stderr", stderr, "error", err)
+	}
+
+	// Verify arping is available
+	verifyCmd := "command -v arping && arping -V 2>&1 | head -1"
+	if stdout, _, err := sshPool.Run(ctx, host, verifyCmd); err != nil {
+		return "", fmt.Errorf("arping not available after install attempt: %w", err)
+	} else {
+		log.Infow("arping verified", "output", strings.TrimSpace(stdout))
+	}
+
+	// Detect the network interface for the reference IP
+	detectIfaceCmd := fmt.Sprintf("ip route get %s 2>/dev/null | grep -oP 'dev \\K\\S+' | head -1", ifaceIP)
+	ifaceOut, _, err := sshPool.Run(ctx, host, detectIfaceCmd)
+	if err != nil || strings.TrimSpace(ifaceOut) == "" {
+		return "", fmt.Errorf("failed to detect interface for IP %s", ifaceIP)
+	}
+	detectedIface := strings.TrimSpace(ifaceOut)
+	log.Infow("using interface for ARP scan", "interface", detectedIface)
 
 	// Start from broadcast-1 and work down (prefer high IPs for VIPs)
 	startTime := time.Now()
@@ -369,11 +396,13 @@ func findUnusedVIP(ctx context.Context, sshPool *ssh.Pool, host, ifaceIP, cidrPr
 	netInt := ipToUint32(networkAddr)
 	broadInt := ipToUint32(broadcastAddr)
 
+	scannedCount := 0
+
 	// Iterate from broadcast-1 down to network+1
 	for hostInt := broadInt - 1; hostInt > netInt; hostInt-- {
 		// Check timeout
 		if time.Since(startTime) > timeout {
-			return "", fmt.Errorf("VIP scan timeout (%ds) exceeded", timeoutSeconds)
+			return "", fmt.Errorf("VIP scan timeout (%ds) exceeded after testing %d IPs", timeoutSeconds, scannedCount)
 		}
 
 		candidate := uint32ToIP(hostInt)
@@ -383,20 +412,31 @@ func findUnusedVIP(ctx context.Context, sshPool *ssh.Pool, host, ifaceIP, cidrPr
 			continue
 		}
 
-		// arping -c 1 -w 1 -D -I <iface> <ip>
-		// -D = DAD mode: returns 0 if IP responds (in use), 1 if no response (available)
-		arpCmd := fmt.Sprintf("arping -c 1 -w 1 -D -I $(ip route get %s 2>/dev/null | grep -oP 'dev \\K\\S+' || echo eth0) %s 2>/dev/null",
-			candidate.String(), candidate.String())
-		_, _, err := sshPool.Run(ctx, host, arpCmd)
-		if err != nil {
-			// arping returned non-zero, meaning no response = IP available
-			log.Infow("found unused VIP", "ip", candidate.String())
+		scannedCount++
+
+		// arping -D (DAD mode) with iputils-arping:
+		// Exit codes: 0 = no reply (IP available), 1 = reply received (IP in use), 2 = error
+		// -c 1 = send 1 probe, -w 1 = wait 1 second total
+		arpCmd := fmt.Sprintf("arping -D -c 1 -w 1 -I %s %s", detectedIface, candidate.String())
+		stdout, _, err := sshPool.Run(ctx, host, arpCmd)
+
+		// Log every IP being tested at INFO level for visibility
+		log.Infow("testing IP",
+			"ip", candidate.String(),
+			"scanned", scannedCount,
+			"exitError", err != nil,
+			"output", strings.TrimSpace(stdout),
+		)
+
+		if err == nil {
+			// Exit code 0 = no ARP reply = IP is available
+			log.Infow("found unused VIP", "ip", candidate.String(), "scannedCount", scannedCount)
 			return candidate.String(), nil
 		}
-		log.Debugw("IP in use", "ip", candidate.String())
+		// err != nil means exit code 1 (in use) or 2 (error) - continue scanning
 	}
 
-	return "", fmt.Errorf("no unused IP found in subnet %s/%s after scanning %d hosts", networkAddr.String(), cidrPrefix, totalHosts)
+	return "", fmt.Errorf("no unused IP found in subnet %s/%s after scanning %d hosts", networkAddr.String(), cidrPrefix, scannedCount)
 }
 
 // ipToUint32 converts an IPv4 address to uint32.

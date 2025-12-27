@@ -931,8 +931,11 @@ export NODE_HOSTNAME='%s'
 	}
 
 	// Upload script to remote host
+	// Convert CRLF to LF to ensure script works on Linux (Windows files have CRLF)
 	remoteScript := fmt.Sprintf("/tmp/dscotctl-%s", scriptName)
-	uploadCmd := fmt.Sprintf("cat > %s << 'DSCOTCTL_SCRIPT_EOF'\n%s\nDSCOTCTL_SCRIPT_EOF", remoteScript, string(scriptContent))
+	scriptStr := strings.ReplaceAll(string(scriptContent), "\r\n", "\n")
+	scriptStr = strings.ReplaceAll(scriptStr, "\r", "\n") // Handle any standalone CR
+	uploadCmd := fmt.Sprintf("cat > %s << 'DSCOTCTL_SCRIPT_EOF'\n%s\nDSCOTCTL_SCRIPT_EOF", remoteScript, scriptStr)
 
 	if _, stderr, err := sshPool.Run(ctx, targetNode, uploadCmd); err != nil {
 		return fmt.Errorf("failed to upload script: %w (stderr: %s)", err, stderr)
