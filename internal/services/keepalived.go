@@ -486,18 +486,18 @@ func InstallAndConfigureKeepalived(ctx context.Context, sshPool *ssh.Pool, deplo
 func installKeepalivedOnNode(ctx context.Context, sshPool *ssh.Pool, nodeConfig *KeepalivedNodeConfig, deployment *KeepalivedDeployment) error {
 	host := nodeConfig.Hostname
 
-	// Install keepalived idempotently
+	// Install keepalived idempotently (suppress verbose apt output)
 	installCmd := `
 if ! command -v keepalived &> /dev/null; then
     echo "Installing keepalived..."
     if command -v apt-get &> /dev/null; then
-        apt-get update && apt-get install -y keepalived
+        apt-get update -qq >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq keepalived >/dev/null 2>&1 && echo "keepalived installed successfully" || { echo "apt-get install failed" >&2; exit 1; }
     elif command -v yum &> /dev/null; then
-        yum install -y keepalived
+        yum install -y -q keepalived >/dev/null 2>&1 && echo "keepalived installed successfully" || { echo "yum install failed" >&2; exit 1; }
     elif command -v dnf &> /dev/null; then
-        dnf install -y keepalived
+        dnf install -y -q keepalived >/dev/null 2>&1 && echo "keepalived installed successfully" || { echo "dnf install failed" >&2; exit 1; }
     else
-        echo "ERROR: No supported package manager found"
+        echo "ERROR: No supported package manager found" >&2
         exit 1
     fi
 else
@@ -508,7 +508,7 @@ fi
 	if err != nil {
 		return fmt.Errorf("failed to install keepalived: %w (stderr: %s)", err, stderr)
 	}
-	logging.L().Infow("keepalived install output", "stdout", strings.TrimSpace(stdout))
+	logging.L().Infow(strings.TrimSpace(stdout), "node", host)
 
 	// Generate keepalived.conf
 	keepalivedConf := generateKeepalivedConf(nodeConfig, deployment)
