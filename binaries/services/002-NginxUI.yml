@@ -1,4 +1,4 @@
-# NAME: NginxUI
+# NAME: LoadBalancer
 # DESCRIPTION: Nginx UI - Load Balancer Management (Internal Access Only)
 # ENABLED: true
 # NOTE: Each node gets its own data directory to avoid contention
