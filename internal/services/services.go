@@ -930,11 +930,6 @@ export NODE_HOSTNAME='%s'
 	// Add NginxUI configuration if enabled
 	if nginxUIConfig != nil && nginxUIConfig.Enabled {
 		envVars += "export NGINXUI_ENABLED='true'\n"
-		// Base64 encode the cluster config to avoid shell escaping issues
-		if nginxUIConfig.ClusterConfigINI != "" {
-			encodedConfig := base64.StdEncoding.EncodeToString([]byte(nginxUIConfig.ClusterConfigINI))
-			envVars += fmt.Sprintf("export NGINXUI_CLUSTER_CONFIG='%s'\n", encodedConfig)
-		}
 		// Pass load balancer node hostnames so pre-init can create directories for all nodes
 		if len(nginxUIConfig.ClusterNodes) > 0 {
 			var lbHostnames []string
@@ -942,6 +937,16 @@ export NODE_HOSTNAME='%s'
 				lbHostnames = append(lbHostnames, node.Hostname)
 			}
 			envVars += fmt.Sprintf("export NGINXUI_LB_NODES='%s'\n", strings.Join(lbHostnames, ","))
+		}
+		// Pass per-node cluster configs (each node gets OTHER nodes only)
+		// Format: NGINXUI_CLUSTER_CONFIG_<HOSTNAME>=<base64-encoded-config>
+		for hostname, cfg := range nginxUIConfig.PerNodeClusterConfigs {
+			if cfg != "" {
+				encodedConfig := base64.StdEncoding.EncodeToString([]byte(cfg))
+				// Sanitize hostname for env var name (uppercase, replace - with _)
+				safeHostname := strings.ToUpper(strings.ReplaceAll(hostname, "-", "_"))
+				envVars += fmt.Sprintf("export NGINXUI_CLUSTER_CONFIG_%s='%s'\n", safeHostname, encodedConfig)
+			}
 		}
 	} else {
 		envVars += "export NGINXUI_ENABLED='false'\n"

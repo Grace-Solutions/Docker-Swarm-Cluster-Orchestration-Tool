@@ -22,12 +22,13 @@ type NginxUISecrets struct {
 
 // NginxUIConfig contains NginxUI deployment configuration
 type NginxUIConfig struct {
-	Enabled            bool
-	Secrets            NginxUISecrets
-	ClusterNodes       []NginxUIClusterNode
-	ClusterConfigINI   string
-	StoragePath        string
-	ServiceName        string
+	Enabled              bool
+	Secrets              NginxUISecrets
+	ClusterNodes         []NginxUIClusterNode
+	ClusterConfigINI     string            // Deprecated: Use PerNodeClusterConfigs instead
+	PerNodeClusterConfigs map[string]string // hostname -> cluster config INI (each node gets other nodes only)
+	StoragePath          string
+	ServiceName          string
 }
 
 // NginxUIClusterNode represents a node in the NginxUI cluster
@@ -134,8 +135,10 @@ func DiscoverLoadBalancerNodes(ctx context.Context, sshPool *ssh.Pool, primaryMa
 	return nodes, nil
 }
 
-// GenerateClusterConfig generates the NginxUI cluster configuration INI section
-func GenerateClusterConfig(nodes []NginxUIClusterNode, nodeSecret string) string {
+// GenerateClusterConfig generates the NginxUI cluster configuration INI section for a specific node.
+// It includes all OTHER nodes in the cluster, excluding selfHostname.
+// If selfHostname is empty, all nodes are included.
+func GenerateClusterConfig(nodes []NginxUIClusterNode, nodeSecret string, selfHostname string) string {
 	if len(nodes) == 0 {
 		return ""
 	}
@@ -144,6 +147,10 @@ func GenerateClusterConfig(nodes []NginxUIClusterNode, nodeSecret string) string
 	lines = append(lines, "[cluster]")
 
 	for _, node := range nodes {
+		// Skip self - each node only needs to know about OTHER nodes
+		if selfHostname != "" && strings.EqualFold(node.Hostname, selfHostname) {
+			continue
+		}
 		// Use container hostname for addressing over overlay network
 		// Format: Node = http://<hostname>:9000?name=<display_name>&node_secret=<secret>&enabled=true
 		nodeLine := fmt.Sprintf("Node = http://%s:%d?name=%s&node_secret=%s&enabled=true",
@@ -155,7 +162,23 @@ func GenerateClusterConfig(nodes []NginxUIClusterNode, nodeSecret string) string
 		lines = append(lines, nodeLine)
 	}
 
+	// If only [cluster] header (no other nodes), return empty
+	if len(lines) <= 1 {
+		return ""
+	}
+
 	return strings.Join(lines, "\n")
+}
+
+// GeneratePerNodeClusterConfigs generates cluster configs for each node.
+// Returns a map of hostname -> cluster config INI section.
+func GeneratePerNodeClusterConfigs(nodes []NginxUIClusterNode, nodeSecret string) map[string]string {
+	configs := make(map[string]string)
+	for _, node := range nodes {
+		cfg := GenerateClusterConfig(nodes, nodeSecret, node.Hostname)
+		configs[node.Hostname] = cfg
+	}
+	return configs
 }
 
 // WriteNginxUISecrets writes secrets to storage and logs them
@@ -243,17 +266,20 @@ func PrepareNginxUIDeployment(ctx context.Context, sshPool *ssh.Pool, primaryMas
 	}
 	config.ClusterNodes = nodes
 
-	// Generate cluster configuration
+	// Generate per-node cluster configurations
+	// Each node gets config containing only the OTHER nodes (not itself)
 	if len(nodes) > 0 {
-		config.ClusterConfigINI = GenerateClusterConfig(nodes, secrets.NodeSecret)
-		log.Infow("generated NginxUI cluster configuration",
+		config.PerNodeClusterConfigs = GeneratePerNodeClusterConfigs(nodes, secrets.NodeSecret)
+		log.Infow("generated NginxUI per-node cluster configurations",
 			"nodeCount", len(nodes),
 		)
-		// Log the cluster config
-		log.Infow("=== NginxUI Cluster Configuration ===")
-		for _, line := range strings.Split(config.ClusterConfigINI, "\n") {
-			if line != "" {
-				log.Infow(line)
+		// Log each node's config
+		for hostname, cfg := range config.PerNodeClusterConfigs {
+			log.Infow("=== NginxUI Cluster Config for "+hostname+" ===")
+			for _, line := range strings.Split(cfg, "\n") {
+				if line != "" {
+					log.Infow(line)
+				}
 			}
 		}
 	}
