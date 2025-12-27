@@ -10,7 +10,7 @@
 services:
   LoadBalancer:
     image: uozi/nginx-ui:sha-4754ef3
-    hostname: 'LoadBalancer-{{.Task.Slot}}'
+    hostname: 'LoadBalancer-{{.Node.ID}}'
     environment:
       TZ: UTC
       # Skip installation wizard

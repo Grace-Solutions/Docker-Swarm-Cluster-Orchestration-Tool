@@ -298,7 +298,7 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 			if err != nil {
 				log.Warnw("failed to discover NginxUI containers", "error", err)
 			} else if len(containers) > 1 {
-				if err := UpdateNginxUIClusterConfig(ctx, sshPool, storageMountPath, containers, nginxUIConfig.Secrets.NodeSecret); err != nil {
+				if err := UpdateNginxUIClusterConfig(ctx, sshPool, storageMountPath, containers, nginxUIConfig.Secrets.NodeSecret, swarmServiceName); err != nil {
 					log.Warnw("failed to update NginxUI cluster config", "error", err)
 				}
 			}

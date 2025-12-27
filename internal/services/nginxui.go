@@ -107,7 +107,8 @@ func DiscoverLoadBalancerNodes(ctx context.Context, sshPool *ssh.Pool, primaryMa
 	log := logging.L().With("component", "nginxui")
 
 	// Query Docker Swarm for nodes with loadbalancer=true label
-	cmd := fmt.Sprintf("docker node ls --filter 'node.label=%s=%s' --format '{{.Hostname}}'",
+	// Get both hostname and ID for computing container hostname
+	cmd := fmt.Sprintf("docker node ls --filter 'node.label=%s=%s' --format '{{.Hostname}} {{.ID}}'",
 		NginxUILabelKey, NginxUILabelValue)
 
 	log.Infow("discovering load balancer nodes", "command", cmd)
@@ -120,13 +121,22 @@ func DiscoverLoadBalancerNodes(ctx context.Context, sshPool *ssh.Pool, primaryMa
 	var nodes []NginxUIClusterNode
 	lines := strings.Split(strings.TrimSpace(stdout), "\n")
 	for _, line := range lines {
-		hostname := strings.TrimSpace(line)
-		if hostname == "" {
+		line = strings.TrimSpace(line)
+		if line == "" {
 			continue
 		}
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+		hostname := parts[0]
+		nodeID := parts[1]
+		// Container hostname uses LoadBalancer-<node_id> to match YAML template: hostname: 'LoadBalancer-{{.Node.ID}}'
+		containerHostname := fmt.Sprintf("LoadBalancer-%s", nodeID)
+
 		nodes = append(nodes, NginxUIClusterNode{
 			Hostname:      hostname,
-			ContainerName: hostname, // Container hostname matches node hostname
+			ContainerName: containerHostname,
 			NodeLabel:     fmt.Sprintf("%s=%s", NginxUILabelKey, NginxUILabelValue),
 		})
 	}
@@ -436,7 +446,7 @@ func DiscoverNginxUIContainers(ctx context.Context, sshPool *ssh.Pool, primaryMa
 
 // UpdateNginxUIClusterConfig updates the cluster configuration in app.ini for the hub node
 // after containers are discovered. Only the first (hub) node gets cluster config pointing to other nodes.
-func UpdateNginxUIClusterConfig(ctx context.Context, sshPool *ssh.Pool, storagePath string, containers []NginxUIContainerInfo, nodeSecret string) error {
+func UpdateNginxUIClusterConfig(ctx context.Context, sshPool *ssh.Pool, storagePath string, containers []NginxUIContainerInfo, nodeSecret string, serviceName string) error {
 	log := logging.L().With("component", "nginxui")
 
 	if len(containers) < 2 {
@@ -516,17 +526,18 @@ func UpdateNginxUIClusterConfig(ctx context.Context, sshPool *ssh.Pool, storageP
 		log.Infow(line)
 	}
 
-	// Restart the hub container to pick up the new cluster config
-	log.Infow("restarting NginxUI hub container to apply cluster config",
-		"containerID", hubContainer.ContainerID[:12],
-		"node", hubContainer.NodeHostname,
+	// Force service update to restart all containers and pick up new config
+	// In Docker Swarm, containers are managed as tasks - use service update --force
+	// This will cause a rolling restart of all containers
+	log.Infow("forcing service update to apply cluster config",
+		"serviceName", serviceName,
 	)
-	restartCmd := fmt.Sprintf("docker restart %s", hubContainer.ContainerID)
-	if _, stderr, err := sshPool.Run(ctx, hubContainer.NodeHostname, restartCmd); err != nil {
-		log.Warnw("failed to restart hub container", "error", err, "stderr", stderr)
-		// Don't fail - config is written, container can be manually restarted
+	updateCmd := fmt.Sprintf("docker service update --force %s", serviceName)
+	if _, stderr, err := sshPool.Run(ctx, hubContainer.NodeHostname, updateCmd); err != nil {
+		log.Warnw("failed to force service update", "error", err, "stderr", stderr)
+		// Don't fail - config is written, service can be manually updated
 	} else {
-		log.Infow("✅ NginxUI hub container restarted")
+		log.Infow("✅ NginxUI service update initiated")
 	}
 
 	return nil
