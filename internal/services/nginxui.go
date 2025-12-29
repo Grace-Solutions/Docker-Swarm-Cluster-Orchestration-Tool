@@ -233,8 +233,8 @@ NGINX_UI_CRYPTO_SECRET=%s
 `, secrets.NodeSecret, secrets.JWTSecret, secrets.CryptoSecret)
 
 	// Create directory and write file
-	cmd := fmt.Sprintf("mkdir -p '%s' && cat > '%s' << 'EOF'\n%s\nEOF && chmod 600 '%s'",
-		secretsDir, secretsFile, content, secretsFile)
+	cmd := fmt.Sprintf("mkdir -p '%s' && cat > '%s' << 'EOF'\n%s\nEOF",
+		secretsDir, secretsFile, content)
 
 	log.Infow("writing NginxUI secrets to storage",
 		"path", secretsFile,
@@ -843,12 +843,6 @@ func WriteNginxUICredentials(ctx context.Context, sshPool *ssh.Pool, hubNode str
 	writeCmd := fmt.Sprintf("cat > '%s' << 'EOF'\n%s\nEOF", credsPath, string(jsonBytes))
 	if _, stderr, err := sshPool.Run(ctx, hubNode, writeCmd); err != nil {
 		return fmt.Errorf("failed to write credentials file: %w (stderr: %s)", err, stderr)
-	}
-
-	// Set restrictive permissions
-	chmodCmd := fmt.Sprintf("chmod 600 '%s'", credsPath)
-	if _, _, err := sshPool.Run(ctx, hubNode, chmodCmd); err != nil {
-		log.Warnw("failed to set permissions on credentials file", "path", credsPath, "error", err)
 	}
 
 	log.Infow("NginxUI credentials written to file",
