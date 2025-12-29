@@ -60,14 +60,16 @@ Services deploy in **alphabetical order by filename**. Use numeric prefixes:
 
 | Network | Purpose | Subnet |
 |---------|---------|--------|
-| `DOCKER-SWARM-CLUSTER-INTERNAL-COMMUNICATION` | Internal cluster traffic | 172.17.16.0/20 |
-| `DOCKER-SWARM-CLUSTER-EXTERNAL-INGRESS` | External-facing services | 172.17.32.0/20 |
+| `DOCKER-SWARM-CLUSTER-INTERNAL-COMMUNICATION` | Internal cluster traffic (no external access) | 10.10.0.0/20 |
+| `ingress` | Docker's default routing mesh for published ports | Managed by Docker |
 
 ```yaml
 networks:
   DOCKER-SWARM-CLUSTER-INTERNAL-COMMUNICATION:
     external: true
 ```
+
+For external-facing services, use Docker's default `ingress` network via published ports.
 
 ---
 
