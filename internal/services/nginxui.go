@@ -308,13 +308,17 @@ func PrepareNginxUIDeployment(ctx context.Context, sshPool *ssh.Pool, primaryMas
 		log.Infow("generated NginxUI per-node cluster configurations",
 			"nodeCount", len(nodes),
 		)
-		// Log each node's config
+		// Log cluster config - only hub node has config, others are spokes
 		for hostname, cfg := range config.PerNodeClusterConfigs {
-			log.Infow("=== NginxUI Cluster Config for "+hostname+" ===")
-			for _, line := range strings.Split(cfg, "\n") {
-				if line != "" {
-					log.Infow(line)
+			if cfg != "" {
+				log.Infow("=== NginxUI Cluster Config (Hub: " + hostname + ") ===")
+				for _, line := range strings.Split(cfg, "\n") {
+					if line != "" {
+						log.Infow("  " + line)
+					}
 				}
+			} else {
+				log.Infow("NginxUI spoke node (syncs from hub)", "node", hostname)
 			}
 		}
 	}
