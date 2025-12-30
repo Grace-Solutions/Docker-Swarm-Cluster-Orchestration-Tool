@@ -297,7 +297,7 @@ func PrepareNginxUIDeployment(ctx context.Context, sshPool *ssh.Pool, primaryMas
 		for _, node := range nodes {
 			log.Infow(fmt.Sprintf("  http://%s/nginxui/", node.Hostname))
 		}
-		log.Infow("Default credentials: admin / admin (change after first login)")
+		log.Infow("Credentials will be generated and saved to secrets directory after deployment")
 	}
 
 	log.Infow("✅ NginxUI deployment preparation complete")
@@ -726,12 +726,13 @@ func WriteNginxUICredentials(ctx context.Context, sshPool *ssh.Pool, hubNode str
 		credsPath = "/root/.dscotctl/nginxui-credentials.json"
 	}
 
-	// Create directory
+	// Create directory with proper permissions
 	dir := filepath.ToSlash(filepath.Dir(credsPath))
-	mkdirCmd := fmt.Sprintf("mkdir -p '%s'", dir)
+	mkdirCmd := fmt.Sprintf("mkdir -p '%s' && chmod 700 '%s'", dir, dir)
 	if _, stderr, err := sshPool.Run(ctx, hubNode, mkdirCmd); err != nil {
-		log.Warnw("failed to create credentials directory", "path", dir, "error", err, "stderr", stderr)
+		return fmt.Errorf("failed to create credentials directory %s: %w (stderr: %s)", dir, err, stderr)
 	}
+	log.Infow("credentials directory ensured", "path", dir)
 
 	// Sort containers to identify hub (first alphabetically)
 	sortedContainers := make([]NginxUIContainerInfo, len(containers))

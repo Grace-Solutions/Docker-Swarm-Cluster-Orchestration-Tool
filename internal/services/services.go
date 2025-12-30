@@ -212,6 +212,16 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 		)
 	}
 
+	// Create secrets directory on shared storage if enabled
+	if storageMountPath != "" {
+		secretsDir := filepath.ToSlash(filepath.Join(storageMountPath, "secrets"))
+		log.Infow("creating secrets directory on shared storage", "path", secretsDir)
+		mkdirCmd := fmt.Sprintf("mkdir -p '%s' && chmod 700 '%s'", secretsDir, secretsDir)
+		if _, stderr, err := sshPool.Run(ctx, primaryMaster, mkdirCmd); err != nil {
+			log.Warnw("failed to create secrets directory", "path", secretsDir, "error", err, "stderr", stderr)
+		}
+	}
+
 	// Prepare NginxUI if enabled
 	var nginxUIConfig *NginxUIConfig
 	if IsNginxUIEnabled(services) {

@@ -5,6 +5,7 @@ package nodeconfig
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"clusterctl/internal/config"
 	"clusterctl/internal/logging"
@@ -89,27 +90,49 @@ func (nc *NodeConfigurator) installWebmin(ctx context.Context, hostname string) 
 	nc.log.Infow("installing Webmin", "host", hostname)
 
 	// Check if already installed
-	checkCmd := "which webmin || dpkg -l | grep -q webmin && echo 'installed' || echo 'not_installed'"
+	checkCmd := "dpkg -l webmin 2>/dev/null | grep -q '^ii' && echo 'installed' || echo 'not_installed'"
 	stdout, _, _ := nc.sshPool.Run(ctx, hostname, checkCmd)
-	if stdout == "installed\n" || stdout == "installed" {
+	if strings.TrimSpace(stdout) == "installed" {
 		nc.log.Infow("Webmin already installed", "host", hostname)
 		return nil
 	}
 
 	// Install Webmin using the official setup script
+	// The setup-repos.sh requires 'y' input for confirmation, so we pipe echo "y"
+	// We also need to install required dependencies first
 	installScript := `#!/bin/bash
 set -e
 
-# Add Webmin repository and GPG key
-curl -fsSL https://raw.githubusercontent.com/webmin/webmin/master/setup-repos.sh | sh
+# Install required dependencies
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y curl apt-transport-https gnupg
+
+# Create downloads directory
+WEBMINDOWNLOADDIRECTORY="/tmp/webmin-install"
+mkdir -p "$WEBMINDOWNLOADDIRECTORY"
+
+# Download and run the repository setup script
+WEBMINSCRIPTURL="https://raw.githubusercontent.com/webmin/webmin/master/setup-repos.sh"
+WEBMINSCRIPTFILEPATH="$WEBMINDOWNLOADDIRECTORY/setup-repos.sh"
+curl -fsSL -o "$WEBMINSCRIPTFILEPATH" "$WEBMINSCRIPTURL"
+chmod +x "$WEBMINSCRIPTFILEPATH"
+
+# Run the setup script with 'y' confirmation (non-interactive)
+echo "y" | bash "$WEBMINSCRIPTFILEPATH" 2>&1 || true
+
+# Update package lists after adding repo
+apt-get update -qq
 
 # Install Webmin
-apt-get update -qq
-apt-get install -y webmin
+apt-get install -y --install-recommends webmin
 
 # Enable and start Webmin
 systemctl enable webmin
 systemctl start webmin
+
+# Cleanup
+rm -rf "$WEBMINDOWNLOADDIRECTORY"
 
 echo "Webmin installed successfully"
 `
@@ -117,7 +140,7 @@ echo "Webmin installed successfully"
 		return fmt.Errorf("webmin installation failed: %w (stderr: %s)", err, stderr)
 	}
 
-	nc.log.Infow("Webmin installed successfully", "host", hostname)
+	nc.log.Infow("Webmin installed successfully", "host", hostname, "accessUrl", fmt.Sprintf("https://%s:10000", hostname))
 	return nil
 }
 
