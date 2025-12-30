@@ -363,21 +363,15 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 				}
 			}
 
-			// Reset admin password using nginx-ui's built-in reset-password command
-			// This generates a new random password and logs it for operator reference
-			log.Infow("attempting NginxUI admin password reset", "containerCount", len(containers))
-			var creds *NginxUICredentials
+			// Reset admin password on ALL containers using nginx-ui's built-in reset-password command
+			// Each container will have a different password since they have separate databases
+			log.Infow("attempting NginxUI admin password reset on all containers", "containerCount", len(containers))
+			var allCreds []NginxUICredentials
 			if len(containers) > 0 {
 				var err error
-				creds, err = ResetNginxUIAdminPassword(ctx, sshPool, containers)
+				allCreds, err = ResetNginxUIAdminPasswords(ctx, sshPool, containers)
 				if err != nil {
-					log.Warnw("failed to set NginxUI admin password", "error", err)
-				} else {
-					log.Infow("========================================")
-					log.Infow("=== NginxUI Admin Credentials ===")
-					log.Infow(fmt.Sprintf("  Username: %s", creds.Username))
-					log.Infow(fmt.Sprintf("  Password: %s", creds.Password))
-					log.Infow("========================================")
+					log.Warnw("failed to reset NginxUI admin passwords", "error", err)
 				}
 
 				// Configure S3 proxy if RGW is enabled and credentials file exists
@@ -397,8 +391,9 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 				"storageMountPath", storageMountPath,
 				"primaryMaster", clusterInfo.PrimaryMaster,
 				"containerCount", len(containers),
+				"credentialsCount", len(allCreds),
 			)
-			if err := WriteNginxUICredentials(ctx, sshPool, clusterInfo.PrimaryMaster, storageMountPath, creds, containers, nginxUIConfig.Secrets, clusterInfo.KeepalivedVIP, clusterInfo.PortainerEnabled); err != nil {
+			if err := WriteNginxUICredentials(ctx, sshPool, clusterInfo.PrimaryMaster, storageMountPath, allCreds, containers, nginxUIConfig.Secrets, clusterInfo.KeepalivedVIP, clusterInfo.PortainerEnabled); err != nil {
 				log.Warnw("failed to write NginxUI credentials file", "error", err)
 			} else {
 				log.Infow("✅ NginxUI credentials file written successfully")

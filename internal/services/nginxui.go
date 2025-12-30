@@ -587,10 +587,12 @@ func removeClusterSection(content string) string {
 	return strings.Join(result, "\n")
 }
 
-// NginxUICredentials contains the admin credentials for NginxUI
+// NginxUICredentials contains the admin credentials for a NginxUI node
 type NginxUICredentials struct {
-	Username string
-	Password string
+	Username     string
+	Password     string
+	NodeHostname string // The Docker Swarm node hostname
+	ContainerID  string // The container ID where credentials were reset
 }
 
 // Default admin username (from service YAML env vars)
@@ -657,17 +659,17 @@ func UpdateNginxUINodeTokens(ctx context.Context, sshPool *ssh.Pool, primaryMast
 	return nil
 }
 
-// ResetNginxUIAdminPassword resets the admin password using nginx-ui's built-in reset-password command.
-// This generates a new random password and returns the credentials.
-// The password is logged for operator reference.
-func ResetNginxUIAdminPassword(ctx context.Context, sshPool *ssh.Pool, containers []NginxUIContainerInfo) (*NginxUICredentials, error) {
+// ResetNginxUIAdminPasswords resets the admin password on ALL NginxUI containers.
+// Each container will have a different password since they have separate databases.
+// Returns credentials for all nodes, with each node's password logged for operator reference.
+func ResetNginxUIAdminPasswords(ctx context.Context, sshPool *ssh.Pool, containers []NginxUIContainerInfo) ([]NginxUICredentials, error) {
 	log := logging.L().With("component", "nginxui")
 
 	if len(containers) == 0 {
 		return nil, fmt.Errorf("no NginxUI containers found")
 	}
 
-	// Sort containers by node hostname to get consistent hub node
+	// Sort containers by node hostname for consistent ordering
 	sortedContainers := make([]NginxUIContainerInfo, len(containers))
 	copy(sortedContainers, containers)
 	for i := 0; i < len(sortedContainers)-1; i++ {
@@ -678,65 +680,98 @@ func ResetNginxUIAdminPassword(ctx context.Context, sshPool *ssh.Pool, container
 		}
 	}
 
-	hubContainer := sortedContainers[0]
+	var allCreds []NginxUICredentials
 
-	log.Infow("resetting NginxUI admin password",
-		"hubNode", hubContainer.NodeHostname,
-		"sshHost", hubContainer.SSHHost,
-		"containerID", hubContainer.ContainerID,
-	)
+	log.Infow("resetting NginxUI admin passwords on all containers", "count", len(sortedContainers))
 
-	// Use nginx-ui's built-in reset-password command
-	// This generates a new random password and outputs: "User: admin, Password: <password>"
-	// docker exec must run on the node where the container is running - use container's SSHHost
-	resetCmd := fmt.Sprintf("docker exec %s nginx-ui reset-password --config=/etc/nginx-ui/app.ini", hubContainer.ContainerID)
-	stdout, stderr, err := sshPool.Run(ctx, hubContainer.SSHHost, resetCmd)
-	if err != nil {
-		return nil, fmt.Errorf("failed to reset password: %w (stderr: %s)", err, stderr)
-	}
+	for _, container := range sortedContainers {
+		log.Infow("resetting password on container",
+			"node", container.NodeHostname,
+			"sshHost", container.SSHHost,
+			"containerID", container.ContainerID[:12],
+		)
 
-	// Parse the output to extract username and password
-	// Format: "User: admin, Password: k%hCjY#5DD(d"
-	var username, password string
-	lines := strings.Split(stdout+stderr, "\n")
-	for _, line := range lines {
-		if strings.Contains(line, "User:") && strings.Contains(line, "Password:") {
-			// Extract username and password from the line
-			parts := strings.Split(line, ",")
-			for _, part := range parts {
-				part = strings.TrimSpace(part)
-				if strings.HasPrefix(part, "User:") {
-					username = strings.TrimSpace(strings.TrimPrefix(part, "User:"))
-				} else if strings.HasPrefix(part, "Password:") {
-					password = strings.TrimSpace(strings.TrimPrefix(part, "Password:"))
+		// Use nginx-ui's built-in reset-password command
+		// This generates a new random password and outputs: "User: admin, Password: <password>"
+		// docker exec must run on the node where the container is running - use container's SSHHost
+		resetCmd := fmt.Sprintf("docker exec %s nginx-ui reset-password --config=/etc/nginx-ui/app.ini", container.ContainerID)
+		stdout, stderr, err := sshPool.Run(ctx, container.SSHHost, resetCmd)
+		if err != nil {
+			log.Warnw("failed to reset password on container",
+				"node", container.NodeHostname,
+				"containerID", container.ContainerID[:12],
+				"error", err,
+				"stderr", stderr,
+			)
+			continue
+		}
+
+		// Parse the output to extract username and password
+		// Format: "User: admin, Password: k%hCjY#5DD(d"
+		var username, password string
+		lines := strings.Split(stdout+stderr, "\n")
+		for _, line := range lines {
+			if strings.Contains(line, "User:") && strings.Contains(line, "Password:") {
+				// Extract username and password from the line
+				parts := strings.Split(line, ",")
+				for _, part := range parts {
+					part = strings.TrimSpace(part)
+					if strings.HasPrefix(part, "User:") {
+						username = strings.TrimSpace(strings.TrimPrefix(part, "User:"))
+					} else if strings.HasPrefix(part, "Password:") {
+						password = strings.TrimSpace(strings.TrimPrefix(part, "Password:"))
+					}
 				}
 			}
 		}
+
+		if username == "" || password == "" {
+			log.Warnw("failed to parse reset-password output",
+				"node", container.NodeHostname,
+				"output", stdout+stderr,
+			)
+			continue
+		}
+
+		creds := NginxUICredentials{
+			Username:     username,
+			Password:     password,
+			NodeHostname: container.NodeHostname,
+			ContainerID:  container.ContainerID,
+		}
+
+		allCreds = append(allCreds, creds)
+
+		// Log each node's credentials prominently
+		log.Infow("========================================")
+		log.Infow("=== NginxUI Credentials for Node ===")
+		log.Infow(fmt.Sprintf("  Node: %s", container.NodeHostname))
+		log.Infow(fmt.Sprintf("  Username: %s", username))
+		log.Infow(fmt.Sprintf("  Password: %s", password))
+		log.Infow("========================================")
 	}
 
-	if username == "" || password == "" {
-		return nil, fmt.Errorf("failed to parse reset-password output: %s", stdout+stderr)
+	if len(allCreds) == 0 {
+		return nil, fmt.Errorf("failed to reset password on any container")
 	}
 
-	creds := &NginxUICredentials{
-		Username: username,
-		Password: password,
-	}
+	log.Infow("✅ NginxUI admin passwords reset successfully", "successCount", len(allCreds), "totalContainers", len(containers))
 
-	log.Infow("✅ NginxUI admin password reset successfully",
-		"username", creds.Username,
-		"password", creds.Password,
-	)
+	return allCreds, nil
+}
 
-	return creds, nil
+// NginxUINodeInfo contains per-node information including credentials
+type NginxUINodeInfo struct {
+	Hostname      string `json:"hostname"`
+	ContainerID   string `json:"containerId"`
+	ContainerName string `json:"containerName"`
+	IsHub         bool   `json:"isHub"`
+	Username      string `json:"username"`
+	Password      string `json:"password"`
 }
 
 // NginxUIClusterInfo contains comprehensive NginxUI cluster information for the credentials file
 type NginxUIClusterInfo struct {
-	Credentials struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-	} `json:"credentials"`
 	Secrets struct {
 		NodeSecret   string `json:"nodeSecret"`
 		JWTSecret    string `json:"jwtSecret"`
@@ -746,14 +781,9 @@ type NginxUIClusterInfo struct {
 		NginxUI   []string `json:"nginxui"`             // URLs to access NginxUI (http://<node>/nginxui/)
 		Portainer []string `json:"portainer,omitempty"` // URLs to access Portainer (http://<node>/portainer/)
 	} `json:"accessUrls"`
-	VirtualIP string `json:"virtualIp,omitempty"` // Virtual IP if keepalived enabled
-	Nodes     []struct {
-		Hostname      string `json:"hostname"`
-		ContainerID   string `json:"containerId"`
-		ContainerName string `json:"containerName"`
-		IsHub         bool   `json:"isHub"`
-	} `json:"nodes"`
-	GeneratedAt string `json:"generatedAt"`
+	VirtualIP   string            `json:"virtualIp,omitempty"` // Virtual IP if keepalived enabled
+	Nodes       []NginxUINodeInfo `json:"nodes"`
+	GeneratedAt string            `json:"generatedAt"`
 }
 
 // WriteNginxUICredentials writes NginxUI credentials and cluster info to a JSON file.
@@ -761,7 +791,8 @@ type NginxUIClusterInfo struct {
 // If storagePath is empty, writes to /root/.dscotctl/nginxui-credentials.json on the hub node
 // keepalivedVIP is the virtual IP if keepalived is enabled (empty string if not)
 // portainerEnabled indicates whether Portainer service is deployed
-func WriteNginxUICredentials(ctx context.Context, sshPool *ssh.Pool, hubNode string, storagePath string, creds *NginxUICredentials, containers []NginxUIContainerInfo, secrets NginxUISecrets, keepalivedVIP string, portainerEnabled bool) error {
+// allCreds contains per-node credentials (each node has different password)
+func WriteNginxUICredentials(ctx context.Context, sshPool *ssh.Pool, hubNode string, storagePath string, allCreds []NginxUICredentials, containers []NginxUIContainerInfo, secrets NginxUISecrets, keepalivedVIP string, portainerEnabled bool) error {
 	log := logging.L().With("component", "nginxui")
 
 	// Determine output path
@@ -792,14 +823,16 @@ func WriteNginxUICredentials(ctx context.Context, sshPool *ssh.Pool, hubNode str
 		}
 	}
 
+	// Build a map of credentials by node hostname for easy lookup
+	credsByNode := make(map[string]NginxUICredentials)
+	for _, cred := range allCreds {
+		credsByNode[cred.NodeHostname] = cred
+	}
+
 	// Build cluster info struct
 	clusterInfo := NginxUIClusterInfo{
 		VirtualIP:   keepalivedVIP,
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-	}
-	if creds != nil {
-		clusterInfo.Credentials.Username = creds.Username
-		clusterInfo.Credentials.Password = creds.Password
 	}
 	clusterInfo.Secrets.NodeSecret = secrets.NodeSecret
 	clusterInfo.Secrets.JWTSecret = secrets.JWTSecret
@@ -827,18 +860,18 @@ func WriteNginxUICredentials(ctx context.Context, sshPool *ssh.Pool, hubNode str
 		}
 	}
 
-	// Add node info
+	// Add node info with per-node credentials
 	for i, container := range sortedContainers {
-		nodeInfo := struct {
-			Hostname      string `json:"hostname"`
-			ContainerID   string `json:"containerId"`
-			ContainerName string `json:"containerName"`
-			IsHub         bool   `json:"isHub"`
-		}{
+		nodeInfo := NginxUINodeInfo{
 			Hostname:      container.NodeHostname,
 			ContainerID:   container.ContainerID,
 			ContainerName: container.ContainerHostname,
 			IsHub:         i == 0, // First node (alphabetically) is the hub
+		}
+		// Look up credentials for this node
+		if cred, ok := credsByNode[container.NodeHostname]; ok {
+			nodeInfo.Username = cred.Username
+			nodeInfo.Password = cred.Password
 		}
 		clusterInfo.Nodes = append(clusterInfo.Nodes, nodeInfo)
 	}
@@ -859,20 +892,10 @@ func WriteNginxUICredentials(ctx context.Context, sshPool *ssh.Pool, hubNode str
 		"path", credsPath,
 		"sharedStorage", storagePath != "",
 		"nodes", len(containers),
+		"credentialsCount", len(allCreds),
 	)
 
-	// Log credentials prominently for operator reference (only if creds are available)
-	log.Infow("========================================")
-	log.Infow("=== NginxUI Admin Credentials ===")
-	if creds != nil {
-		log.Infow(fmt.Sprintf("Username: %s", creds.Username))
-		log.Infow(fmt.Sprintf("Password: %s", creds.Password))
-	} else {
-		log.Infow("Password reset failed - credentials not available")
-		log.Infow("You may need to manually reset the password")
-	}
 	log.Infow(fmt.Sprintf("Credentials file: %s", credsPath))
-	log.Infow("========================================")
 
 	return nil
 }
@@ -953,9 +976,9 @@ func ConfigureS3Proxy(ctx context.Context, sshPool *ssh.Pool, primaryMaster stri
 	}
 	upstreamConfig := strings.Join(upstreamLines, "\n")
 
-	// Create S3 proxy site config
+	// Create S3 proxy site config with RFC1918/RFC6598 IP restrictions
 	s3SiteConfig := fmt.Sprintf(`# S3 RADOS Gateway Proxy
-# Load-balanced S3 access via /s3/ path
+# Load-balanced S3 access via port 7480
 # Generated by dscotctl
 # Endpoints: %s
 
@@ -967,6 +990,17 @@ server {
     listen 7480;
     listen [::]:7480;
     server_name _;
+
+    # RFC1918 Private Address Ranges
+    allow 10.0.0.0/8;       # Class A private
+    allow 172.16.0.0/12;    # Class B private
+    allow 192.168.0.0/16;   # Class C private
+    # RFC6598 Carrier-Grade NAT Range
+    allow 100.64.0.0/10;    # CGNAT
+    # Localhost
+    allow 127.0.0.0/8;
+    allow ::1;
+    deny all;
 
     # S3 endpoint - proxy to RADOS Gateway cluster
     location / {

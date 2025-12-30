@@ -122,8 +122,19 @@ server {
     listen [::]:80 default_server;
     server_name _;
 
-    # NginxUI Management Interface
+    # NginxUI Management Interface - RFC1918/RFC6598 only
     location /nginxui/ {
+        # RFC1918 Private Address Ranges
+        allow 10.0.0.0/8;       # Class A private
+        allow 172.16.0.0/12;    # Class B private
+        allow 192.168.0.0/16;   # Class C private
+        # RFC6598 Carrier-Grade NAT Range
+        allow 100.64.0.0/10;    # CGNAT
+        # Localhost
+        allow 127.0.0.0/8;
+        allow ::1;
+        deny all;
+
         proxy_pass http://127.0.0.1:9000/;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -136,9 +147,20 @@ server {
         proxy_read_timeout 86400;
     }
 
-    # Portainer Management Interface (via internal network)
+    # Portainer Management Interface (via internal network) - RFC1918/RFC6598 only
     # Note: Portainer uses --base-url /portainer internally, so proxy to root /
     location /portainer/ {
+        # RFC1918 Private Address Ranges
+        allow 10.0.0.0/8;       # Class A private
+        allow 172.16.0.0/12;    # Class B private
+        allow 192.168.0.0/16;   # Class C private
+        # RFC6598 Carrier-Grade NAT Range
+        allow 100.64.0.0/10;    # CGNAT
+        # Localhost
+        allow 127.0.0.0/8;
+        allow ::1;
+        deny all;
+
         proxy_pass http://Portainer_Portainer:9000/;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
