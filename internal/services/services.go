@@ -923,7 +923,7 @@ func verifyDeployment(ctx context.Context, sshPool *ssh.Pool, host string, stack
 
 // showNetworkSummary displays a summary of all Docker networks at the end of deployment.
 // Uses JSON output from Docker for reliable parsing.
-// Shows: name, id, driver, scope, internal (true/false)
+// Shows: name, id, driver, scope, internal (true/false), subnet
 func showNetworkSummary(ctx context.Context, sshPool *ssh.Pool, host string) {
 	log := logging.L().With("component", "services")
 
@@ -959,6 +959,14 @@ func showNetworkSummary(ctx context.Context, sshPool *ssh.Pool, host string) {
 			continue
 		}
 
+		// Get subnet/CIDR by inspecting the network
+		subnet := ""
+		inspectCmd := fmt.Sprintf("docker network inspect %s --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'", net.ID)
+		subnetOut, _, err := sshPool.Run(ctx, host, inspectCmd)
+		if err == nil {
+			subnet = strings.TrimSpace(subnetOut)
+		}
+
 		// Convert internal string to boolean display
 		isInternal := strings.EqualFold(net.Internal, "true")
 
@@ -968,6 +976,7 @@ func showNetworkSummary(ctx context.Context, sshPool *ssh.Pool, host string) {
 			"driver", net.Driver,
 			"scope", net.Scope,
 			"internal", isInternal,
+			"subnet", subnet,
 		)
 	}
 }
