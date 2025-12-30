@@ -356,8 +356,10 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 			// Reset admin password using nginx-ui's built-in reset-password command
 			// This generates a new random password and logs it for operator reference
 			log.Infow("attempting NginxUI admin password reset", "containerCount", len(containers))
+			var creds *NginxUICredentials
 			if len(containers) > 0 {
-				creds, err := ResetNginxUIAdminPassword(ctx, sshPool, containers)
+				var err error
+				creds, err = ResetNginxUIAdminPassword(ctx, sshPool, containers)
 				if err != nil {
 					log.Warnw("failed to set NginxUI admin password", "error", err)
 				} else {
@@ -366,18 +368,6 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 					log.Infow(fmt.Sprintf("  Username: %s", creds.Username))
 					log.Infow(fmt.Sprintf("  Password: %s", creds.Password))
 					log.Infow("========================================")
-
-					// Write credentials and cluster info to file
-					// Uses shared storage if available, otherwise writes locally on hub node
-					log.Infow("writing NginxUI credentials file",
-						"storageMountPath", storageMountPath,
-						"primaryMaster", clusterInfo.PrimaryMaster,
-					)
-					if err := WriteNginxUICredentials(ctx, sshPool, clusterInfo.PrimaryMaster, storageMountPath, creds, containers, nginxUIConfig.Secrets, clusterInfo.KeepalivedVIP, clusterInfo.PortainerEnabled); err != nil {
-						log.Warnw("failed to write NginxUI credentials file", "error", err)
-					} else {
-						log.Infow("✅ NginxUI credentials file written successfully")
-					}
 				}
 
 				// Configure S3 proxy if RGW is enabled and credentials file exists
@@ -388,7 +378,20 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 					}
 				}
 			} else {
-				log.Warnw("no NginxUI containers found, skipping password reset and credentials file")
+				log.Warnw("no NginxUI containers found, skipping password reset")
+			}
+
+			// Always write credentials file - even with empty containers array
+			// This ensures we have the secrets and cluster info available
+			log.Infow("writing NginxUI credentials file",
+				"storageMountPath", storageMountPath,
+				"primaryMaster", clusterInfo.PrimaryMaster,
+				"containerCount", len(containers),
+			)
+			if err := WriteNginxUICredentials(ctx, sshPool, clusterInfo.PrimaryMaster, storageMountPath, creds, containers, nginxUIConfig.Secrets, clusterInfo.KeepalivedVIP, clusterInfo.PortainerEnabled); err != nil {
+				log.Warnw("failed to write NginxUI credentials file", "error", err)
+			} else {
+				log.Infow("✅ NginxUI credentials file written successfully")
 			}
 		} else {
 			log.Warnw("NginxUI service not found in deployed services, skipping post-deployment configuration")

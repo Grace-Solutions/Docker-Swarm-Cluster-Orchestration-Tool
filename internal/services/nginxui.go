@@ -721,10 +721,6 @@ type NginxUIClusterInfo struct {
 func WriteNginxUICredentials(ctx context.Context, sshPool *ssh.Pool, hubNode string, storagePath string, creds *NginxUICredentials, containers []NginxUIContainerInfo, secrets NginxUISecrets, keepalivedVIP string, portainerEnabled bool) error {
 	log := logging.L().With("component", "nginxui")
 
-	if creds == nil {
-		return fmt.Errorf("credentials are nil")
-	}
-
 	// Determine output path
 	var credsPath string
 	if storagePath != "" {
@@ -758,8 +754,10 @@ func WriteNginxUICredentials(ctx context.Context, sshPool *ssh.Pool, hubNode str
 		VirtualIP:   keepalivedVIP,
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 	}
-	clusterInfo.Credentials.Username = creds.Username
-	clusterInfo.Credentials.Password = creds.Password
+	if creds != nil {
+		clusterInfo.Credentials.Username = creds.Username
+		clusterInfo.Credentials.Password = creds.Password
+	}
 	clusterInfo.Secrets.NodeSecret = secrets.NodeSecret
 	clusterInfo.Secrets.JWTSecret = secrets.JWTSecret
 	clusterInfo.Secrets.CryptoSecret = secrets.CryptoSecret
