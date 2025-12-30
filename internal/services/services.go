@@ -335,7 +335,7 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 			if err != nil {
 				log.Warnw("failed to discover NginxUI containers", "error", err)
 			} else if len(containers) > 1 {
-				if err := UpdateNginxUIClusterConfig(ctx, sshPool, storageMountPath, containers, nginxUIConfig.Secrets.NodeSecret, swarmServiceName); err != nil {
+				if err := UpdateNginxUIClusterConfig(ctx, sshPool, primaryMaster, storageMountPath, containers, nginxUIConfig.Secrets.NodeSecret, swarmServiceName); err != nil {
 					log.Warnw("failed to update NginxUI cluster config", "error", err)
 				}
 
@@ -358,7 +358,7 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 			// Update node tokens in the database to match the configured node_secret
 			// This fixes the "version incompatible" error caused by token mismatch
 			if len(containers) > 1 {
-				if err := UpdateNginxUINodeTokens(ctx, sshPool, storageMountPath, containers, nginxUIConfig.Secrets.NodeSecret); err != nil {
+				if err := UpdateNginxUINodeTokens(ctx, sshPool, primaryMaster, storageMountPath, containers, nginxUIConfig.Secrets.NodeSecret); err != nil {
 					log.Warnw("failed to update NginxUI node tokens", "error", err)
 				}
 			}
@@ -369,7 +369,7 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 			var creds *NginxUICredentials
 			if len(containers) > 0 {
 				var err error
-				creds, err = ResetNginxUIAdminPassword(ctx, sshPool, containers)
+				creds, err = ResetNginxUIAdminPassword(ctx, sshPool, primaryMaster, containers)
 				if err != nil {
 					log.Warnw("failed to set NginxUI admin password", "error", err)
 				} else {
@@ -383,7 +383,7 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 				// Configure S3 proxy if RGW is enabled and credentials file exists
 				if clusterInfo.S3CredentialsFile != "" && clusterInfo.RadosGatewayPort > 0 {
 					log.Infow("configuring S3 proxy for NginxUI", "credentialsFile", clusterInfo.S3CredentialsFile)
-					if err := ConfigureS3Proxy(ctx, sshPool, storageMountPath, clusterInfo.S3CredentialsFile, containers, clusterInfo.RadosGatewayPort); err != nil {
+					if err := ConfigureS3Proxy(ctx, sshPool, primaryMaster, storageMountPath, clusterInfo.S3CredentialsFile, containers, clusterInfo.RadosGatewayPort); err != nil {
 						log.Warnw("failed to configure S3 proxy", "error", err)
 					}
 				}

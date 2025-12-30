@@ -463,7 +463,8 @@ func DiscoverNginxUIContainers(ctx context.Context, sshPool *ssh.Pool, primaryMa
 
 // UpdateNginxUIClusterConfig updates the cluster configuration in app.ini for the hub node
 // after containers are discovered. Only the first (hub) node gets cluster config pointing to other nodes.
-func UpdateNginxUIClusterConfig(ctx context.Context, sshPool *ssh.Pool, storagePath string, containers []NginxUIContainerInfo, nodeSecret string, serviceName string) error {
+// primaryMaster is the SSH host (IP address) to run commands on - storage is shared so any node works.
+func UpdateNginxUIClusterConfig(ctx context.Context, sshPool *ssh.Pool, primaryMaster string, storagePath string, containers []NginxUIContainerInfo, nodeSecret string, serviceName string) error {
 	log := logging.L().With("component", "nginxui")
 
 	if len(containers) < 2 {
@@ -513,9 +514,9 @@ func UpdateNginxUIClusterConfig(ctx context.Context, sshPool *ssh.Pool, storageP
 		"otherNodes", len(otherContainers),
 	)
 
-	// Read existing app.ini
+	// Read existing app.ini - use primaryMaster for SSH (shared storage accessible from any node)
 	readCmd := fmt.Sprintf("cat '%s' 2>/dev/null || echo ''", appIniPath)
-	existingContent, _, err := sshPool.Run(ctx, hubContainer.NodeHostname, readCmd)
+	existingContent, _, err := sshPool.Run(ctx, primaryMaster, readCmd)
 	if err != nil {
 		return fmt.Errorf("failed to read existing app.ini: %w", err)
 	}
@@ -526,9 +527,9 @@ func UpdateNginxUIClusterConfig(ctx context.Context, sshPool *ssh.Pool, storageP
 	// Append new cluster config
 	newContent = strings.TrimRight(newContent, "\n") + "\n\n" + clusterConfig + "\n"
 
-	// Write back
+	// Write back - use primaryMaster for SSH
 	writeCmd := fmt.Sprintf("cat > '%s' << 'EOFCLUSTER'\n%s\nEOFCLUSTER", appIniPath, newContent)
-	if _, stderr, err := sshPool.Run(ctx, hubContainer.NodeHostname, writeCmd); err != nil {
+	if _, stderr, err := sshPool.Run(ctx, primaryMaster, writeCmd); err != nil {
 		return fmt.Errorf("failed to write app.ini: %w (stderr: %s)", err, stderr)
 	}
 
@@ -550,7 +551,7 @@ func UpdateNginxUIClusterConfig(ctx context.Context, sshPool *ssh.Pool, storageP
 		"serviceName", serviceName,
 	)
 	updateCmd := fmt.Sprintf("docker service update --force %s", serviceName)
-	if _, stderr, err := sshPool.Run(ctx, hubContainer.NodeHostname, updateCmd); err != nil {
+	if _, stderr, err := sshPool.Run(ctx, primaryMaster, updateCmd); err != nil {
 		log.Warnw("failed to force service update", "error", err, "stderr", stderr)
 		// Don't fail - config is written, service can be manually updated
 	} else {
@@ -598,8 +599,8 @@ const (
 // UpdateNginxUINodeTokens updates the node tokens in the NginxUI database to match the configured node_secret.
 // This is needed because NginxUI creates nodes in its database with a token generated from the Node URL parameter,
 // but the actual authentication uses the node_secret from the config. This mismatch causes "version incompatible" errors.
-// Must be run on the hub node (first node in sorted order).
-func UpdateNginxUINodeTokens(ctx context.Context, sshPool *ssh.Pool, storagePath string, containers []NginxUIContainerInfo, nodeSecret string) error {
+// primaryMaster is the SSH host (IP address) to run commands on - storage is shared so any node works.
+func UpdateNginxUINodeTokens(ctx context.Context, sshPool *ssh.Pool, primaryMaster string, storagePath string, containers []NginxUIContainerInfo, nodeSecret string) error {
 	log := logging.L().With("component", "nginxui")
 
 	if len(containers) < 2 {
@@ -631,14 +632,15 @@ func UpdateNginxUINodeTokens(ctx context.Context, sshPool *ssh.Pool, storagePath
 
 	// Update all tokens in the nodes table to match the configured node_secret
 	// This fixes the mismatch between what's in the database and what the containers expect
+	// Use primaryMaster for SSH (shared storage accessible from any node)
 	updateCmd := fmt.Sprintf(`sqlite3 '%s' "UPDATE nodes SET token='%s';"`, dbPath, nodeSecret)
-	if _, stderr, err := sshPool.Run(ctx, hubContainer.NodeHostname, updateCmd); err != nil {
+	if _, stderr, err := sshPool.Run(ctx, primaryMaster, updateCmd); err != nil {
 		return fmt.Errorf("failed to update node tokens: %w (stderr: %s)", err, stderr)
 	}
 
 	// Verify the update
 	verifyCmd := fmt.Sprintf(`sqlite3 '%s' "SELECT id, name, token FROM nodes;"`, dbPath)
-	stdout, _, err := sshPool.Run(ctx, hubContainer.NodeHostname, verifyCmd)
+	stdout, _, err := sshPool.Run(ctx, primaryMaster, verifyCmd)
 	if err != nil {
 		log.Warnw("failed to verify token update", "error", err)
 	} else {
@@ -656,7 +658,8 @@ func UpdateNginxUINodeTokens(ctx context.Context, sshPool *ssh.Pool, storagePath
 // ResetNginxUIAdminPassword resets the admin password using nginx-ui's built-in reset-password command.
 // This generates a new random password and returns the credentials.
 // The password is logged for operator reference.
-func ResetNginxUIAdminPassword(ctx context.Context, sshPool *ssh.Pool, containers []NginxUIContainerInfo) (*NginxUICredentials, error) {
+// primaryMaster is the SSH host (IP address) to run commands on.
+func ResetNginxUIAdminPassword(ctx context.Context, sshPool *ssh.Pool, primaryMaster string, containers []NginxUIContainerInfo) (*NginxUICredentials, error) {
 	log := logging.L().With("component", "nginxui")
 
 	if len(containers) == 0 {
@@ -683,8 +686,9 @@ func ResetNginxUIAdminPassword(ctx context.Context, sshPool *ssh.Pool, container
 
 	// Use nginx-ui's built-in reset-password command
 	// This generates a new random password and outputs: "User: admin, Password: <password>"
+	// Use primaryMaster for SSH - docker exec works from any swarm manager
 	resetCmd := fmt.Sprintf("docker exec %s nginx-ui reset-password --config=/etc/nginx-ui/app.ini", hubContainer.ContainerID)
-	stdout, stderr, err := sshPool.Run(ctx, hubContainer.NodeHostname, resetCmd)
+	stdout, stderr, err := sshPool.Run(ctx, primaryMaster, resetCmd)
 	if err != nil {
 		return nil, fmt.Errorf("failed to reset password: %w (stderr: %s)", err, stderr)
 	}
@@ -855,11 +859,16 @@ func WriteNginxUICredentials(ctx context.Context, sshPool *ssh.Pool, hubNode str
 		"nodes", len(containers),
 	)
 
-	// Log credentials prominently for operator reference
+	// Log credentials prominently for operator reference (only if creds are available)
 	log.Infow("========================================")
 	log.Infow("=== NginxUI Admin Credentials ===")
-	log.Infow(fmt.Sprintf("Username: %s", creds.Username))
-	log.Infow(fmt.Sprintf("Password: %s", creds.Password))
+	if creds != nil {
+		log.Infow(fmt.Sprintf("Username: %s", creds.Username))
+		log.Infow(fmt.Sprintf("Password: %s", creds.Password))
+	} else {
+		log.Infow("Password reset failed - credentials not available")
+		log.Infow("You may need to manually reset the password")
+	}
 	log.Infow(fmt.Sprintf("Credentials file: %s", credsPath))
 	log.Infow("========================================")
 
@@ -872,7 +881,8 @@ func WriteNginxUICredentials(ctx context.Context, sshPool *ssh.Pool, hubNode str
 // 2. A location block at /s3/ for HTTP S3 access
 // 3. A TCP stream for direct S3 protocol access on the RGW port
 // This should be called after NginxUI is deployed and running.
-func ConfigureS3Proxy(ctx context.Context, sshPool *ssh.Pool, storagePath, s3CredentialsFile string, containers []NginxUIContainerInfo, rgwPort int) error {
+// primaryMaster is the SSH host (IP address) to run commands on.
+func ConfigureS3Proxy(ctx context.Context, sshPool *ssh.Pool, primaryMaster string, storagePath, s3CredentialsFile string, containers []NginxUIContainerInfo, rgwPort int) error {
 	log := logging.L().With("component", "nginxui-s3")
 
 	if s3CredentialsFile == "" {
@@ -884,7 +894,7 @@ func ConfigureS3Proxy(ctx context.Context, sshPool *ssh.Pool, storagePath, s3Cre
 		return fmt.Errorf("no NginxUI containers found for S3 proxy configuration")
 	}
 
-	// Sort containers to get consistent hub node
+	// Sort containers to get consistent hub node (for logging purposes)
 	sortedContainers := make([]NginxUIContainerInfo, len(containers))
 	copy(sortedContainers, containers)
 	for i := 0; i < len(sortedContainers)-1; i++ {
@@ -895,12 +905,10 @@ func ConfigureS3Proxy(ctx context.Context, sshPool *ssh.Pool, storagePath, s3Cre
 		}
 	}
 
-	hubContainer := sortedContainers[0]
-
-	// Read S3 credentials file from shared storage
-	log.Infow("reading S3 credentials file", "path", s3CredentialsFile, "node", hubContainer.NodeHostname)
+	// Read S3 credentials file from shared storage - use primaryMaster for SSH
+	log.Infow("reading S3 credentials file", "path", s3CredentialsFile, "primaryMaster", primaryMaster)
 	catCmd := fmt.Sprintf("cat '%s' 2>/dev/null", s3CredentialsFile)
-	stdout, _, err := sshPool.Run(ctx, hubContainer.NodeHostname, catCmd)
+	stdout, _, err := sshPool.Run(ctx, primaryMaster, catCmd)
 	if err != nil || strings.TrimSpace(stdout) == "" {
 		log.Infow("S3 credentials file not found or empty, skipping S3 proxy setup", "path", s3CredentialsFile)
 		return nil
@@ -975,32 +983,32 @@ server {
 }
 `, strings.Join(s3Creds.Endpoints, ", "), upstreamConfig)
 
-	// Write config to all NginxUI nodes
+	// Write config to all NginxUI nodes (use primaryMaster - storage is shared)
 	for _, container := range containers {
 		nginxPath := filepath.ToSlash(filepath.Join(storagePath, "data", NginxUIDataDir, container.NodeHostname, "nginx"))
 		s3ConfigPath := filepath.ToSlash(filepath.Join(nginxPath, "sites-available", "s3-gateway.conf"))
 		s3SymlinkPath := filepath.ToSlash(filepath.Join(nginxPath, "sites-enabled", "s3-gateway.conf"))
 
-		// Write site config
+		// Write site config - use primaryMaster for SSH
 		writeCmd := fmt.Sprintf("cat > '%s' << 'EOF'\n%sEOF", s3ConfigPath, s3SiteConfig)
-		if _, stderr, err := sshPool.Run(ctx, container.NodeHostname, writeCmd); err != nil {
+		if _, stderr, err := sshPool.Run(ctx, primaryMaster, writeCmd); err != nil {
 			log.Warnw("failed to write S3 site config", "node", container.NodeHostname, "error", err, "stderr", stderr)
 			continue
 		}
 
-		// Create symlink if not exists
+		// Create symlink if not exists - use primaryMaster for SSH
 		symlinkCmd := fmt.Sprintf("ln -sf '../sites-available/s3-gateway.conf' '%s' 2>/dev/null || true", s3SymlinkPath)
-		if _, _, err := sshPool.Run(ctx, container.NodeHostname, symlinkCmd); err != nil {
+		if _, _, err := sshPool.Run(ctx, primaryMaster, symlinkCmd); err != nil {
 			log.Warnw("failed to create S3 site symlink", "node", container.NodeHostname, "error", err)
 		}
 
 		log.Infow("S3 proxy config written", "node", container.NodeHostname, "config", s3ConfigPath)
 	}
 
-	// Reload nginx in all containers
+	// Reload nginx in all containers - use primaryMaster for SSH (docker exec works from any swarm manager)
 	for _, container := range containers {
 		reloadCmd := fmt.Sprintf("docker exec %s nginx -s reload 2>/dev/null || true", container.ContainerID)
-		if _, _, err := sshPool.Run(ctx, container.NodeHostname, reloadCmd); err != nil {
+		if _, _, err := sshPool.Run(ctx, primaryMaster, reloadCmd); err != nil {
 			log.Warnw("failed to reload nginx", "node", container.NodeHostname, "error", err)
 		}
 	}
