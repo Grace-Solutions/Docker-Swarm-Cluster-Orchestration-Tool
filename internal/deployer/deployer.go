@@ -707,23 +707,27 @@ func installDependencies(ctx context.Context, cfg *config.Config, sshPool *ssh.P
 	return nil
 }
 
-// installDocker installs Docker on a node via SSH.
+// installDocker installs Docker on a node via SSH and configures the Docker API.
 func installDocker(ctx context.Context, sshPool *ssh.Pool, host string) error {
+	log := logging.L().With("node", host)
+
 	// Check if Docker is already installed
 	_, _, err := sshPool.Run(ctx, host, "docker --version")
 	if err == nil {
-		logging.L().Infow("Docker already installed", "node", host)
+		log.Infow("Docker already installed")
+		// Still configure the API even if Docker was already installed
+		configureDockerAPI(ctx, sshPool, host)
 		return nil
 	}
 
 	// Fix any interrupted dpkg state before apt operations
 	// This handles "dpkg was interrupted, you must manually run 'dpkg --configure -a'" errors
-	logging.L().Debugw("repairing dpkg state if needed", "node", host)
+	log.Debugw("repairing dpkg state if needed")
 	sshPool.Run(ctx, host, "DEBIAN_FRONTEND=noninteractive dpkg --configure -a 2>/dev/null || true")
 
 	// Install Docker with retry logic (network downloads can be flaky)
 	retryCfg := retry.PackageManagerConfig(fmt.Sprintf("install-docker-%s", host))
-	return retry.Do(ctx, retryCfg, func() error {
+	err = retry.Do(ctx, retryCfg, func() error {
 		cmd := "curl -fsSL https://get.docker.com | sh && systemctl enable docker && systemctl start docker"
 		_, stderr, err := sshPool.Run(ctx, host, cmd)
 		if err != nil {
@@ -731,6 +735,85 @@ func installDocker(ctx context.Context, sshPool *ssh.Pool, host string) error {
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	// Configure Docker API after installation
+	configureDockerAPI(ctx, sshPool, host)
+	return nil
+}
+
+// configureDockerAPI configures Docker to expose the API on TCP port 2375.
+// This enables remote Docker API access for management tools.
+// Note: Port 2375 is unencrypted - use only on trusted networks (RFC1918/RFC6598).
+func configureDockerAPI(ctx context.Context, sshPool *ssh.Pool, host string) {
+	log := logging.L().With("node", host, "component", "docker-api")
+
+	// Create daemon.json with TCP listener if it doesn't already have it
+	daemonConfigScript := `#!/bin/bash
+set -e
+
+DAEMON_JSON="/etc/docker/daemon.json"
+
+# Create directory if needed
+mkdir -p /etc/docker
+
+# Check if daemon.json exists and already has hosts configured
+if [ -f "$DAEMON_JSON" ]; then
+    if grep -q '"hosts"' "$DAEMON_JSON" 2>/dev/null; then
+        echo "Docker API already configured in daemon.json"
+        exit 0
+    fi
+fi
+
+# Create or update daemon.json with TCP listener
+# We need to merge with existing config if present
+if [ -f "$DAEMON_JSON" ] && [ -s "$DAEMON_JSON" ]; then
+    # File exists and is not empty - we need to be careful
+    # For simplicity, check if it's just {} or minimal
+    CONTENT=$(cat "$DAEMON_JSON" | tr -d '[:space:]')
+    if [ "$CONTENT" = "{}" ] || [ "$CONTENT" = "" ]; then
+        # Empty or minimal, safe to overwrite
+        cat > "$DAEMON_JSON" << 'EOF'
+{
+    "hosts": ["unix:///var/run/docker.sock", "tcp://0.0.0.0:2375"]
+}
+EOF
+    else
+        echo "daemon.json has existing config, skipping API configuration to avoid conflicts"
+        exit 0
+    fi
+else
+    # Create new daemon.json
+    cat > "$DAEMON_JSON" << 'EOF'
+{
+    "hosts": ["unix:///var/run/docker.sock", "tcp://0.0.0.0:2375"]
+}
+EOF
+fi
+
+# Docker systemd service needs to NOT pass -H flag when daemon.json has hosts
+# Create override to remove -H from ExecStart
+mkdir -p /etc/systemd/system/docker.service.d
+cat > /etc/systemd/system/docker.service.d/override.conf << 'EOF'
+[Service]
+ExecStart=
+ExecStart=/usr/bin/dockerd
+EOF
+
+# Reload and restart Docker
+systemctl daemon-reload
+systemctl restart docker
+
+echo "Docker API configured on tcp://0.0.0.0:2375"
+`
+
+	if _, stderr, err := sshPool.Run(ctx, host, daemonConfigScript); err != nil {
+		log.Warnw("failed to configure Docker API (non-fatal)", "error", err, "stderr", stderr)
+	} else {
+		log.Infow("Docker API configured on port 2375")
+	}
 }
 
 // configureOverlay configures the overlay network on all enabled nodes idempotently.
