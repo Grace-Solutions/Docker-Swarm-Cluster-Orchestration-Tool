@@ -729,8 +729,9 @@ type ServiceInfo struct {
 	Image    string `json:"Image"`
 }
 
-// NetworkInfo represents Docker network information from JSON output.
+// NetworkInfo represents Docker network information from JSON output (docker network inspect).
 type NetworkInfo struct {
+	ID       string `json:"Id"`
 	Name     string `json:"Name"`
 	Scope    string `json:"Scope"`
 	Driver   string `json:"Driver"`
@@ -742,6 +743,15 @@ type NetworkInfo struct {
 			Gateway string `json:"Gateway"`
 		} `json:"Config"`
 	} `json:"IPAM"`
+}
+
+// NetworkListInfo represents Docker network information from docker network ls --format json.
+type NetworkListInfo struct {
+	ID       string `json:"ID"`
+	Name     string `json:"Name"`
+	Driver   string `json:"Driver"`
+	Scope    string `json:"Scope"`
+	Internal string `json:"Internal"` // "true" or "false" as string
 }
 
 // verifyDeployment shows verification info for a deployed service including
@@ -869,12 +879,13 @@ func verifyDeployment(ctx context.Context, sshPool *ssh.Pool, host string, stack
 
 // showNetworkSummary displays a summary of all Docker networks at the end of deployment.
 // Uses JSON output from Docker for reliable parsing.
+// Shows: name, id, driver, scope, internal (true/false)
 func showNetworkSummary(ctx context.Context, sshPool *ssh.Pool, host string) {
 	log := logging.L().With("component", "services")
 
 	// Get all networks in JSON format
 	networkListCmd := "docker network ls --format json"
-	log.Infow("=== Network Summary ===", "command", networkListCmd)
+	log.Infow("=== Network Summary ===")
 
 	stdout, _, err := sshPool.Run(ctx, host, networkListCmd)
 	if err != nil {
@@ -887,57 +898,32 @@ func showNetworkSummary(ctx context.Context, sshPool *ssh.Pool, host string) {
 		return
 	}
 
-	// Parse JSON lines and get details for each network
+	// Parse JSON lines from docker network ls
 	lines := strings.Split(strings.TrimSpace(stdout), "\n")
 	for _, line := range lines {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		var netBasic struct {
-			Name   string `json:"Name"`
-			Driver string `json:"Driver"`
-		}
-		if err := json.Unmarshal([]byte(line), &netBasic); err != nil {
+
+		var net NetworkListInfo
+		if err := json.Unmarshal([]byte(line), &net); err != nil {
 			continue
 		}
 
-		// Get full network details using JSON inspect
-		inspectCmd := fmt.Sprintf("docker network inspect %s --format json", netBasic.Name)
-		stdout, _, err := sshPool.Run(ctx, host, inspectCmd)
-		if err != nil {
+		// Skip host and none networks (not useful to display)
+		if net.Name == "host" || net.Name == "none" {
 			continue
 		}
 
-		var networks []NetworkInfo
-		if err := json.Unmarshal([]byte(stdout), &networks); err != nil {
-			continue
-		}
-		if len(networks) == 0 {
-			continue
-		}
-
-		net := networks[0]
-		subnet := ""
-		if len(net.IPAM.Config) > 0 {
-			subnet = net.IPAM.Config[0].Subnet
-		}
-
-		// Skip networks without subnets (like host, none)
-		if subnet == "" {
-			continue
-		}
-
-		netType := net.Driver
-		if net.Ingress {
-			netType = "ingress"
-		} else if net.Internal {
-			netType = "internal"
-		}
+		// Convert internal string to boolean display
+		isInternal := strings.EqualFold(net.Internal, "true")
 
 		log.Infow("  network",
 			"name", net.Name,
-			"subnet", subnet,
-			"type", netType,
+			"id", net.ID,
+			"driver", net.Driver,
+			"scope", net.Scope,
+			"internal", isInternal,
 		)
 	}
 }
