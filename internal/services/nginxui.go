@@ -331,6 +331,43 @@ type NginxUIContainerInfo struct {
 	ContainerID       string // Container ID
 }
 
+// DiscoverNginxUIContainersWithRetry discovers containers with retry logic for timing issues.
+// It will retry up to maxAttempts times with retryDelay between attempts, waiting for
+// the expected number of containers to be available.
+func DiscoverNginxUIContainersWithRetry(ctx context.Context, sshPool *ssh.Pool, primaryMaster string, serviceName string, nodeHostnameToSSH map[string]string, expectedCount int, maxAttempts int, retryDelay time.Duration) ([]NginxUIContainerInfo, error) {
+	log := logging.L().With("component", "nginxui")
+
+	var containers []NginxUIContainerInfo
+	var lastErr error
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		containers, lastErr = DiscoverNginxUIContainers(ctx, sshPool, primaryMaster, serviceName, nodeHostnameToSSH)
+		if lastErr != nil {
+			log.Warnw("container discovery attempt failed", "attempt", attempt, "maxAttempts", maxAttempts, "error", lastErr)
+		} else if len(containers) >= expectedCount {
+			log.Infow("container discovery successful", "attempt", attempt, "found", len(containers), "expected", expectedCount)
+			return containers, nil
+		} else {
+			log.Infow("waiting for containers to be ready", "attempt", attempt, "maxAttempts", maxAttempts, "found", len(containers), "expected", expectedCount)
+		}
+
+		if attempt < maxAttempts {
+			time.Sleep(retryDelay)
+		}
+	}
+
+	// Return whatever we found, even if less than expected
+	if len(containers) > 0 {
+		log.Warnw("returning partial container discovery", "found", len(containers), "expected", expectedCount)
+		return containers, nil
+	}
+
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return containers, nil
+}
+
 // DiscoverNginxUIContainers discovers all running NginxUI containers and their hostnames.
 // This should be called AFTER the NginxUI service is deployed.
 // serviceName is the full Docker Swarm service name (e.g., "NginxUI_LoadBalancer")

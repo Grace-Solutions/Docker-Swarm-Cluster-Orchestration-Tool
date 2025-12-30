@@ -314,12 +314,22 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 				"swarmServiceName", swarmServiceName,
 			)
 
-			// Wait a moment for containers to fully start
-			time.Sleep(3 * time.Second)
+			// Discover containers with retry logic - containers may take time to start
+			// Expected count is the number of nodes in the cluster (global mode)
+			expectedContainers := len(clusterInfo.AllNodes)
+			const maxDiscoveryAttempts = 10
+			const discoveryRetryDelay = 5 * time.Second
 
-			containers, err := DiscoverNginxUIContainers(ctx, sshPool, primaryMaster, swarmServiceName, clusterInfo.NodeHostnameToSSH)
+			log.Infow("discovering NginxUI containers with retry",
+				"expectedContainers", expectedContainers,
+				"maxAttempts", maxDiscoveryAttempts,
+				"retryDelay", discoveryRetryDelay,
+			)
+
+			containers, err := DiscoverNginxUIContainersWithRetry(ctx, sshPool, primaryMaster, swarmServiceName, clusterInfo.NodeHostnameToSSH, expectedContainers, maxDiscoveryAttempts, discoveryRetryDelay)
 			log.Infow("NginxUI container discovery result",
 				"containerCount", len(containers),
+				"expected", expectedContainers,
 				"error", err,
 			)
 			if err != nil {
@@ -332,15 +342,15 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 				// After cluster config update, containers are restarted
 				// Wait for them to come back up and then reset the admin password
 				log.Infow("waiting for NginxUI containers to restart after cluster config update")
-				time.Sleep(10 * time.Second)
 
-				// Re-discover containers after restart (they have new IDs)
-				containers, err = DiscoverNginxUIContainers(ctx, sshPool, primaryMaster, swarmServiceName, clusterInfo.NodeHostnameToSSH)
+				// Re-discover containers after restart with retry (they have new IDs)
+				containers, err = DiscoverNginxUIContainersWithRetry(ctx, sshPool, primaryMaster, swarmServiceName, clusterInfo.NodeHostnameToSSH, expectedContainers, maxDiscoveryAttempts, discoveryRetryDelay)
 				if err != nil {
 					log.Warnw("failed to re-discover NginxUI containers after restart", "error", err)
 				}
 				log.Infow("NginxUI container re-discovery result",
 					"containerCount", len(containers),
+					"expected", expectedContainers,
 					"error", err,
 				)
 			}
