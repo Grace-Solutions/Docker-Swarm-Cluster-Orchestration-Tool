@@ -293,8 +293,16 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 
 	// Update NginxUI cluster config AFTER service is deployed
 	// This discovers actual container hostnames and updates the hub node's app.ini
+	log.Infow("checking NginxUI post-deployment configuration",
+		"nginxUIConfigPresent", nginxUIConfig != nil,
+		"nginxUIEnabled", nginxUIConfig != nil && nginxUIConfig.Enabled,
+	)
 	if nginxUIConfig != nil && nginxUIConfig.Enabled {
 		nginxUISvc := GetNginxUIService(services)
+		log.Infow("NginxUI service lookup result",
+			"serviceFound", nginxUISvc != nil,
+			"serviceName", func() string { if nginxUISvc != nil { return nginxUISvc.Name } else { return "nil" } }(),
+		)
 		if nginxUISvc != nil {
 			// Construct the Docker Swarm service name (stack_service format)
 			// The stack name is the service name from metadata, and the YAML defines service keys
@@ -309,6 +317,10 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 			time.Sleep(3 * time.Second)
 
 			containers, err := DiscoverNginxUIContainers(ctx, sshPool, primaryMaster, swarmServiceName)
+			log.Infow("NginxUI container discovery result",
+				"containerCount", len(containers),
+				"error", err,
+			)
 			if err != nil {
 				log.Warnw("failed to discover NginxUI containers", "error", err)
 			} else if len(containers) > 1 {
@@ -326,6 +338,10 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 				if err != nil {
 					log.Warnw("failed to re-discover NginxUI containers after restart", "error", err)
 				}
+				log.Infow("NginxUI container re-discovery result",
+					"containerCount", len(containers),
+					"error", err,
+				)
 			}
 
 			// Update node tokens in the database to match the configured node_secret
@@ -338,20 +354,28 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 
 			// Reset admin password using nginx-ui's built-in reset-password command
 			// This generates a new random password and logs it for operator reference
+			log.Infow("attempting NginxUI admin password reset", "containerCount", len(containers))
 			if len(containers) > 0 {
 				creds, err := ResetNginxUIAdminPassword(ctx, sshPool, containers)
 				if err != nil {
 					log.Warnw("failed to set NginxUI admin password", "error", err)
 				} else {
+					log.Infow("========================================")
 					log.Infow("=== NginxUI Admin Credentials ===")
 					log.Infow(fmt.Sprintf("  Username: %s", creds.Username))
 					log.Infow(fmt.Sprintf("  Password: %s", creds.Password))
-					log.Infow("=================================")
+					log.Infow("========================================")
 
 					// Write credentials and cluster info to file
 					// Uses shared storage if available, otherwise writes locally on hub node
+					log.Infow("writing NginxUI credentials file",
+						"storageMountPath", storageMountPath,
+						"primaryMaster", clusterInfo.PrimaryMaster,
+					)
 					if err := WriteNginxUICredentials(ctx, sshPool, clusterInfo.PrimaryMaster, storageMountPath, creds, containers, nginxUIConfig.Secrets, clusterInfo.KeepalivedVIP, clusterInfo.PortainerEnabled); err != nil {
 						log.Warnw("failed to write NginxUI credentials file", "error", err)
+					} else {
+						log.Infow("✅ NginxUI credentials file written successfully")
 					}
 				}
 
@@ -362,8 +386,14 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 						log.Warnw("failed to configure S3 proxy", "error", err)
 					}
 				}
+			} else {
+				log.Warnw("no NginxUI containers found, skipping password reset and credentials file")
 			}
+		} else {
+			log.Warnw("NginxUI service not found in deployed services, skipping post-deployment configuration")
 		}
+	} else {
+		log.Infow("NginxUI not enabled, skipping post-deployment configuration")
 	}
 
 	// Calculate final metrics
