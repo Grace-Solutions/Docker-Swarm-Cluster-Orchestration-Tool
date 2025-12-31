@@ -691,9 +691,9 @@ func installDependencies(ctx context.Context, cfg *config.Config, sshPool *ssh.P
 
 		nodeLog.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "starting dependency installation"))
 
-		// Install Docker
+		// Install Docker (pass node role to determine if API should be enabled)
 		nodeLog.Infow(formatNodeMessage("→", node.SSHFQDNorIP, node.NewHostname, node.Role, "installing Docker"))
-		if err := installDocker(ctx, sshPool, node.SSHFQDNorIP); err != nil {
+		if err := installDocker(ctx, sshPool, node.SSHFQDNorIP, node.Role); err != nil {
 			return fmt.Errorf("failed to install Docker on %s: %w", node.SSHFQDNorIP, err)
 		}
 		nodeLog.Infow(formatNodeMessage("✓", node.SSHFQDNorIP, node.NewHostname, node.Role, "Docker installed"))
@@ -708,15 +708,21 @@ func installDependencies(ctx context.Context, cfg *config.Config, sshPool *ssh.P
 }
 
 // installDocker installs Docker on a node via SSH and configures the Docker API.
-func installDocker(ctx context.Context, sshPool *ssh.Pool, host string) error {
-	log := logging.L().With("node", host)
+// nodeRole is used to determine if the Docker API should be enabled (only for "manager" or "both").
+func installDocker(ctx context.Context, sshPool *ssh.Pool, host string, nodeRole string) error {
+	log := logging.L().With("node", host, "role", nodeRole)
+
+	// Determine if Docker API should be enabled based on node role
+	enableAPI := strings.EqualFold(nodeRole, "manager") || strings.EqualFold(nodeRole, "both")
 
 	// Check if Docker is already installed
 	_, _, err := sshPool.Run(ctx, host, "docker --version")
 	if err == nil {
 		log.Infow("Docker already installed")
-		// Still configure the API even if Docker was already installed
-		configureDockerAPI(ctx, sshPool, host)
+		// Still configure the API even if Docker was already installed (if role permits)
+		if enableAPI {
+			configureDockerAPI(ctx, sshPool, host)
+		}
 		return nil
 	}
 
@@ -739,8 +745,12 @@ func installDocker(ctx context.Context, sshPool *ssh.Pool, host string) error {
 		return err
 	}
 
-	// Configure Docker API after installation
-	configureDockerAPI(ctx, sshPool, host)
+	// Configure Docker API after installation (only for manager or both roles)
+	if enableAPI {
+		configureDockerAPI(ctx, sshPool, host)
+	} else {
+		log.Infow("skipping Docker API configuration (worker-only node)")
+	}
 	return nil
 }
 
