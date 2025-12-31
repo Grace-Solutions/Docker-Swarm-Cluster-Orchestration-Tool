@@ -2,7 +2,6 @@ package services
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -223,21 +222,21 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 		}
 	}
 
-	// Prepare NginxUI if enabled
-	var nginxUIConfig *NginxUIConfig
-	if IsNginxUIEnabled(services) {
-		log.Infow("NginxUI service detected, preparing deployment")
-		nginxUIConfig, err = PrepareNginxUIDeployment(ctx, sshPool, primaryMaster, storageMountPath, clusterInfo)
+	// Prepare Nginx if enabled (stateless reverse proxy)
+	var nginxConfig *NginxConfig
+	if IsNginxEnabled(services) {
+		log.Infow("Nginx service detected, preparing deployment")
+		nginxConfig, err = PrepareNginxDeployment(ctx, sshPool, primaryMaster, storageMountPath)
 		if err != nil {
-			log.Warnw("failed to prepare NginxUI deployment", "error", err)
-			// Continue anyway - NginxUI may work with defaults
+			log.Warnw("failed to prepare Nginx deployment", "error", err)
+			// Continue anyway - Nginx may work with defaults
 		}
 	} else {
-		log.Infow("NginxUI service not enabled, skipping NginxUI preparation")
+		log.Infow("Nginx service not enabled, skipping Nginx preparation")
 	}
 
 	// Run pre-initialization script on ALL nodes (each creates its own directories on shared storage)
-	if err := runInitializationScriptOnAllNodes(ctx, sshPool, clusterInfo.AllNodes, serviceDefDir, "001-PreInitialization.sh", storageMountPath, clusterInfo, nil, nginxUIConfig); err != nil {
+	if err := runInitializationScriptOnAllNodes(ctx, sshPool, clusterInfo.AllNodes, serviceDefDir, "001-PreInitialization.sh", storageMountPath, clusterInfo, nil, nginxConfig); err != nil {
 		log.Warnw("pre-initialization script failed", "error", err)
 		// Continue anyway - services may still deploy successfully
 	}
@@ -257,7 +256,7 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 			"file", svc.FileName,
 		)
 
-		if err := deployService(ctx, sshPool, primaryMaster, svc, storageMountPath, clusterInfo, nginxUIConfig); err != nil {
+		if err := deployService(ctx, sshPool, primaryMaster, svc, storageMountPath, clusterInfo); err != nil {
 			log.Errorw(fmt.Sprintf("failed to deploy service %d/%d", i+1, metrics.TotalFound),
 				"name", svc.Name,
 				"error", err,
@@ -286,123 +285,21 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 
 	// Run post-initialization script after all services are deployed
 	if len(deployedStacks) > 0 {
-		if err := runInitializationScript(ctx, sshPool, primaryMaster, serviceDefDir, "002-PostInitialization.sh", storageMountPath, clusterInfo, deployedStacks, nginxUIConfig); err != nil {
+		if err := runInitializationScript(ctx, sshPool, primaryMaster, serviceDefDir, "002-PostInitialization.sh", storageMountPath, clusterInfo, deployedStacks, nginxConfig); err != nil {
 			log.Warnw("post-initialization script failed", "error", err)
 			// Continue anyway - services are already deployed
 		}
 	}
 
-	// Update NginxUI cluster config AFTER service is deployed
-	// This discovers actual container hostnames and updates the hub node's app.ini
-	log.Infow("checking NginxUI post-deployment configuration",
-		"nginxUIConfigPresent", nginxUIConfig != nil,
-		"nginxUIEnabled", nginxUIConfig != nil && nginxUIConfig.Enabled,
-	)
-	if nginxUIConfig != nil && nginxUIConfig.Enabled {
-		nginxUISvc := GetNginxUIService(services)
-		log.Infow("NginxUI service lookup result",
-			"serviceFound", nginxUISvc != nil,
-			"serviceName", func() string { if nginxUISvc != nil { return nginxUISvc.Name } else { return "nil" } }(),
+	// Nginx post-deployment: reload if config was prepared
+	if nginxConfig != nil && nginxConfig.Enabled {
+		log.Infow("Nginx service deployed, configuration is ready",
+			"serviceName", nginxConfig.ServiceName,
+			"storagePath", nginxConfig.StoragePath,
 		)
-		if nginxUISvc != nil {
-			// Construct the Docker Swarm service name (stack_service format)
-			// The stack name is the service name from metadata, and the YAML defines service keys
-			// For our NginxUI service: stack=NginxUI (or LoadBalancer), service key=LoadBalancer
-			// Full service name format: StackName_ServiceKey
-			swarmServiceName := nginxUISvc.Name + "_LoadBalancer"
-			log.Infow("discovering NginxUI container hostnames for cluster config",
-				"swarmServiceName", swarmServiceName,
-			)
-
-			// Discover containers with retry logic - containers may take time to start
-			// Expected count is the number of nodes in the cluster (global mode)
-			expectedContainers := len(clusterInfo.AllNodes)
-			const maxDiscoveryAttempts = 10
-			const discoveryRetryDelay = 5 * time.Second
-
-			log.Infow("discovering NginxUI containers with retry",
-				"expectedContainers", expectedContainers,
-				"maxAttempts", maxDiscoveryAttempts,
-				"retryDelay", discoveryRetryDelay,
-			)
-
-			containers, err := DiscoverNginxUIContainersWithRetry(ctx, sshPool, primaryMaster, swarmServiceName, clusterInfo.NodeHostnameToSSH, expectedContainers, maxDiscoveryAttempts, discoveryRetryDelay)
-			log.Infow("NginxUI container discovery result",
-				"containerCount", len(containers),
-				"expected", expectedContainers,
-				"error", err,
-			)
-			if err != nil {
-				log.Warnw("failed to discover NginxUI containers", "error", err)
-			} else if len(containers) > 1 {
-				if err := UpdateNginxUIClusterConfig(ctx, sshPool, primaryMaster, storageMountPath, containers, nginxUIConfig.Secrets.NodeSecret, swarmServiceName); err != nil {
-					log.Warnw("failed to update NginxUI cluster config", "error", err)
-				}
-
-				// After cluster config update, containers are restarted
-				// Wait for them to come back up and then reset the admin password
-				log.Infow("waiting for NginxUI containers to restart after cluster config update")
-
-				// Re-discover containers after restart with retry (they have new IDs)
-				containers, err = DiscoverNginxUIContainersWithRetry(ctx, sshPool, primaryMaster, swarmServiceName, clusterInfo.NodeHostnameToSSH, expectedContainers, maxDiscoveryAttempts, discoveryRetryDelay)
-				if err != nil {
-					log.Warnw("failed to re-discover NginxUI containers after restart", "error", err)
-				}
-				log.Infow("NginxUI container re-discovery result",
-					"containerCount", len(containers),
-					"expected", expectedContainers,
-					"error", err,
-				)
-			}
-
-			// Update node tokens in the database to match the configured node_secret
-			// This fixes the "version incompatible" error caused by token mismatch
-			if len(containers) > 1 {
-				if err := UpdateNginxUINodeTokens(ctx, sshPool, primaryMaster, storageMountPath, containers, nginxUIConfig.Secrets.NodeSecret); err != nil {
-					log.Warnw("failed to update NginxUI node tokens", "error", err)
-				}
-			}
-
-			// Reset admin password on ALL containers using nginx-ui's built-in reset-password command
-			// Each container will have a different password since they have separate databases
-			log.Infow("attempting NginxUI admin password reset on all containers", "containerCount", len(containers))
-			var allCreds []NginxUICredentials
-			if len(containers) > 0 {
-				var err error
-				allCreds, err = ResetNginxUIAdminPasswords(ctx, sshPool, containers)
-				if err != nil {
-					log.Warnw("failed to reset NginxUI admin passwords", "error", err)
-				}
-
-				// Configure S3 proxy if RGW is enabled and credentials file exists
-				if clusterInfo.S3CredentialsFile != "" && clusterInfo.RadosGatewayPort > 0 {
-					log.Infow("configuring S3 proxy for NginxUI", "credentialsFile", clusterInfo.S3CredentialsFile)
-					if err := ConfigureS3Proxy(ctx, sshPool, primaryMaster, storageMountPath, clusterInfo.S3CredentialsFile, containers, clusterInfo.RadosGatewayPort); err != nil {
-						log.Warnw("failed to configure S3 proxy", "error", err)
-					}
-				}
-			} else {
-				log.Warnw("no NginxUI containers found, skipping password reset")
-			}
-
-			// Always write credentials file - even with empty containers array
-			// This ensures we have the secrets and cluster info available
-			log.Infow("writing NginxUI credentials file",
-				"storageMountPath", storageMountPath,
-				"primaryMaster", clusterInfo.PrimaryMaster,
-				"containerCount", len(containers),
-				"credentialsCount", len(allCreds),
-			)
-			if err := WriteNginxUICredentials(ctx, sshPool, clusterInfo.PrimaryMaster, storageMountPath, allCreds, containers, nginxUIConfig.Secrets, clusterInfo.KeepalivedVIP, clusterInfo.PortainerEnabled); err != nil {
-				log.Warnw("failed to write NginxUI credentials file", "error", err)
-			} else {
-				log.Infow("✅ NginxUI credentials file written successfully")
-			}
-		} else {
-			log.Warnw("NginxUI service not found in deployed services, skipping post-deployment configuration")
-		}
-	} else {
-		log.Infow("NginxUI not enabled, skipping post-deployment configuration")
+		// Note: Proxy rules can be added later via AddProxyRule()
+		// For now, just log that Nginx is ready
+		log.Infow("✅ Nginx is ready - proxy rules can be configured via dscotctl or by editing config files")
 	}
 
 	// Calculate final metrics
@@ -426,7 +323,7 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 }
 
 // deployService deploys a single service to the Docker Swarm cluster
-func deployService(ctx context.Context, sshPool *ssh.Pool, primaryMaster string, svc ServiceMetadata, storageMountPath string, clusterInfo ClusterInfo, nginxUIConfig *NginxUIConfig) error {
+func deployService(ctx context.Context, sshPool *ssh.Pool, primaryMaster string, svc ServiceMetadata, storageMountPath string, clusterInfo ClusterInfo) error {
 	log := logging.L().With("component", "services", "service", svc.Name)
 
 	// Read service file
@@ -444,16 +341,6 @@ func deployService(ctx context.Context, sshPool *ssh.Pool, primaryMaster string,
 			processedContent = newContent
 			modified = true
 			log.Infow("replaced storage mount paths", "storageMountPath", storageMountPath)
-		}
-	}
-
-	// Replace NginxUI placeholder secrets with generated ones if this is the NginxUI service
-	if nginxUIConfig != nil && IsNginxUIService(svc.Name) {
-		newContent := ReplaceNginxUISecretsInYAML(processedContent, nginxUIConfig.Secrets)
-		if newContent != processedContent {
-			processedContent = newContent
-			modified = true
-			log.Infow("replaced NginxUI placeholder secrets with generated secrets")
 		}
 	}
 
@@ -978,7 +865,7 @@ func showNetworkSummary(ctx context.Context, sshPool *ssh.Pool, host string) {
 
 // runInitializationScriptOnAllNodes runs an initialization script on all nodes in the cluster.
 // Each node runs the script in its own context, creating its own directories on shared storage.
-func runInitializationScriptOnAllNodes(ctx context.Context, sshPool *ssh.Pool, allNodes []string, serviceDefDir string, scriptName string, storageMountPath string, clusterInfo ClusterInfo, deployedStacks []string, nginxUIConfig *NginxUIConfig) error {
+func runInitializationScriptOnAllNodes(ctx context.Context, sshPool *ssh.Pool, allNodes []string, serviceDefDir string, scriptName string, storageMountPath string, clusterInfo ClusterInfo, deployedStacks []string, nginxConfig *NginxConfig) error {
 	log := logging.L().With("component", "services", "script", scriptName)
 
 	if len(allNodes) == 0 {
@@ -989,7 +876,7 @@ func runInitializationScriptOnAllNodes(ctx context.Context, sshPool *ssh.Pool, a
 	log.Infow("running initialization script on all nodes", "nodeCount", len(allNodes))
 
 	for _, node := range allNodes {
-		if err := runInitializationScript(ctx, sshPool, node, serviceDefDir, scriptName, storageMountPath, clusterInfo, deployedStacks, nginxUIConfig); err != nil {
+		if err := runInitializationScript(ctx, sshPool, node, serviceDefDir, scriptName, storageMountPath, clusterInfo, deployedStacks, nginxConfig); err != nil {
 			log.Warnw("initialization script failed on node", "node", node, "error", err)
 			// Continue with other nodes
 		}
@@ -1001,8 +888,8 @@ func runInitializationScriptOnAllNodes(ctx context.Context, sshPool *ssh.Pool, a
 // runInitializationScript uploads and executes a shell script on the target node with environment variables.
 // scriptName should be either "001-PreInitialization.sh" or "002-PostInitialization.sh".
 // deployedStacks is only used for post-initialization to pass the list of deployed stack names.
-// nginxUIConfig contains NginxUI configuration if NginxUI is enabled.
-func runInitializationScript(ctx context.Context, sshPool *ssh.Pool, targetNode string, serviceDefDir string, scriptName string, storageMountPath string, clusterInfo ClusterInfo, deployedStacks []string, nginxUIConfig *NginxUIConfig) error {
+// nginxConfig contains Nginx configuration if Nginx is enabled.
+func runInitializationScript(ctx context.Context, sshPool *ssh.Pool, targetNode string, serviceDefDir string, scriptName string, storageMountPath string, clusterInfo ClusterInfo, deployedStacks []string, nginxConfig *NginxConfig) error {
 	log := logging.L().With("component", "services", "script", scriptName, "node", targetNode)
 
 	// Scripts are in a "scripts" folder next to the "services" folder
@@ -1065,29 +952,12 @@ export NODE_HOSTNAME='%s'
 		envVars += fmt.Sprintf("export DEPLOYED_SERVICES='%s'\n", strings.Join(deployedStacks, ","))
 	}
 
-	// Add NginxUI configuration if enabled
-	if nginxUIConfig != nil && nginxUIConfig.Enabled {
-		envVars += "export NGINXUI_ENABLED='true'\n"
-		// Pass load balancer node hostnames so pre-init can create directories for all nodes
-		if len(nginxUIConfig.ClusterNodes) > 0 {
-			var lbHostnames []string
-			for _, node := range nginxUIConfig.ClusterNodes {
-				lbHostnames = append(lbHostnames, node.Hostname)
-			}
-			envVars += fmt.Sprintf("export NGINXUI_LB_NODES='%s'\n", strings.Join(lbHostnames, ","))
-		}
-		// Pass per-node cluster configs (each node gets OTHER nodes only)
-		// Format: NGINXUI_CLUSTER_CONFIG_<HOSTNAME>=<base64-encoded-config>
-		for hostname, cfg := range nginxUIConfig.PerNodeClusterConfigs {
-			if cfg != "" {
-				encodedConfig := base64.StdEncoding.EncodeToString([]byte(cfg))
-				// Sanitize hostname for env var name (uppercase, replace - with _)
-				safeHostname := strings.ToUpper(strings.ReplaceAll(hostname, "-", "_"))
-				envVars += fmt.Sprintf("export NGINXUI_CLUSTER_CONFIG_%s='%s'\n", safeHostname, encodedConfig)
-			}
-		}
+	// Add Nginx configuration if enabled
+	if nginxConfig != nil && nginxConfig.Enabled {
+		envVars += "export NGINX_ENABLED='true'\n"
+		envVars += fmt.Sprintf("export NGINX_SERVICE_NAME='%s'\n", nginxConfig.ServiceName)
 	} else {
-		envVars += "export NGINXUI_ENABLED='false'\n"
+		envVars += "export NGINX_ENABLED='false'\n"
 	}
 
 	// Upload script to remote host
