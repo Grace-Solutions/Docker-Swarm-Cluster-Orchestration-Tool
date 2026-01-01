@@ -89,7 +89,7 @@
       "storageEnabled": true,
       "scriptsEnabled": true,
       "keepalived": { "enabled": true, "priority": "auto", "state": "auto" },
-      "labels": { "environment": "production", "region": "us-east-1", "tier": "control-plane", "loadbalancer": "true" },
+      "labels": { "environment": "production", "region": "us-east-1", "tier": "control-plane", "EdgeLoadBalancer": "true" },
       "managementPanel": {
         "enabled": true,
         "type": "webmin"
@@ -136,7 +136,7 @@
       "storageEnabled": true,
       "scriptsEnabled": true,
       "keepalived": { "enabled": true, "priority": "auto", "state": "auto" },
-      "labels": { "environment": "production", "region": "us-east-1", "tier": "data-plane", "loadbalancer": "true" }
+      "labels": { "environment": "production", "region": "us-east-1", "tier": "data-plane", "EdgeLoadBalancer": "true" }
     }
   ]
 }

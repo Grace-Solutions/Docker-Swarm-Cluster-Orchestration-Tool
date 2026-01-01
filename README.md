@@ -69,14 +69,14 @@ Once deployment completes, your management interfaces are accessible via any nod
 
 | Service | URL | Description |
 |---------|-----|-------------|
-| **NginxUI** | `http://<VIP>/nginxui/` or `http://<node-ip>/nginxui/` | Nginx management interface |
-| **Portainer** | `http://<VIP>/portainer/` or `http://<node-ip>/portainer/` | Docker Swarm management GUI |
+| **Portainer** | `http://<VIP>:9000/` or `http://<node-ip>:9000/` | Docker Swarm management GUI |
+| **Nginx** | `http://<VIP>/` or `http://<node-ip>/` | Edge load balancer (reverse proxy) |
 
-Credentials are auto-generated and saved to: `<mountPath>/secrets/nginxui-credentials.json`
-
-**NginxUI Login:**
-
-![NginxUI Login](docs/nginxui-login.png)
+Additional optional services (disabled by default):
+| Service | URL | Description |
+|---------|-----|-------------|
+| **VS Code Server** | `http://<VIP>:8443/` | Browser-based IDE |
+| **Certmate** | Internal | Automatic SSL certificate management |
 
 **Portainer Dashboard:**
 
@@ -93,7 +93,7 @@ This tool transforms bare Linux servers into a fully operational Docker Swarm cl
 | **Docker Swarm** | Container orchestration platform for deploying and scaling services across multiple nodes with built-in load balancing and service discovery |
 | **MicroCeph** | Lightweight Ceph storage cluster providing distributed block storage, CephFS (shared filesystem), and optional S3-compatible object storage via RADOS Gateway |
 | **Keepalived** | VRRP-based high availability providing a floating Virtual IP (VIP) that automatically fails over between nodes for uninterrupted access |
-| **NginxUI** | Web-based Nginx management interface with visual site configuration, SSL certificate management, and real-time monitoring |
+| **Nginx Edge LB** | High-performance reverse proxy and load balancer deployed globally across edge nodes with SSL termination |
 | **Portainer** | Docker management GUI for visualizing containers, stacks, networks, and volumes with role-based access control |
 | **Overlay Networks** | Secure mesh networking via Netbird, Tailscale, or WireGuard for cross-node communication over public/private networks |
 | **Firewall (iptables)** | Per-node firewall configuration with predefined security profiles (BlockAllPublic, AllowAllPrivate, Harden) and custom port rules |
@@ -107,14 +107,14 @@ This tool transforms bare Linux servers into a fully operational Docker Swarm cl
 - ✅ **SSH-Based Orchestration** - Server-initiated connections, no agents required
 - ✅ **MicroCeph Integration** - Distributed storage with CephFS and optional S3 (RADOS Gateway)
 - ✅ **Keepalived HA** - Floating Virtual IP for high availability load balancing
-- ✅ **NginxUI + Portainer** - Pre-configured management interfaces accessible via reverse proxy
+- ✅ **Nginx + Portainer** - Edge load balancer and Docker management GUI pre-configured
 - ✅ **Overlay Networking** - Support for Netbird, Tailscale, and WireGuard
-- ✅ **Service Deployment** - Generic YAML-based service deployment system
+- ✅ **Service Deployment** - YAML-based service deployment with automatic directory creation
 - ✅ **Firewall Configuration** - Per-node iptables rules with predefined security profiles
 - ✅ **Management Panels** - Optional web-based server management (Webmin, 1Panel, Cockpit)
 - ✅ **Teardown/Reset** - Clean cluster removal with optional data preservation
 - ✅ **Geolocation Detection** - Automatic region detection and node labeling
-- ✅ **Credentials Management** - Auto-generated credentials saved to shared storage
+- ✅ **Dynamic Configuration** - Bind mount directories auto-created, constraints auto-adjusted
 
 ## Deployment & Teardown Flow
 
@@ -190,7 +190,7 @@ graph TB
 | 7 | Setup Docker Swarm | Initialize swarm and join nodes |
 | 8 | Configure Keepalived | Setup floating VIP for high availability |
 | 9 | Geolocation & Labels | Auto-detect region and apply all node labels |
-| 10 | Deploy Services | Deploy NginxUI, Portainer, and custom services |
+| 10 | Deploy Services | Deploy Nginx, Portainer, and custom services |
 | 11 | Save Credentials | Write access URLs and credentials to shared storage |
 | 12 | Post-Deployment Scripts | Execute custom scripts after setup |
 | 13 | Reboot Nodes | Gracefully reboot nodes (if configured) |
@@ -290,7 +290,7 @@ See `binaries/dscotctl.json.example` for a complete example.
       "role": "manager",
       "storageEnabled": true,
       "keepalived": { "enabled": true, "priority": "auto" },
-      "labels": { "environment": "production", "loadbalancer": "true" },
+      "labels": { "environment": "production", "EdgeLoadBalancer": "true" },
       "managementPanel": { "enabled": true, "type": "webmin" },
       "firewall": { "configurationEnabled": true, "profiles": [...], "ports": [...] }
     }
@@ -307,7 +307,7 @@ See `binaries/dscotctl.json.example` for a complete example.
 | `role` | `manager`, `worker`, or `both` |
 | `storageEnabled` | Enable MicroCeph on this node |
 | `keepalived.enabled` | Include in VIP failover group |
-| `labels` | Custom Docker node labels (use `loadbalancer: true` for NginxUI) |
+| `labels` | Custom Docker node labels (use `EdgeLoadBalancer: true` for Nginx edge LB) |
 | `managementPanel` | Web-based server management panel (see below) |
 | `firewall` | Per-node firewall (iptables) configuration (see below) |
 | `rebootOnCompletion` | Reboot after deployment |
@@ -418,36 +418,29 @@ Configure iptables firewall rules per-node. Uses predefined profiles and custom 
 
 ## Deployed Services
 
-After deployment, access your management interfaces:
+The following services are deployed automatically (can be enabled/disabled via service YAML files):
 
-| Service | Access URL | Description |
-|---------|------------|-------------|
-| **NginxUI** | `http://<VIP>/nginxui/` | Nginx management interface |
-| **Portainer** | `http://<VIP>/portainer/` | Docker management GUI |
+| Service | Access | Description |
+|---------|--------|-------------|
+| **Portainer Agent** | Internal | Enables Portainer to manage containers across all Swarm nodes |
+| **Nginx (EdgeLoadBalancer)** | `http://<VIP>/` or `https://<VIP>/` | Global edge load balancer with SSL termination |
+| **Portainer** | `http://<VIP>:9000/` | Docker Swarm management GUI |
 
-Credentials are saved to: `<mountPath>/secrets/nginxui-credentials.json`
+Optional services (disabled by default in service YAML):
+
+| Service | Access | Description |
+|---------|--------|-------------|
+| **VS Code Server** | `http://<VIP>:8443/` | Browser-based IDE for development |
+| **Certmate** | Internal | Automatic SSL certificate management |
+
+S3 credentials (if RADOS Gateway enabled) are saved to: `<mountPath>/secrets/s3-credentials.json`
 
 ```json
 {
-  "credentials": {
-    "username": "admin",
-    "password": "auto-generated-password"
-  },
-  "secrets": {
-    "nodeSecret": "a9f3c7e2b8d14a6f5c0e9d3b7a1f8c4e...",
-    "jwtSecret": "d4b8f2a6c1e9573d0b4a8f2e6c1d9a7b...",
-    "cryptoSecret": "e7c3a9f1d5b8024e6a3c9f1d7b4e8a2c..."
-  },
-  "accessUrls": {
-    "nginxui": ["http://172.16.32.250/nginxui/", "http://node-0/nginxui/"],
-    "portainer": ["http://172.16.32.250/portainer/", "http://node-0/portainer/"]
-  },
-  "virtualIp": "172.16.32.250",
-  "nodes": [
-    { "hostname": "node-0", "containerId": "abc123", "containerName": "nginxui-node-0", "isHub": true },
-    { "hostname": "node-1", "containerId": "def456", "containerName": "nginxui-node-1", "isHub": false }
-  ],
-  "generatedAt": "2025-01-01T12:00:00Z"
+  "accessKey": "ABCD1234...",
+  "secretKey": "xyz789...",
+  "endpoint": "http://<node-ip>:7480",
+  "bucket": "docker-swarm-0001"
 }
 ```
 
