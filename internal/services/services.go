@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +24,12 @@ type ServiceMetadata struct {
 	Enabled     bool
 	FilePath    string
 	FileName    string
+	// Nginx proxy configuration (parsed from headers)
+	NginxProxy     bool   // NGINX_PROXY: true/false - whether to create a reverse proxy rule
+	NginxPath      string // NGINX_PATH: /path - URL path for the proxy (defaults to /ServiceName)
+	NginxPort      int    // NGINX_PORT: 8080 - internal port the service listens on
+	NginxWebSocket bool   // NGINX_WEBSOCKET: true/false - enable WebSocket support
+	NginxTCPStream string // NGINX_TCP_STREAM: backend_port:nginx_port - TCP stream proxy (e.g., 8000:9001)
 }
 
 // DeploymentMetrics tracks deployment statistics
@@ -43,6 +50,7 @@ type ClusterInfo struct {
 	AllNodes                  []string          // list of all SSH-accessible nodes for directory creation
 	DistributedStorageEnabled bool              // true if distributed storage is enabled (shared across nodes)
 	PrimaryMaster             string            // primary master node SSH address
+	DockerManagerHost         string            // hostname/IP for Docker API on primary manager (for Portainer etc.)
 	S3CredentialsFile         string            // path to S3 credentials file (if RGW enabled)
 	RadosGatewayPort          int               // RADOS Gateway port (if RGW enabled)
 	KeepalivedVIP             string            // virtual IP address if keepalived enabled (empty if not)
@@ -149,12 +157,32 @@ func parseServiceMetadata(filePath, fileName string) (ServiceMetadata, error) {
 		} else if strings.HasPrefix(line, "ENABLED:") {
 			enabledStr := strings.TrimSpace(strings.TrimPrefix(line, "ENABLED:"))
 			metadata.Enabled = strings.ToLower(enabledStr) == "true"
+		} else if strings.HasPrefix(line, "NGINX_PROXY:") {
+			proxyStr := strings.TrimSpace(strings.TrimPrefix(line, "NGINX_PROXY:"))
+			metadata.NginxProxy = strings.ToLower(proxyStr) == "true"
+		} else if strings.HasPrefix(line, "NGINX_PATH:") {
+			metadata.NginxPath = strings.TrimSpace(strings.TrimPrefix(line, "NGINX_PATH:"))
+		} else if strings.HasPrefix(line, "NGINX_PORT:") {
+			portStr := strings.TrimSpace(strings.TrimPrefix(line, "NGINX_PORT:"))
+			if port, err := strconv.Atoi(portStr); err == nil {
+				metadata.NginxPort = port
+			}
+		} else if strings.HasPrefix(line, "NGINX_WEBSOCKET:") {
+			wsStr := strings.TrimSpace(strings.TrimPrefix(line, "NGINX_WEBSOCKET:"))
+			metadata.NginxWebSocket = strings.ToLower(wsStr) == "true"
+		} else if strings.HasPrefix(line, "NGINX_TCP_STREAM:") {
+			metadata.NginxTCPStream = strings.TrimSpace(strings.TrimPrefix(line, "NGINX_TCP_STREAM:"))
 		}
 	}
 
 	// If no name was specified, use filename without extension
 	if metadata.Name == "" {
 		metadata.Name = strings.TrimSuffix(fileName, filepath.Ext(fileName))
+	}
+
+	// Default NginxPath to /ServiceName if proxy is enabled but no path specified
+	if metadata.NginxProxy && metadata.NginxPath == "" {
+		metadata.NginxPath = "/" + strings.ToLower(metadata.Name)
 	}
 
 	return metadata, nil
@@ -291,15 +319,24 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 		}
 	}
 
-	// Nginx post-deployment: reload if config was prepared
+	// Nginx post-deployment: generate proxy rules and reload if config was prepared
 	if nginxConfig != nil && nginxConfig.Enabled {
-		log.Infow("Nginx service deployed, configuration is ready",
+		log.Infow("Nginx service deployed, generating proxy rules",
 			"serviceName", nginxConfig.ServiceName,
 			"storagePath", nginxConfig.StoragePath,
 		)
-		// Note: Proxy rules can be added later via AddProxyRule()
-		// For now, just log that Nginx is ready
-		log.Infow("✅ Nginx is ready - proxy rules can be configured via dscotctl or by editing config files")
+
+		// Generate proxy rules for all services with NGINX_PROXY: true
+		if err := GenerateProxyRulesForServices(ctx, sshPool, primaryMaster, storageMountPath, services); err != nil {
+			log.Warnw("failed to generate Nginx proxy rules", "error", err)
+		} else {
+			// Reload Nginx to apply new proxy rules
+			if err := ReloadNginx(ctx, sshPool, primaryMaster, nginxConfig.ServiceName); err != nil {
+				log.Warnw("failed to reload Nginx after proxy rule generation", "error", err)
+			}
+		}
+
+		log.Infow("✅ Nginx proxy configuration complete")
 	}
 
 	// Calculate final metrics
@@ -398,9 +435,11 @@ func deployService(ctx context.Context, sshPool *ssh.Pool, primaryMaster string,
 
 	// Deploy using docker stack deploy with --prune to remove orphaned services
 	// Use --detach=true explicitly to avoid warning about future default change
-	deployCmd := fmt.Sprintf("docker stack deploy --prune --detach=true -c %s %s", remoteFile, svc.Name)
+	// Export environment variables for variable substitution in compose files (e.g., ${DOCKER_MANAGER_HOST})
+	envExports := fmt.Sprintf("export DOCKER_MANAGER_HOST='%s'", clusterInfo.DockerManagerHost)
+	deployCmd := fmt.Sprintf("%s && docker stack deploy --prune --detach=true -c %s %s", envExports, remoteFile, svc.Name)
 
-	log.Infow("deploying Docker stack", "host", primaryMaster, "stack", svc.Name, "command", deployCmd)
+	log.Infow("deploying Docker stack", "host", primaryMaster, "stack", svc.Name, "dockerManagerHost", clusterInfo.DockerManagerHost)
 
 	stdout, stderr, err := sshPool.Run(ctx, primaryMaster, deployCmd)
 	if err != nil {

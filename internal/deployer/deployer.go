@@ -238,6 +238,18 @@ func Deploy(ctx context.Context, cfg *config.Config) error {
 	}
 	log.Infow("✅ Docker Swarm setup complete", "primaryAdvertiseAddr", primaryMasterAdvertiseAddr, "primaryJoinAddr", primaryMasterJoinAddr)
 
+	// Get primary manager's Docker Swarm hostname for services that need to connect to Docker API
+	var dockerManagerHost string
+	stdout, _, err := sshPool.Run(ctx, primaryMaster, "docker node ls --filter role=manager --format '{{.Hostname}}' | head -1")
+	if err == nil && strings.TrimSpace(stdout) != "" {
+		dockerManagerHost = strings.TrimSpace(stdout)
+		log.Infow("primary manager Docker hostname", "hostname", dockerManagerHost)
+	} else {
+		// Fallback to SSH hostname
+		dockerManagerHost = primaryMaster
+		log.Warnw("could not determine Docker manager hostname, using SSH address", "fallback", dockerManagerHost)
+	}
+
 	// Phase 7b: Create default overlay networks
 	log.Infow("→ Creating default Docker Swarm overlay networks")
 	if err := createDefaultOverlayNetworks(ctx, sshPool, primaryMaster); err != nil {
@@ -338,6 +350,7 @@ func Deploy(ctx context.Context, cfg *config.Config) error {
 		AllNodes:                  allSSHNodes,   // All nodes for directory creation
 		DistributedStorageEnabled: ds.Enabled,    // If true, storage is shared across nodes
 		PrimaryMaster:             primaryMaster, // Primary master for env var
+		DockerManagerHost:         dockerManagerHost,
 		S3CredentialsFile:         s3CredentialsFile,
 		RadosGatewayPort:          radosGatewayPort,
 		KeepalivedVIP:             keepalivedVIP,
@@ -719,7 +732,8 @@ func installDocker(ctx context.Context, sshPool *ssh.Pool, host string, nodeRole
 	_, _, err := sshPool.Run(ctx, host, "docker --version")
 	if err == nil {
 		log.Infow("Docker already installed")
-		// Still configure the API even if Docker was already installed (if role permits)
+		// Still ensure openssl and configure the API even if Docker was already installed
+		ensureOpenSSL(ctx, sshPool, host)
 		if enableAPI {
 			configureDockerAPI(ctx, sshPool, host)
 		}
@@ -745,6 +759,9 @@ func installDocker(ctx context.Context, sshPool *ssh.Pool, host string, nodeRole
 		return err
 	}
 
+	// Ensure openssl is installed (needed for certificate generation)
+	ensureOpenSSL(ctx, sshPool, host)
+
 	// Configure Docker API after installation (only for manager or both roles)
 	if enableAPI {
 		configureDockerAPI(ctx, sshPool, host)
@@ -752,6 +769,40 @@ func installDocker(ctx context.Context, sshPool *ssh.Pool, host string, nodeRole
 		log.Infow("skipping Docker API configuration (worker-only node)")
 	}
 	return nil
+}
+
+// ensureOpenSSL ensures openssl is installed on the node (idempotent).
+// openssl is required for certificate generation in pre-initialization scripts.
+func ensureOpenSSL(ctx context.Context, sshPool *ssh.Pool, host string) {
+	log := logging.L().With("node", host, "component", "openssl")
+
+	// Check if openssl is already installed
+	if _, _, err := sshPool.Run(ctx, host, "command -v openssl"); err == nil {
+		log.Debugw("openssl already installed")
+		return
+	}
+
+	log.Infow("installing openssl")
+
+	// Detect package manager and install openssl
+	installCmd := `
+if command -v apt-get >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq openssl
+elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y -q openssl
+elif command -v yum >/dev/null 2>&1; then
+    yum install -y -q openssl
+elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache openssl
+else
+    echo "unsupported package manager" && exit 1
+fi
+`
+	if _, stderr, err := sshPool.Run(ctx, host, installCmd); err != nil {
+		log.Warnw("failed to install openssl (non-fatal)", "error", err, "stderr", stderr)
+	} else {
+		log.Infow("openssl installed successfully")
+	}
 }
 
 // configureDockerAPI configures Docker to expose the API on TCP port 2375.

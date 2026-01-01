@@ -6,11 +6,13 @@ Docker Stack YAML files in this directory are automatically deployed to your Doc
 
 ## Included Services
 
-| File | Service | Description |
-|------|---------|-------------|
-| `001-PortainerAgent.yml` | Portainer Agent | Global agent on all nodes for container management |
-| `002-NginxUI.yml` | NginxUI | Web-based Nginx management with reverse proxy for cluster services |
-| `003-Portainer.yml` | Portainer CE | Docker management GUI accessible via `/portainer/` |
+| File | Service | Proxy Path | Description |
+|------|---------|------------|-------------|
+| `001-PortainerAgent.yml` | Portainer Agent | - | Global agent on all nodes for container management |
+| `002-Nginx.yml` | Nginx | - | Stateless reverse proxy for all services |
+| `003-Portainer.yml` | Portainer CE | `/portainer/` | Docker management GUI |
+| `004-VSCodeServer.yml` | VS Code Server | `/vscode/` | Browser-based IDE for config editing |
+| `005-Certmate.yml` | Certmate | `/certmate/` | SSL certificate management with Let's Encrypt |
 
 ---
 
@@ -20,8 +22,11 @@ Docker Stack YAML files in this directory are automatically deployed to your Doc
 # NAME: My Service
 # DESCRIPTION: Brief description
 # ENABLED: true
-
-version: '3.8'
+# NGINX_PROXY: true
+# NGINX_PATH: /myservice
+# NGINX_PORT: 8080
+# NGINX_WEBSOCKET: true
+# NGINX_TCP_STREAM: 9000:9001
 
 services:
   my-service:
@@ -40,6 +45,11 @@ services:
 | `NAME` | Service name (defaults to filename) |
 | `DESCRIPTION` | Brief description |
 | `ENABLED` | `true` or `false` (default: `true`) |
+| `NGINX_PROXY` | `true` to auto-generate Nginx reverse proxy rule (default: `false`) |
+| `NGINX_PATH` | URL path for proxy (default: `/servicename`) |
+| `NGINX_PORT` | Internal port the service listens on (default: `80`) |
+| `NGINX_WEBSOCKET` | `true` to enable WebSocket support (default: `false`) |
+| `NGINX_TCP_STREAM` | TCP stream proxy `backend_port:nginx_port` (e.g., `8000:9001`) |
 
 ---
 

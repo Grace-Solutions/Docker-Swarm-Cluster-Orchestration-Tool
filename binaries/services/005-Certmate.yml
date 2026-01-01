@@ -1,0 +1,73 @@
+# NAME: Certmate
+# DESCRIPTION: Certmate - SSL Certificate Management System with Web UI and API
+# ENABLED: true
+# NGINX_PROXY: true
+# NGINX_PATH: /certmate
+# NGINX_PORT: 8000
+# NGINX_WEBSOCKET: false
+# NOTE: Manages Let's Encrypt certificates with DNS-01 validation
+#       Certificates are written directly to Nginx ssl directory
+# DOCS: https://github.com/fabriziosalmi/certmate
+
+services:
+  Certmate:
+    image: fabriziosalmi/certmate:latest
+    hostname: 'certmate-{{.Node.ID}}'
+    environment:
+      TZ: UTC
+      FLASK_ENV: production
+      # Secret key for Flask sessions (generated UUID)
+      SECRET_KEY: ${CERTMATE_SECRET_KEY:-a3f8c2e1-9d4b-4f7a-8e6c-2b5d1a9f3c7e}
+      # API bearer token for authentication (generated secure token)
+      API_BEARER_TOKEN: ${CERTMATE_API_TOKEN:-k8X9mP2vL5nQ7wR4tY6uJ3hF1gA0sD8c}
+      # DNS provider tokens (configure as needed)
+      # CLOUDFLARE_TOKEN: ${CLOUDFLARE_TOKEN}
+      # AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      # AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+    volumes:
+      # Certificates written directly to Nginx ssl directory (Nginx reads these)
+      - /mnt/MicroCephFS/docker-swarm-0001/data/Nginx/ssl:/app/certificates:rw
+      # Certmate application data (settings, accounts)
+      - /mnt/MicroCephFS/docker-swarm-0001/data/Certmate/data:/app/data:rw
+      - /mnt/MicroCephFS/docker-swarm-0001/data/Certmate/logs:/app/logs:rw
+      - /mnt/MicroCephFS/docker-swarm-0001/data/Certmate/backups:/app/backups:rw
+    networks:
+      - INTERNAL
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.platform.os==linux
+          - node.role==worker
+      resources:
+        limits:
+          cpus: '2'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  INTERNAL:
+    name: DOCKER-SWARM-SERVICES-INTERNAL
+    external: true
+

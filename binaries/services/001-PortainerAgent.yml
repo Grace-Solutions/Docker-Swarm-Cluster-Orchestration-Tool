@@ -1,6 +1,7 @@
 # NAME: PortainerAgent
 # DESCRIPTION: Portainer Agent - Global service for Docker Swarm node management
 # ENABLED: true
+# NGINX_PROXY: false
 
 services:
   PortainerAgent:

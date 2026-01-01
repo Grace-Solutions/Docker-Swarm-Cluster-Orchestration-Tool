@@ -1,0 +1,59 @@
+# NAME: VSCodeServer
+# DESCRIPTION: VS Code Server - Browser-based IDE for editing Nginx configs and other files
+# ENABLED: true
+# NGINX_PROXY: true
+# NGINX_PATH: /vscode
+# NGINX_PORT: 8443
+# NGINX_WEBSOCKET: true
+# NOTE: Mounts Nginx config paths read-write for editing configs via browser
+
+services:
+  VSCodeServer:
+    image: lscr.io/linuxserver/code-server:latest
+    hostname: 'vscode-{{.Node.ID}}'
+    environment:
+      TZ: UTC
+      PUID: 0
+      PGID: 0
+      # Password set via HASHED_PASSWORD or PASSWORD env var
+      # Default: no password (configure via reverse proxy auth)
+      DEFAULT_WORKSPACE: /config/workspace
+    volumes:
+      # VSCode Server persistent config
+      - /mnt/MicroCephFS/docker-swarm-0001/data/VSCodeServer/config:/config:rw
+      - /mnt/MicroCephFS/docker-swarm-0001/data/Nginx:/workspace/Nginx:rw
+      - /mnt/MicroCephFS/docker-swarm-0001/ServiceDefinitions:/workspace/ServiceDefinitions:rw
+    networks:
+      - INTERNAL
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.platform.os==linux
+          - node.role==worker
+      resources:
+        limits:
+          cpus: '4'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+
+networks:
+  INTERNAL:
+    name: DOCKER-SWARM-SERVICES-INTERNAL
+    external: true
+

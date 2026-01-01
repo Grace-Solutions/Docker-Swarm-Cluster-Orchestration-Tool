@@ -1,20 +1,22 @@
 # NAME: Portainer
 # DESCRIPTION: Portainer CE - Container management UI for Docker Swarm
 # ENABLED: true
-# NOTE: Portainer is accessed via NginxUI reverse proxy at /portainer/
-#       Port 8000 (agent tunnel) is exposed via TCP stream on NginxUI
+# NGINX_PROXY: true
+# NGINX_PATH: /portainer
+# NGINX_PORT: 9000
+# NGINX_WEBSOCKET: true
+# ENV_INJECT: DOCKER_MANAGER_HOST
+# NOTE: Connects to primary manager's Docker API over TCP (port 2375)
+#       DOCKER_MANAGER_HOST is injected by dscotctl during deployment
 
 services:
   Portainer:
     image: portainer/portainer-ce:latest
     hostname: 'portainer-{{.Node.ID}}'
-    command: -H tcp://tasks.PortainerAgent:9001 --tlsskipverify --base-url /portainer
+    command: -H tcp://${DOCKER_MANAGER_HOST}:2375 --tlsskipverify --base-url /portainer
     environment:
-      PORTAINER_AGENT_ADDR: tasks.PortainerAgent
+      DOCKER_MANAGER_HOST: ${DOCKER_MANAGER_HOST}
       LOG_LEVEL: INFO
-    # No published ports - accessed via NginxUI reverse proxy
-    # Port 9000 (HTTP) -> /portainer/ location in NginxUI
-    # Port 8000 (agent tunnel) -> TCP stream in NginxUI
     volumes:
       - /mnt/MicroCephFS/docker-swarm-0001/data/Portainer:/data:rw
     networks:
@@ -24,7 +26,7 @@ services:
       placement:
         constraints:
           - node.platform.os==linux
-          - node.role==manager
+          - node.role==worker
       resources:
         limits:
           cpus: '8'
