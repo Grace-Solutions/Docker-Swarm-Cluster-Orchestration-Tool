@@ -1,6 +1,33 @@
 # Docker Swarm Cluster Orchestration Tool
 
-`dscotctl` (Docker Swarm Cluster Orchestration Tool Control) is a Go-based orchestrator that automates Docker Swarm cluster deployment, management, and teardown with MicroCeph distributed storage integration via SSH.
+> **The Problem:** Deploying a production-ready Docker Swarm cluster manually requires hours of repetitive SSH sessions, complex configuration across every node, and deep expertise in a dozen different technologies. One misconfiguration can leave your infrastructure insecure or non-functional.
+
+> **The Solution:** `dscotctl` transforms bare Linux servers into a fully operational, edge-load-balanced, multi-cloud Docker Swarm cluster in **under 10 minutes** from a single JSON configuration file.
+
+---
+
+## Why This Tool Exists
+
+Building production infrastructure shouldn't require you to manually:
+
+- **SSH into each server** and repeat the same commands across 3, 5, or 20 nodes
+- **Configure Docker** with TLS, Swarm initialization, manager/worker join tokens, and overlay networks
+- **Set up distributed storage** with Ceph/MicroCeph including OSD creation, pool configuration, CephFS mounts, and S3 gateways
+- **Harden firewalls** with iptables rules that don't break Docker, overlay networks, or cluster communication
+- **Deploy overlay networks** via Netbird, Tailscale, or WireGuard for secure cross-node and cross-cloud communication
+- **Configure Keepalived** with VRRP, automatic ARP announcements, and virtual IP failover across nodes
+- **Generate and distribute SSH keys**, manage root passwords, and handle authentication across nodes
+- **Deploy management panels** like Portainer, configure reverse proxies, generate SSL certificates
+- **Apply node labels** for geolocation-aware scheduling and workload placement
+- **Create mount points**, service directories, and ensure permissions are correct across all nodes
+
+**All of this complexity is reduced to editing one JSON file and running one command.**
+
+With `dscotctl`, you can spin up multi-cloud, edge-load-balanced infrastructure ready for production workloads—or tear it all down cleanly when you're done. Build your company's infrastructure from the ground up in the time it takes to grab a coffee.
+
+📖 **See [docs/manual-setup-comparison.md](docs/manual-setup-comparison.md) for a detailed breakdown of what you'd have to do manually for each component.**
+
+---
 
 ## Quick Deploy (Copy & Paste)
 
