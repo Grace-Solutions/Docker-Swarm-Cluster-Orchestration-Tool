@@ -26,7 +26,7 @@ services:
       # AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
     volumes:
       # Certificates written directly to Nginx ssl directory (Nginx reads these)
-      - /mnt/MicroCephFS/docker-swarm-0001/data/Nginx/ssl:/app/certificates:rw
+      - /mnt/MicroCephFS/docker-swarm-0001/data/EdgeLoadBalancer/ssl:/app/certificates:rw
       # Certmate application data (settings, accounts)
       - /mnt/MicroCephFS/docker-swarm-0001/data/Certmate/data:/app/data:rw
       - /mnt/MicroCephFS/docker-swarm-0001/data/Certmate/logs:/app/logs:rw
