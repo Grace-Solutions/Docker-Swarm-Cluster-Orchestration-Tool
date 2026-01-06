@@ -504,7 +504,9 @@ func GenerateProxyRulesForServices(ctx context.Context, sshPool *ssh.Pool, prima
 		}
 
 		// Use variable-based proxy_pass so resolver is used at request time, not startup
+		// Rewrite strips the location prefix before proxying (e.g., /portainer/foo -> /foo)
 		config.WriteString(fmt.Sprintf("        set $%s_backend \"%s:%d\";\n", varName, dockerServiceName, port))
+		config.WriteString(fmt.Sprintf("        rewrite ^%s(.*)$ /$1 break;\n", strings.TrimSuffix(proxyPath, "/")))
 		config.WriteString(fmt.Sprintf("        proxy_pass http://$%s_backend;\n", varName))
 		config.WriteString("        proxy_http_version 1.1;\n")
 		config.WriteString("        proxy_set_header Host $host;\n")
