@@ -731,18 +731,14 @@ func parseBindMounts(content string, storageMountPath string) BindMountPaths {
 	seenPaths := make(map[string]bool)
 
 	// Pattern for short form volumes: - /host/path:/container/path or - /host/path:/container/path:ro
-	shortFormPattern := regexp.MustCompile(`^\s*-\s*([^:\s]+):([^:\s]+)(?::[^:\s]+)?$`)
+	// Relaxed pattern - just look for the volume mount pattern anywhere in the line
+	// No anchors (^ or $) to handle whitespace variations, comments, etc.
+	shortFormPattern := regexp.MustCompile(`-\s+(/[^:\s]+):(/[^:\s]+)`)
 
 	// Pattern for long form source: /host/path
-	longFormPattern := regexp.MustCompile(`^\s*source:\s*([^\s]+)`)
+	longFormPattern := regexp.MustCompile(`source:\s*(/[^\s]+)`)
 
-	// Normalize line endings (CRLF -> LF) before splitting
-	// Windows files have \r\n which leaves \r at end of lines after splitting on \n
-	// This breaks the regex $ anchor
-	normalizedContent := strings.ReplaceAll(content, "\r\n", "\n")
-	normalizedContent = strings.ReplaceAll(normalizedContent, "\r", "\n")
-
-	lines := strings.Split(normalizedContent, "\n")
+	lines := strings.Split(content, "\n")
 	matchCount := 0
 	for _, line := range lines {
 		var hostPath string
