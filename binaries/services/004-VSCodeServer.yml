@@ -24,6 +24,7 @@ services:
       - /mnt/MicroCephFS/docker-swarm-0001/data/VSCodeServer/config:/config:rw
       - /mnt/MicroCephFS/docker-swarm-0001:/mnt/MicroCephFS/docker-swarm-0001:rw
     networks:
+      - EXTERNAL
       - INTERNAL
     deploy:
       replicas: 1
@@ -53,6 +54,10 @@ services:
         delay: 10s
 
 networks:
+  EXTERNAL:
+    name: DOCKER-SWARM-SERVICES-EXTERNAL
+    external: true
+
   INTERNAL:
     name: DOCKER-SWARM-SERVICES-INTERNAL
     external: true

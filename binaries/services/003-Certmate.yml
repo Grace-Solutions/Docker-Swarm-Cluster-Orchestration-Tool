@@ -4,7 +4,8 @@
 # NGINX_PROXY: true
 # NGINX_PATH: /certmate
 # NGINX_PORT: 8000
-# NGINX_WEBSOCKET: false
+# NGINX_WEBSOCKET: true
+# NGINX_BASIC_AUTH: admin:admin
 # NOTE: Manages Let's Encrypt certificates with DNS-01 validation
 #       Certificates are written directly to Nginx ssl directory
 # DOCS: https://github.com/fabriziosalmi/certmate
@@ -32,6 +33,7 @@ services:
       - /mnt/MicroCephFS/docker-swarm-0001/data/Certmate/logs:/app/logs:rw
       - /mnt/MicroCephFS/docker-swarm-0001/data/Certmate/backups:/app/backups:rw
     networks:
+      - EXTERNAL
       - INTERNAL
     deploy:
       replicas: 1
@@ -67,7 +69,9 @@ services:
       start_period: 40s
 
 networks:
+  EXTERNAL:
+    name: DOCKER-SWARM-SERVICES-EXTERNAL
+    external: true
   INTERNAL:
     name: DOCKER-SWARM-SERVICES-INTERNAL
     external: true
-

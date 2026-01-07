@@ -25,12 +25,13 @@ type ServiceMetadata struct {
 	FilePath    string
 	FileName    string
 	// Nginx proxy configuration (parsed from headers)
-	NginxProxy     bool   // NGINX_PROXY: true/false - whether to create a reverse proxy rule
-	NginxPath      string // NGINX_PATH: /path - URL path for the proxy (defaults to /ServiceName)
-	NginxPort      int    // NGINX_PORT: 8080 - internal port the service listens on
-	NginxWebSocket bool   // NGINX_WEBSOCKET: true/false - enable WebSocket support
-	NginxTCPStream string // NGINX_TCP_STREAM: backend_port:nginx_port - TCP stream proxy (e.g., 8000:9001)
-	NginxBasicAuth string // NGINX_BASIC_AUTH: user:pass - enable basic auth with these credentials
+	NginxProxy       bool   // NGINX_PROXY: true/false - whether to create a reverse proxy rule
+	NginxPath        string // NGINX_PATH: /path - URL path for the proxy (defaults to /ServiceName)
+	NginxPort        int    // NGINX_PORT: 8080 - internal port the service listens on
+	NginxWebSocket   bool   // NGINX_WEBSOCKET: true/false - enable WebSocket support
+	NginxTCPStream   string // NGINX_TCP_STREAM: backend_port:nginx_port - TCP stream proxy (e.g., 8000:9001)
+	NginxBasicAuth   string // NGINX_BASIC_AUTH: user:pass - enable basic auth with these credentials
+	NginxStripPrefix bool   // NGINX_STRIP_PREFIX: true/false - strip location prefix before proxying (default: true)
 }
 
 // DeploymentMetrics tracks deployment statistics
@@ -175,6 +176,10 @@ func parseServiceMetadata(filePath, fileName string) (ServiceMetadata, error) {
 			metadata.NginxTCPStream = strings.TrimSpace(strings.TrimPrefix(line, "NGINX_TCP_STREAM:"))
 		} else if strings.HasPrefix(line, "NGINX_BASIC_AUTH:") {
 			metadata.NginxBasicAuth = strings.TrimSpace(strings.TrimPrefix(line, "NGINX_BASIC_AUTH:"))
+		} else if strings.HasPrefix(line, "NGINX_STRIP_PREFIX:") {
+			stripStr := strings.TrimSpace(strings.TrimPrefix(line, "NGINX_STRIP_PREFIX:"))
+			// Default is true, so only set false if explicitly "false"
+			metadata.NginxStripPrefix = strings.ToLower(stripStr) != "false"
 		}
 	}
 
@@ -186,6 +191,24 @@ func parseServiceMetadata(filePath, fileName string) (ServiceMetadata, error) {
 	// Default NginxPath to /ServiceName if proxy is enabled but no path specified
 	if metadata.NginxProxy && metadata.NginxPath == "" {
 		metadata.NginxPath = "/" + strings.ToLower(metadata.Name)
+	}
+
+	// Default NginxStripPrefix to true if proxy is enabled and not explicitly set
+	if metadata.NginxProxy && !metadata.NginxStripPrefix {
+		// Check if it was explicitly set to false by looking for the header
+		explicitlySetFalse := false
+		for _, line := range lines {
+			if strings.HasPrefix(line, "NGINX_STRIP_PREFIX:") {
+				stripStr := strings.TrimSpace(strings.TrimPrefix(line, "NGINX_STRIP_PREFIX:"))
+				if strings.ToLower(stripStr) == "false" {
+					explicitlySetFalse = true
+				}
+				break
+			}
+		}
+		if !explicitlySetFalse {
+			metadata.NginxStripPrefix = true
+		}
 	}
 
 	return metadata, nil

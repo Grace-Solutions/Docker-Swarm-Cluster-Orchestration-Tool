@@ -125,7 +125,7 @@ error_log /var/log/nginx/error.log warn;
 pid /var/run/nginx.pid;
 
 events {
-    worker_connections 4096;
+    worker_connections 1024;
     use epoll;
     multi_accept on;
 }
@@ -491,6 +491,7 @@ func GenerateProxyRulesForServices(ctx context.Context, sshPool *ssh.Pool, prima
 			"upstream", fmt.Sprintf("%s:%d", dockerServiceName, port),
 			"websocket", svc.NginxWebSocket,
 			"basicAuth", svc.NginxBasicAuth != "",
+			"stripPrefix", svc.NginxStripPrefix,
 		)
 
 		config.WriteString(fmt.Sprintf("    # %s\n", svc.Name))
@@ -504,18 +505,40 @@ func GenerateProxyRulesForServices(ctx context.Context, sshPool *ssh.Pool, prima
 		}
 
 		// Use variable-based proxy_pass so resolver is used at request time, not startup
-		// Rewrite strips the location prefix before proxying (e.g., /portainer/foo -> /foo)
 		config.WriteString(fmt.Sprintf("        set $%s_backend \"%s:%d\";\n", varName, dockerServiceName, port))
-		config.WriteString(fmt.Sprintf("        rewrite ^%s(.*)$ /$1 break;\n", strings.TrimSuffix(proxyPath, "/")))
+
+		// Strip prefix if enabled (default: true)
+		// Rewrites /path/foo -> /foo before proxying
+		if svc.NginxStripPrefix {
+			config.WriteString(fmt.Sprintf("        rewrite ^%s(.*)$ /$1 break;\n", strings.TrimSuffix(proxyPath, "/")))
+		}
+
 		config.WriteString(fmt.Sprintf("        proxy_pass http://$%s_backend;\n", varName))
 		config.WriteString("        proxy_http_version 1.1;\n")
 		config.WriteString("        proxy_set_header Host $host;\n")
 		config.WriteString("        proxy_set_header X-Real-IP $remote_addr;\n")
 		config.WriteString("        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n")
 		config.WriteString("        proxy_set_header X-Forwarded-Proto $scheme;\n")
+
 		// Handle upstream connection errors gracefully
 		config.WriteString("        proxy_connect_timeout 5s;\n")
 		config.WriteString("        proxy_next_upstream error timeout;\n")
+
+		// Rewrite absolute URLs in responses to include the proxy path prefix
+		// This fixes links like href="/settings" -> href="/certmate/settings"
+		if svc.NginxStripPrefix {
+			pathPrefix := strings.TrimSuffix(proxyPath, "/")
+			config.WriteString("        # Rewrite absolute URLs in responses\n")
+			config.WriteString("        sub_filter_once off;\n")
+			// text/html is included by default, don't duplicate it
+			config.WriteString("        sub_filter_types application/javascript text/css application/json;\n")
+			config.WriteString(fmt.Sprintf("        sub_filter 'href=\"/' 'href=\"%s/';\n", pathPrefix))
+			config.WriteString(fmt.Sprintf("        sub_filter 'src=\"/' 'src=\"%s/';\n", pathPrefix))
+			config.WriteString(fmt.Sprintf("        sub_filter 'action=\"/' 'action=\"%s/';\n", pathPrefix))
+			config.WriteString(fmt.Sprintf("        sub_filter 'url(/' 'url(%s/';\n", pathPrefix))
+			// Also handle redirects
+			config.WriteString("        proxy_redirect / " + proxyPath + ";\n")
+		}
 
 		if svc.NginxWebSocket {
 			config.WriteString("        proxy_set_header Upgrade $http_upgrade;\n")

@@ -13,7 +13,7 @@ services:
   Portainer:
     image: portainer/portainer-ce:latest
     hostname: 'portainer-{{.Node.ID}}'
-    command: -H tcp://${DOCKER_MANAGER_HOST}:2375 --tlsskipverify --base-url /portainer
+    command: -H tcp://${DOCKER_MANAGER_HOST}:2375 --tlsskipverify
     environment:
       DOCKER_MANAGER_HOST: ${DOCKER_MANAGER_HOST}
       LOG_LEVEL: INFO

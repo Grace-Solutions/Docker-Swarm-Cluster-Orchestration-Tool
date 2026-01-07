@@ -1,0 +1,161 @@
+# NAME: N8N
+# DESCRIPTION: N8N Workflow Automation in Queue Mode with Valkey and Postgres
+# ENABLED: false
+# NGINX_PROXY: false
+# NGINX_PATH: /n8n
+# NGINX_PORT: 5678
+# NGINX_WEBSOCKET: true
+# NGINX_STRIP_PREFIX: true
+# NOTE: Queue mode - main instance handles UI/webhooks, workers execute workflows
+#       Nginx strips /n8n prefix - N8N sees requests at /
+#       Auto-generated encryption keys for secure credential storage
+# DOCS: https://docs.n8n.io/hosting/scaling/queue-mode/
+
+x-n8n-common: &n8n-common
+  image: n8nio/n8n:latest
+  environment: &n8n-env
+    TZ: UTC
+    GENERIC_TIMEZONE: UTC
+    # Database
+    DB_TYPE: postgresdb
+    DB_POSTGRESDB_HOST: N8N_Postgres
+    DB_POSTGRESDB_PORT: 5432
+    DB_POSTGRESDB_DATABASE: n8n
+    DB_POSTGRESDB_USER: n8n
+    DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD:-n8n_secure_password_2024}
+    # Queue mode with Valkey (Redis-compatible)
+    EXECUTIONS_MODE: queue
+    QUEUE_BULL_REDIS_HOST: N8N_Valkey
+    QUEUE_BULL_REDIS_PORT: 6379
+    QUEUE_BULL_REDIS_PASSWORD: ${N8N_VALKEY_PASSWORD:-valkey_secure_password_2024}
+    # Encryption key for credentials (auto-generated, 32 chars)
+    N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-k8X9mP2vL5nQ7wR4tY6uJ3hF1gA0sD8c}
+  volumes:
+    - /mnt/MicroCephFS/docker-swarm-0001/data/N8N/files:/files:rw
+
+services:
+  # Main N8N instance - handles UI, webhooks, and orchestration
+  N8N:
+    <<: *n8n-common
+    hostname: 'n8n-main-{{.Node.ID}}'
+    environment:
+      <<: *n8n-env
+      N8N_RUNNERS_MODE: internal
+    networks:
+      - INTERNAL
+      - EXTERNAL
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.platform.os==linux
+      resources:
+        limits:
+          cpus: '4'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+
+  # N8N Workers - execute workflows from queue
+  N8NWorker:
+    <<: *n8n-common
+    hostname: 'n8n-worker-{{.Node.ID}}'
+    command: worker
+    environment:
+      <<: *n8n-env
+    networks:
+      - INTERNAL
+      - EXTERNAL
+    deploy:
+      mode: global
+      placement:
+        constraints:
+          - node.platform.os==linux
+          - node.role==worker
+      resources:
+        limits:
+          cpus: '4'
+          memory: 2G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+
+  # Valkey - Redis-compatible in-memory store for queue
+  Valkey:
+    image: valkey/valkey:latest
+    hostname: 'n8n-valkey'
+    command: valkey-server --requirepass ${N8N_VALKEY_PASSWORD:-valkey_secure_password_2024} --appendonly yes
+    volumes:
+      - /mnt/MicroCephFS/docker-swarm-0001/data/N8N/valkey:/data:rw
+    networks:
+      - EXTERNAL
+      - INTERNAL
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.platform.os==linux
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+
+  # Postgres - persistent storage for N8N
+  Postgres:
+    image: postgres:16-alpine
+    hostname: 'n8n-postgres'
+    environment:
+      POSTGRES_DB: n8n
+      POSTGRES_USER: n8n
+      POSTGRES_PASSWORD: ${N8N_DB_PASSWORD:-n8n_secure_password_2024}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - /mnt/MicroCephFS/docker-swarm-0001/data/N8N/postgres:/var/lib/postgresql/data:rw
+    networks:
+      - EXTERNAL
+      - INTERNAL
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.platform.os==linux
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+
+networks:
+  INTERNAL:
+    name: DOCKER-SWARM-SERVICES-INTERNAL
+    external: true
+  EXTERNAL:
+    name: DOCKER-SWARM-SERVICES-EXTERNAL
+    external: true
+
