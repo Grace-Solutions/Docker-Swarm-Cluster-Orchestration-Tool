@@ -21,7 +21,6 @@ services:
         mode: host
     volumes:
       # Shared storage for nginx config (read-only - edit via VSCode Server)
-      # Note: mime.types is not mounted - nginx:alpine has its own built-in
       - /mnt/MicroCephFS/docker-swarm-0001/data/EdgeLoadBalancer/conf/nginx.conf:/etc/nginx/nginx.conf:ro
       - /mnt/MicroCephFS/docker-swarm-0001/data/EdgeLoadBalancer/conf/conf.d:/etc/nginx/conf.d:ro
       - /mnt/MicroCephFS/docker-swarm-0001/data/EdgeLoadBalancer/conf/sites-enabled:/etc/nginx/sites-enabled:ro

@@ -5,9 +5,11 @@
 # NGINX_PATH: /portainer
 # NGINX_PORT: 9000
 # NGINX_WEBSOCKET: true
+# PORTAINER_ADMIN_PASSWORD: ChangeMe123!
 # ENV_INJECT: DOCKER_MANAGER_HOST
 # NOTE: Connects to primary manager's Docker API over TCP (port 2375)
 #       DOCKER_MANAGER_HOST is injected by dscotctl during deployment
+#       PORTAINER_ADMIN_PASSWORD sets the initial admin password (min 12 chars, bcrypted at deploy time)
 
 services:
   Portainer:
@@ -20,6 +22,7 @@ services:
     volumes:
       - /mnt/MicroCephFS/docker-swarm-0001/data/Portainer:/data:rw
     networks:
+      - EXTERNAL
       - INTERNAL
     deploy:
       replicas: 1
@@ -49,6 +52,9 @@ services:
         delay: 10s
 
 networks:
+  EXTERNAL:
+    name: DOCKER-SWARM-SERVICES-EXTERNAL
+    external: true
   INTERNAL:
     name: DOCKER-SWARM-SERVICES-INTERNAL
     external: true
