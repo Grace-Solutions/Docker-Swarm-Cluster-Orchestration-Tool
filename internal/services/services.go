@@ -451,11 +451,20 @@ func deployService(ctx context.Context, sshPool *ssh.Pool, primaryMaster string,
 	// Local paths: always create on all nodes (node-local directories like /var/lib/nginx)
 	if len(clusterInfo.AllNodes) > 0 {
 		bindMounts := parseBindMounts(processedContent, storageMountPath)
-		log.Infow("parsed bind mounts from YAML",
-			"storagePaths", bindMounts.StoragePaths,
-			"localPaths", bindMounts.LocalPaths,
+
+		totalDirs := len(bindMounts.StoragePaths) + len(bindMounts.LocalPaths)
+		log.Infow("📂 bind mount analysis complete",
+			"service", svc.Name,
+			"totalDirectories", totalDirs,
+			"storagePaths", len(bindMounts.StoragePaths),
+			"localPaths", len(bindMounts.LocalPaths),
 			"storageMountPath", storageMountPath,
+			"distributedStorage", clusterInfo.DistributedStorageEnabled,
 		)
+
+		if totalDirs == 0 {
+			log.Warnw("⚠️ no bind mount directories found in YAML - this may cause mount failures")
+		}
 
 		// Handle storage paths (under storageMountPath)
 		if len(bindMounts.StoragePaths) > 0 {
@@ -463,24 +472,30 @@ func deployService(ctx context.Context, sshPool *ssh.Pool, primaryMaster string,
 			if clusterInfo.DistributedStorageEnabled {
 				// Shared storage - only need to create on one node
 				storageNodes = []string{clusterInfo.AllNodes[0]}
-				log.Infow("creating storage directories on single node (distributed storage)", "paths", bindMounts.StoragePaths)
+				log.Infow("storage directories (distributed - single node)", "targetNode", storageNodes[0], "count", len(bindMounts.StoragePaths))
 			} else {
 				// Local storage - create on all nodes
 				storageNodes = clusterInfo.AllNodes
-				log.Infow("creating storage directories on all nodes (local storage)", "paths", bindMounts.StoragePaths)
+				log.Infow("storage directories (local - all nodes)", "nodeCount", len(storageNodes), "count", len(bindMounts.StoragePaths))
 			}
 			if err := ensureDirectoriesOnNodes(ctx, sshPool, storageNodes, bindMounts.StoragePaths, svc.Name); err != nil {
-				log.Warnw("failed to create some storage directories", "error", err)
+				log.Errorw("❌ failed to create storage directories", "error", err)
 			}
+		} else {
+			log.Infow("no storage directories to create")
 		}
 
 		// Handle local paths (not under storageMountPath) - always create on ALL nodes
 		if len(bindMounts.LocalPaths) > 0 {
-			log.Infow("creating local directories on all nodes", "paths", bindMounts.LocalPaths)
+			log.Infow("local directories (all nodes)", "nodeCount", len(clusterInfo.AllNodes), "count", len(bindMounts.LocalPaths))
 			if err := ensureDirectoriesOnNodes(ctx, sshPool, clusterInfo.AllNodes, bindMounts.LocalPaths, svc.Name); err != nil {
-				log.Warnw("failed to create some local directories", "error", err)
+				log.Errorw("❌ failed to create local directories", "error", err)
 			}
+		} else {
+			log.Infow("no local directories to create")
 		}
+	} else {
+		log.Warnw("⚠️ no nodes available for directory creation - AllNodes is empty")
 	}
 
 	// Create temporary file on remote host
@@ -756,6 +771,18 @@ func ensureDirectoriesOnNodes(ctx context.Context, sshPool *ssh.Pool, nodes []st
 
 	log := logging.L().With("component", "services", "service", serviceName)
 
+	log.Infow("📁 directory creation request",
+		"service", serviceName,
+		"directoryCount", len(directories),
+		"nodeCount", len(nodes),
+		"nodes", nodes,
+	)
+
+	// Log each directory to be created
+	for i, dir := range directories {
+		log.Infow(fmt.Sprintf("  [%d/%d] %s", i+1, len(directories), dir))
+	}
+
 	// Build a single command that creates all directories
 	// Using mkdir -p makes this idempotent
 	var quotedPaths []string
@@ -764,22 +791,45 @@ func ensureDirectoriesOnNodes(ctx context.Context, sshPool *ssh.Pool, nodes []st
 	}
 	mkdirCmd := fmt.Sprintf("mkdir -p %s", strings.Join(quotedPaths, " "))
 
-	log.Infow("ensuring bind mount directories exist",
-		"directories", directories,
-		"nodeCount", len(nodes),
-	)
-
-	// Create directories on all nodes in parallel by iterating
-	// (SSH pool handles connection reuse)
+	// Create directories on all target nodes
 	var errors []string
 	for _, node := range nodes {
-		log.Infow("creating directories", "host", node, "command", mkdirCmd)
-		if _, stderr, err := sshPool.Run(ctx, node, mkdirCmd); err != nil {
+		log.Infow("executing mkdir on node", "host", node, "command", mkdirCmd)
+		stdout, stderr, err := sshPool.Run(ctx, node, mkdirCmd)
+		if err != nil {
 			errMsg := fmt.Sprintf("%s: %v (stderr: %s)", node, err, stderr)
-			log.Warnw("failed to create directories on node", "host", node, "error", err, "stderr", stderr)
+			log.Errorw("❌ failed to create directories on node", "host", node, "error", err, "stderr", stderr, "stdout", stdout)
 			errors = append(errors, errMsg)
+			continue
+		}
+
+		// Verify directories were created by checking they exist
+		verifyCmd := fmt.Sprintf("for d in %s; do if [ -d \"$d\" ]; then echo \"OK: $d\"; else echo \"MISSING: $d\"; fi; done", strings.Join(quotedPaths, " "))
+		verifyOut, verifyErr, _ := sshPool.Run(ctx, node, verifyCmd)
+		if verifyErr != "" {
+			log.Warnw("directory verification had errors", "host", node, "stderr", verifyErr)
+		}
+
+		// Parse verification output
+		created := 0
+		missing := 0
+		for _, line := range strings.Split(verifyOut, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "OK:") {
+				created++
+				log.Infow("  ✓ " + strings.TrimPrefix(line, "OK: "))
+			} else if strings.HasPrefix(line, "MISSING:") {
+				missing++
+				log.Errorw("  ✗ " + strings.TrimPrefix(line, "MISSING: "))
+			}
+		}
+
+		if missing > 0 {
+			errMsg := fmt.Sprintf("%s: %d directories missing after creation", node, missing)
+			errors = append(errors, errMsg)
+			log.Errorw("❌ some directories failed to create", "host", node, "created", created, "missing", missing)
 		} else {
-			log.Infow("✅ directories created", "host", node)
+			log.Infow("✅ all directories verified", "host", node, "count", created)
 		}
 	}
 
