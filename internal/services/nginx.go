@@ -430,8 +430,8 @@ func GenerateProxyRulesForServices(ctx context.Context, sshPool *ssh.Pool, prima
 
 	var proxyServices []ServiceMetadata
 	for _, svc := range services {
-		// Skip disabled services, Nginx itself, and PortainerAgent
-		if !svc.Enabled || IsEdgeLoadBalancerService(svc.Name) || svc.Name == "PortainerAgent" {
+		// Skip disabled services and Nginx itself
+		if !svc.Enabled || IsEdgeLoadBalancerService(svc.Name) {
 			continue
 		}
 		// Only include services with NGINX_PROXY: true

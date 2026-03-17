@@ -15,8 +15,6 @@ import (
 	"dscotctl/internal/defaults"
 	"dscotctl/internal/logging"
 	"dscotctl/internal/ssh"
-
-	"golang.org/x/crypto/bcrypt"
 )
 
 // ServiceMetadata represents metadata parsed from a service YAML file
@@ -34,8 +32,6 @@ type ServiceMetadata struct {
 	NginxTCPStream   string // NGINX_TCP_STREAM: backend_port:nginx_port - TCP stream proxy (e.g., 8000:9001)
 	NginxBasicAuth   string // NGINX_BASIC_AUTH: user:pass - enable basic auth with these credentials
 	NginxStripPrefix bool   // NGINX_STRIP_PREFIX: true/false - strip location prefix before proxying (default: true)
-	// Portainer-specific configuration
-	PortainerAdminPassword string // PORTAINER_ADMIN_PASSWORD: password - sets initial admin password (bcrypted at runtime)
 	// ProcessedContent holds the post-processed YAML content after variable replacement
 	// This is set during deployment and used for uploading to storage
 	ProcessedContent string
@@ -58,11 +54,10 @@ type ClusterInfo struct {
 	AllNodes                  []string          // list of all SSH-accessible nodes for directory creation
 	DistributedStorageEnabled bool              // true if distributed storage is enabled (shared across nodes)
 	PrimaryMaster             string            // primary master node SSH address
-	DockerManagerHost         string            // hostname/IP for Docker API on primary manager (for Portainer etc.)
+	DockerManagerHost         string            // hostname/IP for Docker API on primary manager
 	S3CredentialsFile         string            // path to S3 credentials file (if RGW enabled)
 	RadosGatewayPort          int               // RADOS Gateway port (if RGW enabled)
 	KeepalivedVIP             string            // virtual IP address if keepalived enabled (empty if not)
-	PortainerEnabled          bool              // true if Portainer service is deployed
 	NodeHostnameToSSH         map[string]string // Docker Swarm hostname -> SSH address mapping
 }
 
@@ -186,8 +181,6 @@ func parseServiceMetadata(filePath, fileName string) (ServiceMetadata, error) {
 			stripStr := strings.TrimSpace(strings.TrimPrefix(line, "NGINX_STRIP_PREFIX:"))
 			// Default is true, so only set false if explicitly "false"
 			metadata.NginxStripPrefix = strings.ToLower(stripStr) != "false"
-		} else if strings.HasPrefix(line, "PORTAINER_ADMIN_PASSWORD:") {
-			metadata.PortainerAdminPassword = strings.TrimSpace(strings.TrimPrefix(line, "PORTAINER_ADMIN_PASSWORD:"))
 		}
 	}
 
@@ -413,22 +406,6 @@ func deployService(ctx context.Context, sshPool *ssh.Pool, primaryMaster string,
 		}
 	}
 
-	// Inject Portainer admin password if specified
-	// The password is bcrypted at runtime and added to the command line
-	if svc.PortainerAdminPassword != "" {
-		newContent, err := injectPortainerAdminPassword(processedContent, svc.PortainerAdminPassword)
-		if err != nil {
-			log.Warnw("failed to inject Portainer admin password", "error", err)
-		} else if newContent != processedContent {
-			processedContent = newContent
-			modified = true
-			log.Infow("💡 Portainer admin password configured",
-				"password", svc.PortainerAdminPassword,
-				"note", "Use this password to log in as 'admin'",
-			)
-		}
-	}
-
 	// Save modified content back to local file so it can be redeployed with dynamic settings
 	if modified {
 		if err := os.WriteFile(svc.FilePath, []byte(processedContent), 0644); err != nil {
@@ -531,66 +508,6 @@ func deployService(ctx context.Context, sshPool *ssh.Pool, primaryMaster string,
 	verifyDeployment(ctx, sshPool, primaryMaster, svc.Name)
 
 	return nil
-}
-
-
-
-// injectPortainerAdminPassword adds the --admin-password flag to Portainer's command line.
-// The password is bcrypted at runtime using cost 10 (Portainer's default).
-// This prevents the 5-minute admin setup timeout that locks out users.
-func injectPortainerAdminPassword(content string, password string) (string, error) {
-	log := logging.L().With("component", "services")
-
-	// Validate password length (Portainer requires at least 12 characters)
-	if len(password) < 12 {
-		return content, fmt.Errorf("Portainer admin password must be at least 12 characters, got %d", len(password))
-	}
-
-	// Generate bcrypt hash with cost 10 (Portainer's default)
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), 10)
-	if err != nil {
-		return content, fmt.Errorf("failed to bcrypt password: %w", err)
-	}
-	// Escape $ as $$ for Docker Compose interpolation
-	// Docker Compose interprets $ as variable substitution, so $2a becomes invalid interpolation
-	bcryptHash := strings.ReplaceAll(string(hash), "$", "$$")
-
-	// Find the command: line and convert to array format to avoid YAML quoting issues
-	// bcrypt hashes contain $ which cause problems with YAML string interpolation
-	// Pattern matches: command: <existing args> (single-line format)
-	commandPattern := regexp.MustCompile(`(?m)^(\s*)command:\s*(.+)$`)
-
-	if !commandPattern.MatchString(content) {
-		return content, fmt.Errorf("no command: line found in Portainer YAML")
-	}
-
-	// Replace command line with array format for safe handling of special chars
-	modified := commandPattern.ReplaceAllStringFunc(content, func(match string) string {
-		submatches := commandPattern.FindStringSubmatch(match)
-		if len(submatches) < 3 {
-			return match
-		}
-		indent := submatches[1] // leading whitespace
-		existing := strings.TrimSpace(submatches[2])
-
-		// Parse existing args (simple space-split, handles most cases)
-		// For Portainer: "-H tcp://${DOCKER_MANAGER_HOST}:2375 --tlsskipverify"
-		args := strings.Fields(existing)
-		args = append(args, "--admin-password", bcryptHash)
-
-		// Build array-format command (avoids all YAML quoting issues)
-		var lines []string
-		lines = append(lines, indent+"command:")
-		for _, arg := range args {
-			// Each arg as a separate array element - YAML handles quoting automatically
-			lines = append(lines, fmt.Sprintf("%s  - %q", indent, arg))
-		}
-
-		return strings.Join(lines, "\n")
-	})
-
-	log.Infow("injected Portainer admin password", "hashPrefix", bcryptHash[:20]+"...")
-	return modified, nil
 }
 
 // replaceStoragePaths replaces distributed storage mount paths in YAML content with the configured path.

@@ -1,0 +1,175 @@
+# NAME: Komodo
+# DESCRIPTION: Komodo - Build and deploy software across many servers with Web UI
+# ENABLED: true
+# NGINX_PROXY: true
+# NGINX_PATH: /komodo
+# NGINX_PORT: 9120
+# NGINX_WEBSOCKET: true
+# NOTE: Komodo Core (2-dev) with MongoDB database and global Periphery agent
+#       Core provides the management UI, Periphery agents run on every node
+#       Periphery connects to Core using a shared passkey for authentication
+
+services:
+  # MongoDB - Database backend for Komodo Core
+  KomodoMongo:
+    image: mongo:latest
+    hostname: 'komodo-db-{{.Node.ID}}'
+    command: --quiet --wiredTigerCacheSizeGB 0.25
+    environment:
+      TZ: UTC
+      MONGO_INITDB_ROOT_USERNAME: komodo
+      MONGO_INITDB_ROOT_PASSWORD: ${KOMODO_DB_PASSWORD:-ChangeMe123!}
+    volumes:
+      - ${STORAGE_MOUNT_PATH}/data/Komodo/mongo-data:/data/db:rw
+      - ${STORAGE_MOUNT_PATH}/data/Komodo/mongo-config:/data/configdb:rw
+    networks:
+      - INTERNAL
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.platform.os==linux
+          - node.role==worker
+      resources:
+        limits:
+          cpus: '4'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+
+  # Komodo Core - Management UI and API server
+  KomodoCore:
+    image: ghcr.io/moghtech/komodo-core:2-dev
+    hostname: 'komodo-core-{{.Node.ID}}'
+    depends_on:
+      - KomodoMongo
+    environment:
+      TZ: UTC
+      # Database connection
+      KOMODO_DATABASE_ADDRESS: Komodo_KomodoMongo:27017
+      KOMODO_DATABASE_USERNAME: komodo
+      KOMODO_DATABASE_PASSWORD: ${KOMODO_DB_PASSWORD:-ChangeMe123!}
+      # Core settings
+      KOMODO_TITLE: Komodo
+      KOMODO_LOCAL_AUTH: "true"
+      KOMODO_INIT_ADMIN_USERNAME: admin
+      KOMODO_INIT_ADMIN_PASSWORD: ${KOMODO_ADMIN_PASSWORD:-ChangeMe123!}
+      KOMODO_DISABLE_USER_REGISTRATION: "false"
+      KOMODO_ENABLE_NEW_USERS: "false"
+      # Passkey for Core <-> Periphery authentication
+      KOMODO_PASSKEY: ${KOMODO_PASSKEY:-a_random_passkey_change_me}
+      # First server - connects to local Periphery via overlay network
+      KOMODO_FIRST_SERVER: https://Komodo_KomodoPeriphery:8120
+      KOMODO_FIRST_SERVER_NAME: Local
+      # Monitoring
+      KOMODO_MONITORING_INTERVAL: "15-sec"
+      KOMODO_RESOURCE_POLL_INTERVAL: "1-hr"
+      # Security
+      KOMODO_WEBHOOK_SECRET: ${KOMODO_WEBHOOK_SECRET:-a_random_webhook_secret}
+      KOMODO_JWT_SECRET: ${KOMODO_JWT_SECRET:-a_random_jwt_secret}
+      KOMODO_JWT_TTL: "1-day"
+      KOMODO_DISABLE_CONFIRM_DIALOG: "true"
+    volumes:
+      - ${STORAGE_MOUNT_PATH}/data/Komodo/core:/config:rw
+      - ${STORAGE_MOUNT_PATH}/data/Komodo/backups:/backups:rw
+    networks:
+      - EXTERNAL
+      - INTERNAL
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.platform.os==linux
+          - node.role==worker
+      resources:
+        limits:
+          cpus: '4'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: start-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9120", "||", "exit", "1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Komodo Periphery - Agent running on every node for container/server management
+  KomodoPeriphery:
+    image: ghcr.io/moghtech/komodo-periphery:2-dev
+    hostname: 'komodo-periphery-{{.Node.ID}}'
+    environment:
+      TZ: UTC
+      PERIPHERY_ROOT_DIRECTORY: /etc/komodo
+      PERIPHERY_PASSKEYS: ${KOMODO_PASSKEY:-a_random_passkey_change_me}
+      PERIPHERY_SSL_ENABLED: "true"
+      PERIPHERY_DISABLE_TERMINALS: "false"
+      PERIPHERY_INCLUDE_DISK_MOUNTS: /etc/hostname
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+      - /proc:/proc:ro
+      - /etc/komodo:/etc/komodo:rw
+    networks:
+      - INTERNAL
+    deploy:
+      mode: global
+      placement:
+        constraints:
+          - node.platform.os==linux
+      resources:
+        limits:
+          cpus: '2'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+
+networks:
+  EXTERNAL:
+    name: DOCKER-SWARM-SERVICES-EXTERNAL
+    external: true
+  INTERNAL:
+    name: DOCKER-SWARM-SERVICES-INTERNAL
+    external: true
+

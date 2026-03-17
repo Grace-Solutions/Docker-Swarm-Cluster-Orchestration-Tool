@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -312,21 +310,6 @@ func Deploy(ctx context.Context, cfg *config.Config) error {
 		}
 	}
 
-	// Check if Portainer is enabled by scanning service definitions
-	portainerEnabled := false
-	serviceDefDir := cfg.GlobalSettings.ServiceDefinitionDirectory
-	if serviceDefDir == "" {
-		exePath, _ := os.Executable()
-		serviceDefDir = filepath.Join(filepath.Dir(exePath), "services")
-	}
-	svcList, _ := services.DiscoverServices(serviceDefDir)
-	for _, svc := range svcList {
-		if svc.Enabled && strings.EqualFold(svc.Name, "Portainer") {
-			portainerEnabled = true
-			break
-		}
-	}
-
 	// Build hostname to SSH mapping for container discovery
 	// Always queries the node for its actual hostname - this is what Docker Swarm uses
 	nodeHostnameToSSH := make(map[string]string)
@@ -352,7 +335,6 @@ func Deploy(ctx context.Context, cfg *config.Config) error {
 		S3CredentialsFile:         s3CredentialsFile,
 		RadosGatewayPort:          radosGatewayPort,
 		KeepalivedVIP:             keepalivedVIP,
-		PortainerEnabled:          portainerEnabled,
 		NodeHostnameToSSH:         nodeHostnameToSSH,
 	}
 	metrics, err := services.DeployServices(ctx, sshPool, primaryMaster, cfg.GlobalSettings.ServiceDefinitionDirectory, storageMountPath, clusterInfo)
