@@ -343,10 +343,8 @@ func Deploy(ctx context.Context, cfg *config.Config) error {
 		}
 	}
 
-	// Determine if cluster has dedicated workers for placement constraint handling
-	// sshWorkers only contains nodes with role="worker" (not "both" or "manager")
+	// Build cluster info for service deployment
 	clusterInfo := services.ClusterInfo{
-		HasDedicatedWorkers:       len(sshWorkers) > 0,
 		AllNodes:                  allSSHNodes,   // All nodes for directory creation
 		DistributedStorageEnabled: ds.Enabled,    // If true, storage is shared across nodes
 		PrimaryMaster:             primaryMaster, // Primary master for env var

@@ -21,14 +21,18 @@ type NginxConfig struct {
 const (
 	// EdgeLoadBalancerServiceNamePattern matches EdgeLoadBalancer service names
 	EdgeLoadBalancerServiceNamePattern = `(?i)^edgeloadbalancer$`
-	// EdgeLoadBalancerLabelKey is the Docker node label for edge load balancer nodes
-	EdgeLoadBalancerLabelKey = "EdgeLoadBalancer"
-	// EdgeLoadBalancerLabelValue is the expected value for the load balancer label
+	// EdgeLoadBalancerMasterLabelKey is the Docker node label for the nginx-ui master node
+	EdgeLoadBalancerMasterLabelKey = "EdgeLoadBalancerMaster"
+	// EdgeLoadBalancerSlaveLabelKey is the Docker node label for nginx slave nodes
+	EdgeLoadBalancerSlaveLabelKey = "EdgeLoadBalancerSlave"
+	// EdgeLoadBalancerLabelValue is the expected value for the load balancer labels
 	EdgeLoadBalancerLabelValue = "true"
 	// EdgeLoadBalancerDataDir is the subdirectory for Nginx/EdgeLoadBalancer data
 	EdgeLoadBalancerDataDir = "EdgeLoadBalancer"
-	// EdgeLoadBalancerConfDir is the subdirectory for Nginx configuration
-	EdgeLoadBalancerConfDir = "conf"
+	// EdgeLoadBalancerNginxDir is the subdirectory for Nginx configuration (maps to /etc/nginx)
+	EdgeLoadBalancerNginxDir = "nginx"
+	// EdgeLoadBalancerNginxUIDir is the subdirectory for nginx-ui application data
+	EdgeLoadBalancerNginxUIDir = "nginx-ui"
 )
 
 // IsEdgeLoadBalancerService checks if a service is the EdgeLoadBalancer (Nginx)
@@ -57,44 +61,55 @@ func GetEdgeLoadBalancerService(services []ServiceMetadata) *ServiceMetadata {
 	return nil
 }
 
-// PrepareEdgeLoadBalancerDeployment prepares EdgeLoadBalancer (Nginx) for deployment by creating base config files.
+// PrepareEdgeLoadBalancerDeployment prepares EdgeLoadBalancer for deployment.
+// In the Master/Slave architecture, nginx-ui (Master) initializes /etc/nginx with the standard
+// nginx layout on first start. This function only creates supplementary files like SSL certificates.
 // Directory creation is handled dynamically by parseBindMounts in services.go which parses the YAML.
 func PrepareEdgeLoadBalancerDeployment(ctx context.Context, sshPool *ssh.Pool, primaryMaster string, storagePath string) (*NginxConfig, error) {
 	log := logging.L().With("component", "edgeloadbalancer")
 
-	log.Infow("preparing EdgeLoadBalancer deployment")
+	log.Infow("preparing EdgeLoadBalancer Master/Slave deployment")
 
 	config := &NginxConfig{
 		Enabled:     true,
 		StoragePath: storagePath,
-		ServiceName: "EdgeLoadBalancer_EdgeLoadBalancer",
+		ServiceName: "EdgeLoadBalancer_EdgeLoadBalancerSlave",
 	}
 
-	// NOTE: Directory creation is NOT done here - it's handled dynamically by parseBindMounts()
-	// which parses the service YAML and creates directories for all bind mounts.
-	// This function only creates the initial CONFIG FILES that nginx needs to start.
+	// Pre-create the standard nginx directory structure on shared storage.
+	// nginx-ui (Master) manages configs, but we ensure all directories exist so both
+	// Master and Slave containers can start cleanly on first deployment.
 
-	confPath := filepath.ToSlash(filepath.Join(storagePath, "data", EdgeLoadBalancerDataDir, EdgeLoadBalancerConfDir))
+	nginxPath := filepath.ToSlash(filepath.Join(storagePath, "data", EdgeLoadBalancerDataDir, EdgeLoadBalancerNginxDir))
 
-	// Create base nginx.conf if it doesn't exist (creates parent dir too)
-	nginxConfPath := filepath.ToSlash(filepath.Join(confPath, "nginx.conf"))
-	if err := createBaseNginxConfig(ctx, sshPool, primaryMaster, nginxConfPath); err != nil {
-		return nil, fmt.Errorf("failed to create nginx.conf: %w", err)
+	// Standard nginx directories
+	nginxDirs := []string{
+		nginxPath,                                    // /etc/nginx root
+		filepath.ToSlash(filepath.Join(nginxPath, "conf.d")),          // http server configs
+		filepath.ToSlash(filepath.Join(nginxPath, "sites-available")), // available site configs
+		filepath.ToSlash(filepath.Join(nginxPath, "sites-enabled")),   // enabled site symlinks
+		filepath.ToSlash(filepath.Join(nginxPath, "stream.d")),        // TCP/UDP stream configs
+		filepath.ToSlash(filepath.Join(nginxPath, "ssl")),             // SSL certificates
+		filepath.ToSlash(filepath.Join(nginxPath, "snippets")),        // reusable config snippets
+		filepath.ToSlash(filepath.Join(nginxPath, "modules-enabled")), // dynamically loaded modules
 	}
 
-	// Create default server config (creates parent dir too)
-	defaultServerPath := filepath.ToSlash(filepath.Join(confPath, "conf.d", "default.conf"))
-	if err := createDefaultServerConfig(ctx, sshPool, primaryMaster, defaultServerPath); err != nil {
-		return nil, fmt.Errorf("failed to create default.conf: %w", err)
+	for _, dir := range nginxDirs {
+		if _, stderr, err := sshPool.Run(ctx, primaryMaster, fmt.Sprintf("mkdir -p '%s'", dir)); err != nil {
+			return nil, fmt.Errorf("failed to create directory %s: %w (stderr: %s)", dir, err, stderr)
+		}
 	}
 
-	// Create default self-signed SSL certificate if it doesn't exist (creates parent dir too)
-	sslPath := filepath.ToSlash(filepath.Join(storagePath, "data", EdgeLoadBalancerDataDir, "ssl"))
+	log.Infow("created nginx directory structure", "root", nginxPath)
+
+	// Create default self-signed SSL certificate if it doesn't exist
+	// nginx-ui can manage certs via its UI, but we provide a fallback for initial HTTPS
+	sslPath := filepath.ToSlash(filepath.Join(nginxPath, "ssl"))
 	if err := createDefaultSSLCertificate(ctx, sshPool, primaryMaster, sslPath); err != nil {
 		log.Warnw("failed to create default SSL certificate", "error", err)
 	}
 
-	log.Infow("✅ Nginx deployment preparation complete", "confPath", confPath)
+	log.Infow("✅ EdgeLoadBalancer deployment preparation complete", "nginxPath", nginxPath)
 	return config, nil
 }
 
@@ -173,19 +188,13 @@ include /etc/nginx/stream.d/*.conf;
 	return nil
 }
 
-// createDefaultServerConfig creates a minimal default server configuration
-// This is a placeholder that gets overwritten by GenerateProxyRulesForServices with the full config
-func createDefaultServerConfig(ctx context.Context, sshPool *ssh.Pool, host string, configPath string) error {
+// createDefaultServerConfig creates a minimal default server configuration in sites-available/
+// with a symlink in sites-enabled/. This is a placeholder that gets overwritten by
+// GenerateProxyRulesForServices with the full config including proxy rules.
+// nginxPath should be the root nginx directory on shared storage (e.g., .../EdgeLoadBalancer/nginx).
+func createDefaultServerConfig(ctx context.Context, sshPool *ssh.Pool, host string, nginxPath string) error {
 	log := logging.L().With("component", "nginx")
 
-	// Ensure parent directory exists
-	parentDir := filepath.ToSlash(filepath.Dir(configPath))
-	if _, stderr, err := sshPool.Run(ctx, host, fmt.Sprintf("mkdir -p '%s'", parentDir)); err != nil {
-		return fmt.Errorf("failed to create parent directory %s: %w (stderr: %s)", parentDir, err, stderr)
-	}
-
-	// Always create/overwrite with a minimal config
-	// The full config with proxy rules will be generated by GenerateProxyRulesForServices
 	defaultConf := `# Default server configuration - managed by dscotctl
 # This file is auto-generated and will be updated with proxy rules during deployment
 
@@ -215,12 +224,11 @@ server {
 }
 `
 
-	writeCmd := fmt.Sprintf("cat > '%s' << 'EOFDEFAULT'\n%sEOFDEFAULT", configPath, defaultConf)
-	if _, stderr, err := sshPool.Run(ctx, host, writeCmd); err != nil {
-		return fmt.Errorf("failed to write default.conf: %w (stderr: %s)", err, stderr)
+	if err := writeSiteConfig(ctx, sshPool, host, nginxPath, "default", defaultConf); err != nil {
+		return fmt.Errorf("failed to write default site config: %w", err)
 	}
 
-	log.Infow("created default.conf", "path", configPath)
+	log.Infow("created default site config", "nginxPath", nginxPath)
 	return nil
 }
 
@@ -270,13 +278,17 @@ type ProxyRule struct {
 	WebSocket   bool   // Whether to enable WebSocket support
 }
 
-// AddProxyRule adds a proxy rule to the Nginx configuration
-// This can be expanded later to support more complex proxy configurations
+// AddProxyRule adds a proxy rule to the Nginx configuration.
+// The config is written to sites-available/ with a symlink in sites-enabled/ for nginx-ui compatibility.
 func AddProxyRule(ctx context.Context, sshPool *ssh.Pool, primaryMaster string, storagePath string, rule ProxyRule) error {
 	log := logging.L().With("component", "nginx", "rule", rule.Name)
 
-	confPath := filepath.ToSlash(filepath.Join(storagePath, "data", EdgeLoadBalancerDataDir, EdgeLoadBalancerConfDir, "conf.d"))
-	ruleFile := filepath.ToSlash(filepath.Join(confPath, fmt.Sprintf("proxy-%s.conf", strings.ToLower(rule.Name))))
+	nginxPath := filepath.ToSlash(filepath.Join(storagePath, "data", EdgeLoadBalancerDataDir, EdgeLoadBalancerNginxDir))
+	siteName := fmt.Sprintf("proxy-%s", strings.ToLower(rule.Name))
+
+	// Remove legacy conf.d version if it exists (migration from old layout)
+	legacyFile := filepath.ToSlash(filepath.Join(nginxPath, "conf.d", fmt.Sprintf("proxy-%s.conf", strings.ToLower(rule.Name))))
+	sshPool.Run(ctx, primaryMaster, fmt.Sprintf("rm -f '%s'", legacyFile)) //nolint:errcheck
 
 	// Build the proxy configuration
 	var proxyConf strings.Builder
@@ -315,13 +327,12 @@ func AddProxyRule(ctx context.Context, sshPool *ssh.Pool, primaryMaster string, 
 	proxyConf.WriteString("    }\n")
 	proxyConf.WriteString("}\n")
 
-	// Write the config file
-	writeCmd := fmt.Sprintf("cat > '%s' << 'EOFPROXY'\n%sEOFPROXY", ruleFile, proxyConf.String())
-	if _, stderr, err := sshPool.Run(ctx, primaryMaster, writeCmd); err != nil {
-		return fmt.Errorf("failed to write proxy rule: %w (stderr: %s)", err, stderr)
+	// Write to sites-available/ and create symlink in sites-enabled/
+	if err := writeSiteConfig(ctx, sshPool, primaryMaster, nginxPath, siteName, proxyConf.String()); err != nil {
+		return fmt.Errorf("failed to write proxy rule site config: %w", err)
 	}
 
-	log.Infow("added proxy rule", "location", rule.Location, "upstream", rule.Upstream, "file", ruleFile)
+	log.Infow("added proxy rule", "location", rule.Location, "upstream", rule.Upstream, "site", siteName)
 	return nil
 }
 
@@ -373,8 +384,46 @@ func createHtpasswdFile(ctx context.Context, sshPool *ssh.Pool, host string, aut
 	return nil
 }
 
+// writeSiteConfig writes a config file to sites-available/ and creates a symlink in sites-enabled/.
+// This follows the standard nginx pattern that nginx-ui expects for site management.
+// The fileName should not include a path prefix (e.g., "default", "proxy-portainer").
+func writeSiteConfig(ctx context.Context, sshPool *ssh.Pool, host string, nginxPath string, fileName string, content string) error {
+	sitesAvailable := filepath.ToSlash(filepath.Join(nginxPath, "sites-available"))
+	sitesEnabled := filepath.ToSlash(filepath.Join(nginxPath, "sites-enabled"))
+
+	availablePath := filepath.ToSlash(filepath.Join(sitesAvailable, fileName))
+	enabledPath := filepath.ToSlash(filepath.Join(sitesEnabled, fileName))
+
+	// Write the config file to sites-available
+	writeCmd := fmt.Sprintf("cat > '%s' << 'EOFSITECONF'\n%sEOFSITECONF", availablePath, content)
+	if _, stderr, err := sshPool.Run(ctx, host, writeCmd); err != nil {
+		return fmt.Errorf("failed to write site config %s: %w (stderr: %s)", availablePath, err, stderr)
+	}
+
+	// Create symlink in sites-enabled (remove existing first to handle updates)
+	symlinkCmd := fmt.Sprintf("ln -sf '%s' '%s'", availablePath, enabledPath)
+	if _, stderr, err := sshPool.Run(ctx, host, symlinkCmd); err != nil {
+		return fmt.Errorf("failed to create symlink %s -> %s: %w (stderr: %s)", enabledPath, availablePath, err, stderr)
+	}
+
+	return nil
+}
+
+// removeSiteConfig removes a site config from sites-available and its symlink from sites-enabled.
+func removeSiteConfig(ctx context.Context, sshPool *ssh.Pool, host string, nginxPath string, fileName string) {
+	sitesAvailable := filepath.ToSlash(filepath.Join(nginxPath, "sites-available"))
+	sitesEnabled := filepath.ToSlash(filepath.Join(nginxPath, "sites-enabled"))
+
+	removeCmd := fmt.Sprintf("rm -f '%s' '%s'",
+		filepath.ToSlash(filepath.Join(sitesEnabled, fileName)),
+		filepath.ToSlash(filepath.Join(sitesAvailable, fileName)),
+	)
+	sshPool.Run(ctx, host, removeCmd) //nolint:errcheck // best-effort cleanup
+}
+
 // GenerateProxyRulesForServices generates Nginx proxy configurations for enabled services with NGINX_PROXY: true
 // Services are identified by their Docker Swarm service name pattern: StackName_ServiceName
+// Configs are written to sites-available/ with symlinks in sites-enabled/ for nginx-ui compatibility.
 // We use variable-based proxy_pass with resolver so Nginx can start even if upstreams haven't started yet.
 func GenerateProxyRulesForServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string, storagePath string, services []ServiceMetadata) error {
 	log := logging.L().With("component", "nginx")
@@ -399,7 +448,7 @@ func GenerateProxyRulesForServices(ctx context.Context, sshPool *ssh.Pool, prima
 	log.Infow("generating Nginx proxy rules for services", "count", len(proxyServices))
 
 	// Create htpasswd files for services with basic auth
-	authPath := filepath.ToSlash(filepath.Join(storagePath, "data", EdgeLoadBalancerDataDir, EdgeLoadBalancerConfDir, "auth"))
+	authPath := filepath.ToSlash(filepath.Join(storagePath, "data", EdgeLoadBalancerDataDir, EdgeLoadBalancerNginxDir, "auth"))
 	for _, svc := range proxyServices {
 		if svc.NginxBasicAuth != "" {
 			if err := createHtpasswdFile(ctx, sshPool, primaryMaster, authPath, svc.Name, svc.NginxBasicAuth); err != nil {
@@ -408,11 +457,14 @@ func GenerateProxyRulesForServices(ctx context.Context, sshPool *ssh.Pool, prima
 		}
 	}
 
-	// Write to default.conf - this is the single server block with health check + proxy rules
-	// This replaces the placeholder created by createDefaultServerConfig
-	confPath := filepath.ToSlash(filepath.Join(storagePath, "data", EdgeLoadBalancerDataDir, EdgeLoadBalancerConfDir, "conf.d"))
-	defaultConfigPath := filepath.ToSlash(filepath.Join(confPath, "default.conf"))
+	// Base nginx path on shared storage
+	nginxPath := filepath.ToSlash(filepath.Join(storagePath, "data", EdgeLoadBalancerDataDir, EdgeLoadBalancerNginxDir))
 
+	// Remove legacy conf.d/default.conf if it exists (migration from old layout)
+	legacyDefault := filepath.ToSlash(filepath.Join(nginxPath, "conf.d", "default.conf"))
+	sshPool.Run(ctx, primaryMaster, fmt.Sprintf("rm -f '%s'", legacyDefault)) //nolint:errcheck
+
+	// Build the default site config (HTTP redirect + HTTPS with all proxy locations)
 	var config strings.Builder
 	config.WriteString("# Default server with proxy rules - auto-generated by dscotctl\n")
 	config.WriteString("# Do not edit manually - regenerated on each deployment\n")
@@ -558,13 +610,12 @@ func GenerateProxyRulesForServices(ctx context.Context, sshPool *ssh.Pool, prima
 
 	config.WriteString("}\n")
 
-	// Write the config file
-	writeCmd := fmt.Sprintf("cat > '%s' << 'EOFDEFAULT'\n%sEOFDEFAULT", defaultConfigPath, config.String())
-	if _, stderr, err := sshPool.Run(ctx, primaryMaster, writeCmd); err != nil {
-		return fmt.Errorf("failed to write default.conf: %w (stderr: %s)", err, stderr)
+	// Write to sites-available/default and create symlink in sites-enabled/
+	if err := writeSiteConfig(ctx, sshPool, primaryMaster, nginxPath, "default", config.String()); err != nil {
+		return fmt.Errorf("failed to write default site config: %w", err)
 	}
 
-	log.Infow("✅ generated Nginx default.conf with proxy rules", "file", defaultConfigPath, "services", len(proxyServices))
+	log.Infow("✅ generated Nginx default site with proxy rules", "services", len(proxyServices))
 
 	// Generate TCP stream configs for services with NGINX_TCP_STREAM
 	if err := generateTCPStreamConfigs(ctx, sshPool, primaryMaster, storagePath, services); err != nil {
@@ -590,7 +641,7 @@ func generateTCPStreamConfigs(ctx context.Context, sshPool *ssh.Pool, primaryMas
 		return nil
 	}
 
-	streamPath := filepath.ToSlash(filepath.Join(storagePath, "data", EdgeLoadBalancerDataDir, EdgeLoadBalancerConfDir, "stream.d"))
+	streamPath := filepath.ToSlash(filepath.Join(storagePath, "data", EdgeLoadBalancerDataDir, EdgeLoadBalancerNginxDir, "stream.d"))
 	streamConfigPath := filepath.ToSlash(filepath.Join(streamPath, "services-stream.conf"))
 
 	var streamConfig strings.Builder

@@ -53,9 +53,8 @@ type DeploymentMetrics struct {
 	Duration      time.Duration
 }
 
-// ClusterInfo contains information about the cluster composition for dynamic constraint handling
+// ClusterInfo contains information about the cluster composition for service deployment
 type ClusterInfo struct {
-	HasDedicatedWorkers       bool              // true if there are nodes with role="worker" (not just managers or "both")
 	AllNodes                  []string          // list of all SSH-accessible nodes for directory creation
 	DistributedStorageEnabled bool              // true if distributed storage is enabled (shared across nodes)
 	PrimaryMaster             string            // primary master node SSH address
@@ -232,10 +231,8 @@ func DeployServices(ctx context.Context, sshPool *ssh.Pool, primaryMaster string
 		StartTime: time.Now(),
 	}
 
-	// Log cluster composition for constraint handling
-	log.Infow("cluster composition for constraint handling",
-		"hasDedicatedWorkers", clusterInfo.HasDedicatedWorkers,
-	)
+	// Log cluster composition
+	log.Infow("cluster composition for service deployment")
 
 	// Discover services
 	services, err := DiscoverServices(serviceDefDir)
@@ -416,14 +413,6 @@ func deployService(ctx context.Context, sshPool *ssh.Pool, primaryMaster string,
 		}
 	}
 
-	// Adjust placement constraints based on cluster composition
-	// If no dedicated workers, replace node.role==worker with node.role==manager
-	processedContent, constraintChanged := adjustPlacementConstraints(processedContent, clusterInfo)
-	if constraintChanged {
-		modified = true
-		log.Infow("adjusted placement constraints for cluster composition", "hasDedicatedWorkers", clusterInfo.HasDedicatedWorkers)
-	}
-
 	// Inject Portainer admin password if specified
 	// The password is bcrypted at runtime and added to the command line
 	if svc.PortainerAdminPassword != "" {
@@ -544,29 +533,7 @@ func deployService(ctx context.Context, sshPool *ssh.Pool, primaryMaster string,
 	return nil
 }
 
-// adjustPlacementConstraints modifies placement constraints in YAML content based on cluster composition.
-// If the cluster has no dedicated workers (all managers or "both"), it replaces node.role==worker
-// with node.role==manager so services can be scheduled on manager nodes.
-// Returns the modified content and a boolean indicating if changes were made.
-func adjustPlacementConstraints(content string, clusterInfo ClusterInfo) (string, bool) {
-	if clusterInfo.HasDedicatedWorkers {
-		// Cluster has dedicated workers, no adjustment needed
-		return content, false
-	}
 
-	// No dedicated workers - replace node.role==worker with node.role==manager
-	// Pattern matches various YAML formats:
-	//   - node.role==worker
-	//   - node.role == worker
-	//   - "node.role==worker"
-	pattern := regexp.MustCompile(`node\.role\s*==\s*worker`)
-	if !pattern.MatchString(content) {
-		return content, false
-	}
-
-	modified := pattern.ReplaceAllString(content, "node.role==manager")
-	return modified, true
-}
 
 // injectPortainerAdminPassword adds the --admin-password flag to Portainer's command line.
 // The password is bcrypted at runtime using cost 10 (Portainer's default).
@@ -1265,7 +1232,6 @@ func runInitializationScript(ctx context.Context, sshPool *ssh.Pool, targetNode 
 export SERVICE_DATA_DIR='%s'
 export SERVICE_DEFINITIONS_DIR='%s'
 export PRIMARY_MASTER='%s'
-export HAS_DEDICATED_WORKERS='%t'
 export DISTRIBUTED_STORAGE='%t'
 export NODE_HOSTNAME='%s'
 `,
@@ -1273,7 +1239,6 @@ export NODE_HOSTNAME='%s'
 		defaults.ServiceDataSubdir,
 		defaults.ServiceDefinitionsSubdir,
 		clusterInfo.PrimaryMaster,
-		clusterInfo.HasDedicatedWorkers,
 		clusterInfo.DistributedStorageEnabled,
 		nodeHostname,
 	)
