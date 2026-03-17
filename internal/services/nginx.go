@@ -35,6 +35,17 @@ const (
 	EdgeLoadBalancerNginxUIDir = "nginx-ui"
 )
 
+// nginxACLSnippet contains the RFC1918 + CGNAT allow rules with deny all.
+// Applied at the server block level to restrict access to private networks only.
+const nginxACLSnippet = `    # Access control - RFC1918 and CGNAT only
+    allow 10.0.0.0/8;
+    allow 172.16.0.0/12;
+    allow 192.168.0.0/16;
+    allow 100.64.0.0/10;
+    allow 127.0.0.0/8;
+    deny all;
+`
+
 // IsEdgeLoadBalancerService checks if a service is the EdgeLoadBalancer (Nginx)
 func IsEdgeLoadBalancerService(serviceName string) bool {
 	pattern := regexp.MustCompile(EdgeLoadBalancerServiceNamePattern)
@@ -203,6 +214,14 @@ server {
     listen [::]:80 default_server;
     server_name _;
 
+    # Access control - RFC1918 and CGNAT only
+    allow 10.0.0.0/8;
+    allow 172.16.0.0/12;
+    allow 192.168.0.0/16;
+    allow 100.64.0.0/10;
+    allow 127.0.0.0/8;
+    deny all;
+
     # Docker embedded DNS resolver - allows Nginx to start even if upstreams don't exist yet
     resolver 127.0.0.11 valid=10s ipv6=off;
     resolver_timeout 5s;
@@ -306,6 +325,8 @@ func AddProxyRule(ctx context.Context, sshPool *ssh.Pool, primaryMaster string, 
 	proxyConf.WriteString("server {\n")
 	proxyConf.WriteString("    listen 80;\n")
 	proxyConf.WriteString("    server_name _;\n\n")
+	proxyConf.WriteString(nginxACLSnippet)
+	proxyConf.WriteString("\n")
 
 	// Location block
 	proxyConf.WriteString(fmt.Sprintf("    location %s {\n", rule.Location))
@@ -477,6 +498,8 @@ func GenerateProxyRulesForServices(ctx context.Context, sshPool *ssh.Pool, prima
 	config.WriteString("    listen 80 default_server;\n")
 	config.WriteString("    listen [::]:80 default_server;\n")
 	config.WriteString("    server_name _;\n\n")
+	config.WriteString(nginxACLSnippet)
+	config.WriteString("\n")
 	config.WriteString("    # Health check endpoint (available over HTTP for Docker healthcheck)\n")
 	config.WriteString("    location /health {\n")
 	config.WriteString("        access_log off;\n")
@@ -499,6 +522,8 @@ func GenerateProxyRulesForServices(ctx context.Context, sshPool *ssh.Pool, prima
 	config.WriteString("    listen 443 ssl default_server;\n")
 	config.WriteString("    listen [::]:443 ssl default_server;\n")
 	config.WriteString("    server_name _;\n\n")
+	config.WriteString(nginxACLSnippet)
+	config.WriteString("\n")
 	config.WriteString("    # SSL configuration - uses default self-signed cert until replaced\n")
 	config.WriteString("    ssl_certificate /etc/nginx/ssl/default.crt;\n")
 	config.WriteString("    ssl_certificate_key /etc/nginx/ssl/default.key;\n")

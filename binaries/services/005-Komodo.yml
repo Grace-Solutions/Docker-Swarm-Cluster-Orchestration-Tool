@@ -18,10 +18,10 @@ services:
     environment:
       TZ: UTC
       MONGO_INITDB_ROOT_USERNAME: komodo
-      MONGO_INITDB_ROOT_PASSWORD: ${KOMODO_DB_PASSWORD:-ChangeMe123!}
+      MONGO_INITDB_ROOT_PASSWORD: 9dcb69e0553bb7747c7933eba7b09adc6f871890438f7760
     volumes:
-      - ${STORAGE_MOUNT_PATH}/data/Komodo/mongo-data:/data/db:rw
-      - ${STORAGE_MOUNT_PATH}/data/Komodo/mongo-config:/data/configdb:rw
+      - ${STORAGE_MOUNT_PATH}/data/Komodo/Database/Data:/data/db:rw
+      - ${STORAGE_MOUNT_PATH}/data/Komodo/Database/Config:/data/configdb:rw
     networks:
       - INTERNAL
     deploy:
@@ -62,16 +62,16 @@ services:
       # Database connection
       KOMODO_DATABASE_ADDRESS: Komodo_KomodoMongo:27017
       KOMODO_DATABASE_USERNAME: komodo
-      KOMODO_DATABASE_PASSWORD: ${KOMODO_DB_PASSWORD:-ChangeMe123!}
+      KOMODO_DATABASE_PASSWORD: 9dcb69e0553bb7747c7933eba7b09adc6f871890438f7760
       # Core settings
       KOMODO_TITLE: Komodo
       KOMODO_LOCAL_AUTH: "true"
       KOMODO_INIT_ADMIN_USERNAME: admin
-      KOMODO_INIT_ADMIN_PASSWORD: ${KOMODO_ADMIN_PASSWORD:-ChangeMe123!}
+      KOMODO_INIT_ADMIN_PASSWORD: 3d273598e5318f0cb8a1d14d3ef5f8c9786710ba213c0741
       KOMODO_DISABLE_USER_REGISTRATION: "false"
       KOMODO_ENABLE_NEW_USERS: "false"
       # Passkey for Core <-> Periphery authentication
-      KOMODO_PASSKEY: ${KOMODO_PASSKEY:-a_random_passkey_change_me}
+      KOMODO_PASSKEY: d2946c98df1e1792866e84c289f07c2edf72be72dea3d5f0
       # First server - connects to local Periphery via overlay network
       KOMODO_FIRST_SERVER: https://Komodo_KomodoPeriphery:8120
       KOMODO_FIRST_SERVER_NAME: Local
@@ -79,8 +79,8 @@ services:
       KOMODO_MONITORING_INTERVAL: "15-sec"
       KOMODO_RESOURCE_POLL_INTERVAL: "1-hr"
       # Security
-      KOMODO_WEBHOOK_SECRET: ${KOMODO_WEBHOOK_SECRET:-a_random_webhook_secret}
-      KOMODO_JWT_SECRET: ${KOMODO_JWT_SECRET:-a_random_jwt_secret}
+      KOMODO_WEBHOOK_SECRET: bda73f95cd1ce8cd0ab7ea10c606b2ea349ec41747960136
+      KOMODO_JWT_SECRET: 12b9b1558516647c924d86f17accd6058e5dbc98613452f0
       KOMODO_JWT_TTL: "1-day"
       KOMODO_DISABLE_CONFIRM_DIALOG: "true"
     volumes:
@@ -129,7 +129,7 @@ services:
     environment:
       TZ: UTC
       PERIPHERY_ROOT_DIRECTORY: /etc/komodo
-      PERIPHERY_PASSKEYS: ${KOMODO_PASSKEY:-a_random_passkey_change_me}
+      PERIPHERY_PASSKEYS: d2946c98df1e1792866e84c289f07c2edf72be72dea3d5f0
       PERIPHERY_SSL_ENABLED: "true"
       PERIPHERY_DISABLE_TERMINALS: "false"
       PERIPHERY_INCLUDE_DISK_MOUNTS: /etc/hostname
